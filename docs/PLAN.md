@@ -11,7 +11,7 @@ The project must be usable without the original author's accounts, paths, device
 ## Out of scope and future expansion
 
 - **Restricted agent tools:** Later, reuse CLI authentication while exposing only Mia-configured tools, without inheriting personal MCP servers, plugins, hooks, or permissions. Keep authentication reuse separate from tool configuration and approval policies in agent adapters so this can be added without rewriting orchestration. Future enforcement must cover the active agent and worker agents using either default or big-gun models, and bypass paths such as unrestricted shell access. Implementing or proving this isolation is not part of the current deliverables; existing approval and interruption requirements still apply.
-- **Job-service implementation:** Build scheduling/monitoring in a separate repo. This plan includes its contract and integration (deliverable 7), not its engine or external-service shutdown policy. The contract covers job and job-run identities, schedules/triggers, deterministic or agent work, authorization, notifications, history, cancellation, and recovery.
+- **Job-service implementation:** Build scheduling/monitoring in a separate repo. This plan includes its contract and integration (deliverable 8), not its engine or external-service shutdown policy. The contract covers job and job-run identities, schedules/triggers, deterministic or agent work, authorization, notifications, history, cancellation, and recovery.
 - **Other deferred work:** Keybinding setup; model-weight fine-tuning (prompt tuning remains in scope); licensing, packaging, and publication; a second production UI adapter (the minimal adapter-boundary check remains in scope).
 
 ## Terminology
@@ -78,7 +78,7 @@ Avoid unqualified “session”: distinguish conversation, voice connection, and
 
 - Start with [A2UI](https://a2ui.org/) behind a replaceable UI adapter. Keep conversation/task behavior, content meaning, and UI-event handling independent of that choice. Replacement must not require rewriting core orchestration. Demonstrate the boundary with a minimal alternative/test UI adapter.
 - Require compact, rich, versioned display messages, incremental updates, and references to large data. Cover text, metrics, charts, tables, test results, image choices, and simple layouts. Ordinary output must not require generated HTML.
-- Provide an optional app-style singleton desktop window and phone visuals. The active agent can open useful views and use a configured Hyprland MCP integration to move/fullscreen the host window. Hide view dismisses visuals without stopping voice or tasks; Close shuts the client.
+- Provide an optional app-style singleton desktop window and phone visuals. The active agent can open useful views and use a configured Hyprland MCP integration to move/fullscreen the host window. Hide view dismisses visuals without stopping voice or tasks; “close the view” has the same meaning. Close Mia shuts the client. When asked to show an already visible view, report that it is visible rather than creating another window. If it is on another workspace, offer to switch when Hyprland MCP or equivalent window control is available; otherwise explain the limitation.
 - Mia receives each view's current dimensions and changes. Existing content remains usable during resize; the agent decides whether context warrants a content change. More space may prompt an offer of additional detail, not automatic new analysis on every resize.
 - Zooming, sorting, and expanding existing content work directly. Meaningful clicks, such as choosing a PNG, can reach Mia as conversational input equivalent to a spoken choice. Requests for new data, analysis, or external actions go through the agent and existing permissions.
 
@@ -90,71 +90,77 @@ Avoid unqualified “session”: distinguish conversation, voice connection, and
 - Clients send diagnostic state snapshots on errors, reconnects, device handoffs, and significant state changes, plus a lightweight periodic heartbeat while running. Capture active view/dimensions, client/UI version, connection/microphone/playback state, recent interaction events, errors, and timing. Link records by client, conversation, task, and view identifiers with capture/receipt timestamps; avoid repeatedly sending unchanged detail.
 - Store client diagnostics with server logs under the same retention policy. Expose relevant records through an agent diagnostic tool, rather than injecting them into every model request. Exclude credentials and sensitive approval content. Screenshots are optional and separately configurable; routine snapshots are structured state, not continuous screen recording. Missing or stale diagnostics must be apparent, including after disconnection or Close.
 
-## Deliverable 1 — Voice basics
+## Delivery approach
 
-One desktop client, the Mia server, the voice model (GPT-Live), and the active agent using the configured default model. Include hold/release, hands-free mode, interruption, concise speech, errors, logging, and basic client diagnostics from the outset.
+Each deliverable extends a working user journey. Provide one repeatable demo with expected results and test relevant failure cases as soon as the capability appears. Keep an acceptance record identifying each requirement as demonstrated live, verified with a test substitute, or blocked. Missing required capabilities block acceptance; a substitute is not a live pass.
 
-**User acceptance test:** Ask a substantive question and follow-up; interrupt a long answer; switch to hands-free. Inspect transcripts, audio, timing, model attribution, and prompt snapshots. Verify the conversation identifies its exact prompts, architecture/design revision, and running builds, with snapshots still retrievable after a later prompt edit.
+Establish shared agent-adapter checks for approval and interruption in deliverable 1 and repeat them for each runtime. Establish UI-adapter content/event checks in deliverable 4. Re-run relevant earlier journeys as capabilities expand. End-to-end evaluation is continuous, not a final milestone.
 
-**Pass:** Substantive questions demonstrably reach the active agent. Coherent turns, no stale playback after interruption, no microphone transmission outside the chosen listening mode, and visible failures without silently replayed work. Client state changes and heartbeat timestamps can be correlated with server events without recording credentials or sensitive approval content.
+## Deliverable 1 — Prove one agent adapter
 
-## Deliverable 2 — Client/server lifecycle
+Connect a minimal text client through the Mia server to the active agent using one configured agent runtime and default model. Prove streamed results, tool approval requests/decisions, and interruption before adding voice. Start logs, basic client diagnostics, and exact prompt/configuration/architecture/build references here.
 
-Implement Close, reconnect, Continue/New conversation, and Quit, with persistent conversation/task records. Keep ordinary task persistence distinct from the separate job service.
+**User acceptance test:** Send a text task, inspect streamed results, approve one controlled MCP call and reject another. Require approval on every call; verify approval cannot be reused for another call or changed arguments. Interrupt a running task and inspect the recorded outcome.
 
-**User acceptance test:** Start a controlled long task, close the client, reopen and continue, then start fresh. Disconnect unexpectedly. Quit Mia with work active, verify its server and clients have stopped, and restart afterward.
+**Pass:** No execution before required approval. New consequential actions are blocked during interruption; in-flight actions that cannot stop are reported honestly. Failures are visible, and unsupported approval policies are not silently weakened. Logs identify the actual agent, prompts, and builds; retained snapshots survive later edits. Use controlled fixtures for consequential tests.
 
-**Pass:** Close preserves the server and running work; reconnect exposes results and pending input without duplicate execution. Fresh context is clean. Quit stops Mia's server and clients, records task outcomes, and reports uncancellable work. Notification delivery is completed in deliverable 7.
+## Deliverable 2 — Add desktop voice
 
-## Deliverable 3 — Phone and device handoff
+Add the voice model (GPT-Live), hold-to-speak/release-to-submit, hands-free conversation, and concise spoken results to the proven agent path.
 
-Provide remote voice and basic visual access to the same host with explicit bidirectional device handoff. Voice and visuals share one active client. Full generated views follow in deliverable 6.
+**User acceptance test:** Ask a substantive question and follow-up, approve/reject a tool request through the client, interrupt speech while work is running, and switch to hands-free mode.
 
-**User acceptance test:** Start on desktop, open phone, decline then accept device handoff, continue the same conversation, and transfer back. Verify voice and visual state move together and the previous client is no longer active. Test loss of connectivity.
+**Pass:** Substantive questions reach the active agent. No stale playback after interruption and no microphone transmission outside the chosen listening mode. Verify no new consequential action starts while a correction is being heard. Record audio, transcripts, actual playback, and observable timing without credentials or sensitive approval content.
 
-**Pass:** One conversation and one active client for both voice and visuals; no duplicate agents/actions or unsolicited microphone activation. Conversation and visual state survive device handoff. Access is limited to the user's authorized clients; unavailable-host behavior is clear.
+## Deliverable 3 — Complete the task lifecycle
 
-## Deliverable 4 — Tools and execution
+Implement Close, reconnect, Continue/New conversation, basic task notifications, and Quit independently of the job service.
 
-Connect existing tools and browser access. Establish per-tool approval policies, client approval requests, outcome verification, and tool-specific concurrency.
+**User acceptance test:** Start a long task, Close, receive its completion notification, reopen and continue. Repeat with a failure and a pending approval request. Start a fresh conversation while prior work remains active. Disconnect unexpectedly, then test Quit and restart.
 
-**User acceptance test:** Find and book a haircut within supplied constraints. Interrupt to change a preference before submission. Run parallel searches alongside serialized computer actions. Simulate losing the response after booking submission. Configure a test MCP tool to require approval on every call; approve one, reject another, and hand off devices while a third is pending.
+**Pass:** Close preserves server-side work; notifications offer resumption of the originating conversation without activating the microphone or speaking automatically. Pending approvals survive reconnect, and silence is never consent. Starting fresh does not inherit past context or cancel tasks. No duplicate execution after reconnection or uncertain outcomes. Quit stops Mia's server/clients, preserves records, and reports uncancellable work. Diagnostics distinguish unavailable clients from stale state.
 
-**Pass:** Correct host/browser context and booking; no execution before required approval, no reused approval for another/changed call, no blind duplicate submission. Pending approvals reach the active client across device handoff/reconnect. Unsupported approval policies are reported rather than claimed enforced. Explicitly test a running agent attempting another consequential action while the user speaks: it must be blocked. Report in-flight actions that cannot stop. Automated consequential tests use controlled fixtures, not repeated live bookings.
+## Deliverable 4 — Add one interactive view
 
-## Deliverable 5 — Agent switching and recall
+Introduce the replaceable UI adapter for A2UI with a small chart or image-choice view, incremental updates, UI events, dimension reporting, and desktop view/window control.
 
-Support all three existing agent runtimes, explicit escalation, parallel independent tasks, deliberate task transfer, and searchable past conversations.
+**User acceptance test:** Ask Mia to show a view, select an image by click and by voice, and Hide view while continuing to talk. Ask to show it when it is already visible, then when its window is on another workspace. Resize, move, and fullscreen it where supported.
 
-**User acceptance test:** Start with each configured default; run two independent tasks, escalate one, and check the other retains its model. Start fresh and retrieve an earlier decision.
+**Pass:** One desktop window; if already visible on the current workspace, Mia says so without creating another. If on another workspace, Mia offers to switch when Hyprland MCP or an equivalent integration is available. Missing window visibility/control support is explained; no claimed action without evidence. “Close the view” means Hide view, while Close Mia closes the client. Dimensions reach Mia and existing content remains usable; the agent decides whether to offer more detail. A meaningful selection reaches the correct conversation/task once. A minimal substitute UI adapter preserves content/event behavior without core changes. Invalid display content cannot execute arbitrary local actions. Capture display errors, message sizes, and render timing.
 
-**Pass:** Correct model attribution, no automatic escalation or duplicate ownership, and sourced history treated as past context rather than a new command. Repeat interruption/concurrency checks for each agent runtime. Missing required capabilities block the affected milestone; merely reporting them is not a pass.
+## Deliverable 5 — Take the journey to the phone
 
-## Deliverable 6 — Visual companion
+Extend the working voice, view, approval, and task-notification journey to a phone client, with explicit bidirectional device handoff.
 
-Deliver the replaceable UI adapter for A2UI, compact updates, interactive views, dimension awareness, desktop window control, and agent retrieval of relevant client diagnostics.
+**User acceptance test:** Start on desktop, open phone, decline then accept device handoff, continue with voice and visuals, and transfer back. Approve/reject a pending call after handoff. Close during a task and reopen from a phone notification. Exercise connection loss and host unavailability.
 
-**User acceptance test:** Show Apple's stock price over seven days; switch to a table. Move/fullscreen the window, resize it, and view on phone. Accept an offer of more detail. Choose a PNG by click and by voice; inspect and expand test failures. Trigger a controlled rendering failure, then ask Mia why the chart disappeared; verify it retrieves the relevant client state and error without requiring a screenshot or reproduction.
+**Pass:** One active conversation and client, with voice and visuals moving together and no duplicate agents/actions. Only authorized clients can connect; no unsolicited microphone activation or silently queued consequential commands. Conversation, visual state, and pending approvals remain correctly associated. Phone supports showing/hiding views; workspace controls apply to desktop only.
 
-**Pass:** Correct incremental updates and sourced market data with dates/timezone and non-trading-day treatment. Dimensions reach Mia; context determines whether to offer more detail. Selection reaches the correct conversation/task once. Desktop remains singleton. Invalid content cannot execute arbitrary local actions. A minimal substitute UI adapter demonstrates equivalent content/event behavior without core changes. Record render timings and message sizes for later tuning. Diagnosis of the controlled failure cites the captured evidence; absent or stale records are reported as uncertainty, not invented causes.
+## Deliverable 6 — Expand agents and concurrency
 
-## Deliverable 7 — Job-service integration and notifications
+Add the remaining agent runtimes, explicit big-gun escalation, task transfer, worker agents, and tool-specific parallelism. Use the same adapter acceptance checks for each runtime.
 
-Notify about long-task completion/failure/input needs and resume the originating conversation. Integrate with the separately owned job service described under Out of scope and future expansion; use a contract substitute until available.
+**User acceptance test:** Repeat the text/voice/approval/interruption journey with each configured runtime. Run parallel searches alongside serialized computer-use actions. Escalate one of two independent tasks and verify the other retains its assigned model.
 
-**Separate-repo interface:** CLI/API to create, inspect, list, update, pause/resume, and cancel jobs and inspect job runs/results. Describe schedule/trigger, deterministic action or agent task, model when needed, constraints/authorization, notification destination, and originating conversation. Expose stable job and job-run identities, status, errors, and cancellation outcomes. Specify restart recovery, missed job runs, duplicate suppression, and monitoring freshness per job.
+**Pass:** Correct model attribution; no automatic escalation, duplicate execution ownership, or conflicting use of shared browser/desktop/file state. Task transfer preserves context. Default and big-gun agents honor approval policies and interruption. Any runtime missing required behavior remains blocked rather than being marked supported.
 
-**User acceptance test:** Close the client during a long task, receive a completion notification to reopen it, and resume from phone. Schedule a daily 10 am vacuum action without model involvement per run; create an intelligent X-news monitor notifying the user on a configured Slack destination. Inspect/cancel both directly through the job-service CLI.
+## Deliverable 7 — Add recall and richer workflows
 
-**Pass:** Results remain retrievable if delivery is delayed. Notifications resume the right conversation without duplicating work or automatically speaking. Jobs persist independently and notify within authorized criteria. Report actual monitoring latency/access limits. Contract tests alone do not satisfy live integration acceptance; the job service is a dependency.
+Add sourced past-conversation retrieval, richer charts/tables/metrics/test reports, agent retrieval of client diagnostics, and substantial browser/coding workflows.
 
-## Deliverable 8 — End-to-end acceptance and evaluation
+**User acceptance test:** Start fresh and retrieve an earlier decision. Show Apple's stock price over seven days, switch to a table, and accept an offer of more detail after enlarging the view. Find/book a haircut within configured constraints; build and test a Dreame vacuum-control plugin and show the test report. Trigger a controlled rendering failure and ask why the chart disappeared.
 
-Complete the haircut booking, build/test a Dreame vacuum-control plugin, and monitor X for company breaking news with Slack notification. The plugin is an acceptance task for Mia, not an embedded Mia integration requirement.
+**Pass:** Retrieved history is identifiable as past context, not a new command. Market data has sources, dates/timezone, and non-trading-day treatment. Booking obeys approval policy; simulate a lost submission response and verify the outcome before retrying. Plugin outcomes are verified with relevant tests; device-dependent checks identify required hardware. The plugin is an acceptance task, not a required embedded Mia integration. Client diagnostics support an evidence-based explanation of the controlled UI failure without requiring reproduction; absent/stale evidence is reported as uncertainty. Repeat representative journeys across devices and compare prompt versions without replaying real-world side effects.
 
-**User acceptance test:** Run those workflows across desktop/phone with visuals; interrupt, hand off, close, and reconnect during work. Separately verify clean shutdown with Quit. Inspect full conversation/task/job records. Compare representative tasks before and after a prompt change.
+## Deliverable 8 — Integrate the job service
 
-**Pass:** Verified outcomes, usable recovery, understandable failures, and traceable actions across clients, agents, views, and jobs. Test doubles cover consequential failures; final live checks require actual services/devices and existing permissions. Unavailable required dependencies remain explicit blockers.
+Connect the separate job service for deterministic schedules and intelligent monitoring, reusing the established notification/resumption journey. Ordinary long-running Mia tasks must already work without this service.
+
+**Separate-repo interface:** CLI/API to create, inspect, list, update, pause/resume, and cancel jobs and inspect job runs/results. Include schedules/triggers, deterministic actions or agent tasks, model where needed, authorization, notification destination, originating conversation, stable identities, status/errors, cancellation outcomes, restart recovery, missed runs, duplicate suppression, and monitoring freshness.
+
+**User acceptance test:** Schedule a daily 10 am vacuum action without model involvement per job run. Create an intelligent X-news monitor for company breaking news that notifies a configured Slack destination. Inspect/cancel both through Mia and directly through the job-service CLI. Close Mia's client and verify notifications still offer the correct conversation on return.
+
+**Pass:** Jobs persist independently and execute/notify within authorized criteria without duplicates. Results remain retrievable if notification delivery is delayed. State actual monitoring access/latency limits. Use a contract substitute while the separate service is unavailable, but mark live job acceptance blocked until the real service and integrations pass. Repeat relevant earlier journeys to verify integration preserves voice, approvals, views, and lifecycle behavior.
 
 ## Prompt budget and implementation guidance
 
