@@ -98,6 +98,8 @@ Establish shared agent-adapter checks for approval and interruption in deliverab
 
 ## Deliverable 1 — Prove one agent adapter
 
+Detailed implementation plan and C4 diagrams: [D1 implementation plan](D1/PLAN.md).
+
 Connect a minimal text client through the Mia server to the active agent using one configured agent runtime and default model. Prove streamed results, tool approval requests/decisions, and interruption before adding voice. Start logs, basic client diagnostics, and exact prompt/configuration/architecture/build references here.
 
 **User acceptance test:** Send a text task, inspect streamed results, approve one controlled MCP call and reject another. Require approval on every call; verify approval cannot be reused for another call or changed arguments. Interrupt a running task and inspect the recorded outcome.
