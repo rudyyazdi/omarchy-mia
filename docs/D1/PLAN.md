@@ -263,7 +263,7 @@ Connect transcript, task/tool/approval/interruption timelines, diagnostics, outp
 | 5. Interruption path | Atomic action gate, cancellation mapping, honest outcomes | Controlled races cannot start an action after the gate closes; uncancellable/unknown effects are shown accurately. |
 | 6. Evidence and acceptance | Basic diagnostics, whole-conversation report/export, shared adapter checks, setup instructions, demo script and acceptance record | Export integrity and completeness checks plus required adapter checks pass; the live user demo is accepted before scope expands. |
 
-Use scripted adapter substitutes for deterministic protocol/state tests. Reuse the same behavioral assertions against the real adapter wherever its interface permits. Substitutes validate Mia's logic but cannot establish real runtime enforcement.
+Use scripted adapter substitutes for deterministic protocol/state tests. Reuse the same behavioral assertions against the real adapter wherever its interface permits. Substitutes validate Mia's logic but cannot establish real runtime enforcement. Run the live-lane scenarios through a prompt evaluation harness such as promptfoo, so that agent-prompt versions are compared on fixture-ledger evidence across repeated runs and the live rows of the acceptance record are generated from the same results.
 
 ## Verification and user acceptance
 
