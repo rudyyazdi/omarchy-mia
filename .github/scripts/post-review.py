@@ -516,7 +516,8 @@ def preserve_ids_from_prior(prior):
 def post():
     comment = find_action_comment()
     if not comment:
-        return 1
+        print("no action comment to convert; skipping post")
+        return 0
 
     payload = extract_json(comment["body"])
     if not isinstance(payload, dict):
