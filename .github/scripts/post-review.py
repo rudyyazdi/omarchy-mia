@@ -306,14 +306,11 @@ def has_human_reply(thread):
 def serialize_thread(thread):
     comments = []
     for comment in thread.get("comments", {}).get("nodes") or []:
-        body = comment.get("body") or ""
-        if len(body) > 600:
-            body = body[:600] + "…"
         comments.append(
             {
                 "id": comment.get("databaseId"),
                 "author": (comment.get("author") or {}).get("login"),
-                "body": body,
+                "body": comment.get("body") or "",
                 "created_at": comment.get("createdAt"),
             }
         )
@@ -428,32 +425,36 @@ def resolve_thread(thread_id):
 
 def apply_thread_actions(actions, prior):
     if not isinstance(actions, list):
-        return set()
+        return False
     known = {t.get("thread_id") for t in prior if t.get("thread_id")}
-    touched = set()
+    failed = False
     for action in actions:
         if not isinstance(action, dict):
+            failed = True
             continue
         thread_id = action.get("thread_id")
         kind = (action.get("action") or "").lower().strip()
         body = (action.get("body") or "").strip()
         if not thread_id or thread_id not in known:
             print(f"warn: skipping unknown thread action: {action!r}")
+            failed = True
             continue
         if kind == "reply":
             if not body:
                 print(f"warn: reply on {thread_id} missing body")
+                failed = True
                 continue
-            if reply_to_thread(thread_id, body, prior):
-                touched.add(thread_id)
+            if not reply_to_thread(thread_id, body, prior):
+                failed = True
         elif kind == "resolve":
-            if body:
-                reply_to_thread(thread_id, body, prior)
-            if resolve_thread(thread_id):
-                touched.add(thread_id)
+            if body and not reply_to_thread(thread_id, body, prior):
+                failed = True
+            if not resolve_thread(thread_id):
+                failed = True
         else:
             print(f"warn: unknown thread action {kind!r} on {thread_id}")
-    return touched
+            failed = True
+    return failed
 
 
 def finding_text(body):
@@ -625,7 +626,9 @@ def post():
         new_review_id = review["id"]
         print(f"posted review {new_review_id} with {len(comments)} inline comment(s)")
 
-    apply_thread_actions(actions, prior)
+    if apply_thread_actions(actions, prior):
+        print("warn: some thread actions failed; leaving action comment in place")
+        return 1
 
     status, _ = req("DELETE", f"/repos/{REPO}/issues/comments/{comment['id']}")
     print(f"deleted action comment: {status}")
