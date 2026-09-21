@@ -138,9 +138,16 @@ def is_bot(item):
 
 def extract_json(body):
     body = body.replace(MARKER, "")
+    parsed = parse_json_object(body)
+    if parsed is not None:
+        return parsed
     fenced = re.search(r"```(?:json)?\s*(.*?)```", body, re.S)
     if fenced:
-        body = fenced.group(1)
+        return parse_json_object(fenced.group(1))
+    return None
+
+
+def parse_json_object(body):
     start = body.find("{")
     if start < 0:
         return None
@@ -471,7 +478,7 @@ def finding_already_open(path, line, body, prior, resolving):
             continue
         for comment in thread.get("comments") or []:
             existing = finding_text(comment.get("body"))
-            if existing and (want == existing or want in existing or existing in want):
+            if existing and want == existing:
                 return True
     return False
 
@@ -488,10 +495,9 @@ def cleanup_old(new_review_id, preserve_comment_ids):
         for thread in threads:
             if not ours(thread):
                 continue
-            if has_human_reply(thread) or thread.get("isResolved"):
-                for comment in thread.get("comments", {}).get("nodes") or []:
-                    if comment.get("databaseId") is not None:
-                        keep_comment_ids.add(comment["databaseId"])
+            for comment in thread.get("comments", {}).get("nodes") or []:
+                if comment.get("databaseId") is not None:
+                    keep_comment_ids.add(comment["databaseId"])
 
         for comment in comments:
             if not is_bot(comment):
