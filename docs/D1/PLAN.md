@@ -1,6 +1,6 @@
 # D1 implementation plan: prove one agent adapter
 
-Proposed; not implemented or runtime-verified. Expands [D1](../PLAN.md#deliverable-1--prove-one-agent-adapter); parent requirements remain authoritative. See [tests](TEST-PLAN.md) and [records](CONVERSATION-RECORDS.md).
+Implemented (see [capability record](CAPABILITY-RECORD.md) and [acceptance record](ACCEPTANCE-RECORD.md)); awaiting the maintainer acceptance checkpoint. Expands [D1](../PLAN.md#deliverable-1--prove-one-agent-adapter); parent requirements remain authoritative. See [tests](TEST-PLAN.md) and [records](CONVERSATION-RECORDS.md).
 
 ## Outcome and scope
 
@@ -197,7 +197,7 @@ sequenceDiagram
     Server->>Records: Persist observed outcome, or uncertainty after bounded timeout
     Server-->>Client: interruption_outcome with actual action status
     Client-->>User: Show what stopped and what did not
-    Note over Server,Claude: No automatic retry or gate reopening; unresolved effects block conflicting work
+    Note over Server,Claude: No automatic retry or gate reopening; unknown outcomes are reported to the model on its next turn
 ```
 
 If release wins the race, the call is in flight and must be reported as such. Cancellation acknowledgement alone is not evidence that the tool's external effect stopped. These orderings become deterministic acceptance tests using the fixture's synchronization barriers.
@@ -234,7 +234,7 @@ Task states: `running`, `awaiting_approval`, `interrupting`, then `completed`, `
 
 On interruption, atomically close the gate for new consequential actions and advance the execution epoch before requesting runtime cancellation. Invalidate unresolved approvals from the previous epoch. Serialize approval release and interruption through the same controller so their race has a recorded order: a released action is already in flight; an interruption that wins prevents release.
 
-Record and show which in-flight actions were cancelled, completed, remain running, or have unknown outcomes. Sending a cancel request or killing a CLI process does not prove an external action stopped. Keep the task interrupting while an outcome is being resolved; on a bounded timeout report uncertainty and do not automatically retry. Require a new explicit user turn before opening a new execution epoch, and block conflicting work while prior effects remain unresolved.
+Record and show which in-flight actions were cancelled, completed, remain running, or have unknown outcomes. Sending a cancel request or killing a CLI process does not prove an external action stopped. Keep the task interrupting while an outcome is being resolved; on a bounded timeout report uncertainty and do not automatically retry. Require a new explicit user turn before opening a new execution epoch. Unknown outcomes are not enforced by the harness beyond that: the next turn carries a Mia-authored note listing them, and the configured per-tool policy applies unchanged (an `allow` tool stays `allow`); whether repeating an action could double an effect is the model's judgement, informed by that note.
 
 ### Records and basic diagnostics
 

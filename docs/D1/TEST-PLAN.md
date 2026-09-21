@@ -1,6 +1,6 @@
 # D1 test plan
 
-Proposed harness. Fixtures and Mia commands do not exist yet. Requirements: [plan](PLAN.md), [records](CONVERSATION-RECORDS.md). No real services or consequential effects.
+Implemented: fixture in `fixtures/controlled-mcp`, H lane in `tests/acceptance/src`, live lane in `tests/acceptance/promptfoo` (`npm run live`). Deviations are noted inline. Requirements: [plan](PLAN.md), [records](CONVERSATION-RECORDS.md). No real services or consequential effects.
 
 ## Setup
 
@@ -39,6 +39,8 @@ Harness writes `settings.json`:
 ```
 
 Allow skips prompts. Ask requires confirmation per call. Deny wins over ask; ask wins over allow. Do not use a server-wide allow rule for the approval fixtures. [Permission rules](https://code.claude.com/docs/en/permissions).
+
+> **Implementation deviation.** Mia writes this settings layer itself from the profile's `toolPolicy`: `deny` becomes a runtime `deny` rule; every other tool becomes a runtime `ask` rule so the approval bridge sees each call, and Mia's `allow` policy is applied *at the bridge* without a client prompt. A runtime `allow` rule would bypass the bridge and make the tool ungateable during interruption. Mia interrupts with SIGKILL, not SIGTERM, because of finding F1 in the capability record.
 
 For interruption coverage, use a second profile: move `mcp__d1__change` from `ask` to `allow`; leave `slow` approval-controlled. This proves gating independently of approval prompts.
 
