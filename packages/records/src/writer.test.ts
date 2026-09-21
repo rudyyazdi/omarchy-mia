@@ -22,7 +22,10 @@ afterEach(() => {
 describe("record writer", () => {
   it("enforces foreign keys and rolls back a failed transaction atomically", () => {
     const prov = writer.createProvenanceSet("test");
-    const conv = writer.createConversation({ provenanceSetId: prov, runtimeConversationId: "rt-1" });
+    const conv = writer.createConversation({
+      provenanceSetId: prov,
+      runtimeConversationId: "rt-1",
+    });
     expect(() =>
       catalog.transaction(() => {
         writer.appendEvent({ conversationId: conv.id, type: "a", payload: { ok: true } });
@@ -34,8 +37,15 @@ describe("record writer", () => {
 
   it("assigns a dense per-conversation sequence and redacts payloads", () => {
     const prov = writer.createProvenanceSet("test");
-    const conv = writer.createConversation({ provenanceSetId: prov, runtimeConversationId: "rt-1" });
-    const a = writer.appendEvent({ conversationId: conv.id, type: "x", payload: { api_key: "sk-ant-abcdefghijklmnop", text: "Bearer abcdefghijklmnopqrstuvwxyz" } });
+    const conv = writer.createConversation({
+      provenanceSetId: prov,
+      runtimeConversationId: "rt-1",
+    });
+    const a = writer.appendEvent({
+      conversationId: conv.id,
+      type: "x",
+      payload: { api_key: "sk-ant-abcdefghijklmnop", text: "Bearer abcdefghijklmnopqrstuvwxyz" },
+    });
     const b = writer.appendEvent({ conversationId: conv.id, type: "y", payload: {} });
     expect([a.sequence, b.sequence]).toEqual([1, 2]);
     const row = catalog.get<{ payload: string }>("SELECT payload FROM events WHERE id = ?", a.id)!;
@@ -45,8 +55,16 @@ describe("record writer", () => {
   });
 
   it("stores artifact bytes once and keeps distinct logical records", () => {
-    const one = writer.registerArtifact({ kind: "output", logicalName: "a.txt", bytes: Buffer.from("same") });
-    const two = writer.registerArtifact({ kind: "output", logicalName: "b.txt", bytes: Buffer.from("same") });
+    const one = writer.registerArtifact({
+      kind: "output",
+      logicalName: "a.txt",
+      bytes: Buffer.from("same"),
+    });
+    const two = writer.registerArtifact({
+      kind: "output",
+      logicalName: "b.txt",
+      bytes: Buffer.from("same"),
+    });
     expect(one.digest).toBe(two.digest);
     expect(one.artifactId).not.toBe(two.artifactId);
     expect(catalog.all("SELECT * FROM objects")).toHaveLength(1);
@@ -55,7 +73,10 @@ describe("record writer", () => {
 
   it("rejects duplicate approvals for the same binding and epoch, and duplicate command IDs", () => {
     const prov = writer.createProvenanceSet("test");
-    const conv = writer.createConversation({ provenanceSetId: prov, runtimeConversationId: "rt-1" });
+    const conv = writer.createConversation({
+      provenanceSetId: prov,
+      runtimeConversationId: "rt-1",
+    });
     writer.ensureClient("client-1", "text");
     writer.openConnection({ connectionId: "conn-1", clientId: "client-1", build: {} });
     const task = writer.createTask({ conversationId: conv.id, text: "t", clientId: "client-1" });
@@ -83,10 +104,24 @@ describe("record writer", () => {
       proposalEventId: null,
     });
     writer.createApproval({ toolCallId: call, executionEpoch: 1, requestingEventId: null });
-    expect(() => writer.createApproval({ toolCallId: call, executionEpoch: 1, requestingEventId: null })).toThrow();
-    const first = writer.recordCommand({ connectionId: "conn-1", clientId: "client-1", clientCommandId: "cmd-1", type: "submit_text", payload: { text: "a" } });
+    expect(() =>
+      writer.createApproval({ toolCallId: call, executionEpoch: 1, requestingEventId: null }),
+    ).toThrow();
+    const first = writer.recordCommand({
+      connectionId: "conn-1",
+      clientId: "client-1",
+      clientCommandId: "cmd-1",
+      type: "submit_text",
+      payload: { text: "a" },
+    });
     expect(first.duplicate).toBe(false);
-    const dup = writer.recordCommand({ connectionId: "conn-1", clientId: "client-1", clientCommandId: "cmd-1", type: "submit_text", payload: { text: "b" } });
+    const dup = writer.recordCommand({
+      connectionId: "conn-1",
+      clientId: "client-1",
+      clientCommandId: "cmd-1",
+      type: "submit_text",
+      payload: { text: "b" },
+    });
     expect(dup.duplicate).toBe(true);
     if (dup.duplicate) expect(dup.sameDigest).toBe(false);
   });

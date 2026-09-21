@@ -1,4 +1,12 @@
-import type { AdapterEvent, PermissionDecision, PermissionRequest, RuntimeCancellation, TurnHandle, TurnOptions, TurnResult } from "@mia/agent-adapter";
+import type {
+  AdapterEvent,
+  PermissionDecision,
+  PermissionRequest,
+  RuntimeCancellation,
+  TurnHandle,
+  TurnOptions,
+  TurnResult,
+} from "@mia/agent-adapter";
 import type { TurnRunner } from "@mia/server";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -37,17 +45,36 @@ export class ScriptedTurn {
   init(model = "scripted-model"): void {
     this.emit({
       type: "runtime_init",
-      init: { type: "system", subtype: "init", session_id: this.options.runtimeConversationId, model, tools: [], mcp_servers: [], permissionMode: "default" },
+      init: {
+        type: "system",
+        subtype: "init",
+        session_id: this.options.runtimeConversationId,
+        model,
+        tools: [],
+        mcp_servers: [],
+        permissionMode: "default",
+      },
       at: new Date().toISOString(),
     });
   }
 
   propose(runtimeCallId: string, toolIdentity: string, args: unknown): void {
-    this.emit({ type: "tool_proposed", runtime_call_id: runtimeCallId, tool_identity: toolIdentity, arguments: args, complete: true, at: new Date().toISOString() });
+    this.emit({
+      type: "tool_proposed",
+      runtime_call_id: runtimeCallId,
+      tool_identity: toolIdentity,
+      arguments: args,
+      complete: true,
+      at: new Date().toISOString(),
+    });
   }
 
   /** Raise a permission request exactly as the bridge would; resolves with Mia's decision. */
-  async request(toolIdentity: string, args: unknown, runtimeCallId: string | undefined): Promise<PermissionDecision> {
+  async request(
+    toolIdentity: string,
+    args: unknown,
+    runtimeCallId: string | undefined,
+  ): Promise<PermissionDecision> {
     const abandon = new AbortController();
     this.pendingAbandons.push(abandon);
     const req: PermissionRequest = {
@@ -64,27 +91,71 @@ export class ScriptedTurn {
   }
 
   toolResult(runtimeCallId: string, content: unknown, isError = false): void {
-    this.emit({ type: "tool_result", runtime_call_id: runtimeCallId, is_error: isError, content, raw: null, at: new Date().toISOString() });
+    this.emit({
+      type: "tool_result",
+      runtime_call_id: runtimeCallId,
+      is_error: isError,
+      content,
+      raw: null,
+      at: new Date().toISOString(),
+    });
   }
 
   end(status: "completed" | "failed" = "completed", error: string | null = null): void {
     if (this.ended) return;
     this.ended = true;
-    const streamLogPath = join(this.options.runtimeDir, `turn-${this.options.turnIndex}.stream.jsonl`);
-    writeFileSync(streamLogPath, JSON.stringify({ type: "scripted", turn: ++this.turnCounter }) + "\n");
+    const streamLogPath = join(
+      this.options.runtimeDir,
+      `turn-${this.options.turnIndex}.stream.jsonl`,
+    );
+    writeFileSync(
+      streamLogPath,
+      JSON.stringify({ type: "scripted", turn: ++this.turnCounter }) + "\n",
+    );
     const result: TurnResult = {
       status: this.interrupted && !this.survivesInterrupt ? "killed" : status,
-      result: status === "completed" && !this.interrupted ? { type: "result", subtype: "success", is_error: false, session_id: this.options.runtimeConversationId, usage: { input_tokens: 1, output_tokens: 1 } } : null,
-      exit: { code: this.interrupted ? null : status === "completed" ? 0 : 1, signal: this.interrupted ? "SIGKILL" : null },
+      result:
+        status === "completed" && !this.interrupted
+          ? {
+              type: "result",
+              subtype: "success",
+              is_error: false,
+              session_id: this.options.runtimeConversationId,
+              usage: { input_tokens: 1, output_tokens: 1 },
+            }
+          : null,
+      exit: {
+        code: this.interrupted ? null : status === "completed" ? 0 : 1,
+        signal: this.interrupted ? "SIGKILL" : null,
+      },
       error,
       streamLogPath,
       hookEvidencePath: join(this.options.runtimeDir, "hook-evidence.jsonl"),
-      launch: { model: "scripted", effort: "medium", session_id: this.options.runtimeConversationId, resume: !this.options.firstTurn, builtin_tools: [], mcp_servers: ["d1", "mia_approval"], permission_prompt_tool: "mcp__mia_approval__request", settings: {}, mcp_config: {} },
+      launch: {
+        model: "scripted",
+        effort: "medium",
+        session_id: this.options.runtimeConversationId,
+        resume: !this.options.firstTurn,
+        builtin_tools: [],
+        mcp_servers: ["d1", "mia_approval"],
+        permission_prompt_tool: "mcp__mia_approval__request",
+        settings: {},
+        mcp_config: {},
+      },
       init: null,
       interrupted: this.interrupted,
-      runtimeCancellation: this.interrupted ? (this.survivesInterrupt ? "unknown" : "forced_kill") : "not_needed",
+      runtimeCancellation: this.interrupted
+        ? this.survivesInterrupt
+          ? "unknown"
+          : "forced_kill"
+        : "not_needed",
     };
-    this.emit({ type: "runtime_exit", code: result.exit!.code, signal: result.exit!.signal, at: new Date().toISOString() });
+    this.emit({
+      type: "runtime_exit",
+      code: result.exit!.code,
+      signal: result.exit!.signal,
+      at: new Date().toISOString(),
+    });
     this.resolveResult(result);
   }
 

@@ -4,7 +4,13 @@ import type { AddressInfo } from "node:net";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { z } from "zod";
-import { McpServer, readJsonBody, sendJson, startMcpHttpServer, type McpRequestContext } from "@mia/mcp-http";
+import {
+  McpServer,
+  readJsonBody,
+  sendJson,
+  startMcpHttpServer,
+  type McpRequestContext,
+} from "@mia/mcp-http";
 import { Ledger } from "./ledger.ts";
 
 export interface PendingSlowCall {
@@ -64,7 +70,10 @@ export async function startFixture(options: FixtureOptions): Promise<FixtureHand
 
     server.registerTool(
       "change",
-      { description: "Increment the fixture counter by delta. Consequential.", inputSchema: { delta: z.number().int() } },
+      {
+        description: "Increment the fixture counter by delta. Consequential.",
+        inputSchema: { delta: z.number().int() },
+      },
       async ({ delta }) => {
         const id = callId();
         ledger.append("entered", "change", id, { delta });
@@ -126,7 +135,8 @@ export async function startFixture(options: FixtureOptions): Promise<FixtureHand
     server.registerTool(
       "artifact",
       {
-        description: "Write an immutable text artifact inside the fixture directory and return its location and digest.",
+        description:
+          "Write an immutable text artifact inside the fixture directory and return its location and digest.",
         inputSchema: { name: z.string().min(1).max(128), text: z.string().max(65536) },
       },
       async ({ name, text }) => {
@@ -135,15 +145,23 @@ export async function startFixture(options: FixtureOptions): Promise<FixtureHand
         const target = resolve(artifactsDir, name);
         if (!target.startsWith(artifactsDir + sep) || name.includes("..") || name.includes("/")) {
           ledger.append("rejected", "artifact", id, { name }, "path outside fixture directory");
-          return { isError: true, content: [{ type: "text", text: "rejected: path outside fixture directory" }] };
+          return {
+            isError: true,
+            content: [{ type: "text", text: "rejected: path outside fixture directory" }],
+          };
         }
         const bytes = Buffer.from(text, "utf8");
         const sha256 = createHash("sha256").update(bytes).digest("hex");
         writeFileSync(target, bytes, { mode: 0o600 });
         ledger.append("committed", "artifact", id, { name, sha256 });
         ledger.append("returned", "artifact", id, { name });
-        const result = { artifact: { path: target, sha256, size: bytes.length, mime_type: "text/plain", name } };
-        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
+        const result = {
+          artifact: { path: target, sha256, size: bytes.length, mime_type: "text/plain", name },
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(result) }],
+          structuredContent: result,
+        };
       },
     );
 
@@ -159,7 +177,11 @@ export async function startFixture(options: FixtureOptions): Promise<FixtureHand
     return server;
   };
 
-  const mcp = await startMcpHttpServer({ host, port: options.mcpPort ?? 0, createServer: createServerForRequest });
+  const mcp = await startMcpHttpServer({
+    host,
+    port: options.mcpPort ?? 0,
+    createServer: createServerForRequest,
+  });
 
   const snapshot = () => ({
     counter: ledger.counter(),
@@ -204,7 +226,9 @@ export async function startFixture(options: FixtureOptions): Promise<FixtureHand
       }
       if (req.method === "POST" && url.pathname === "/release") {
         const body = (await readJsonBody(req)) as { call_id?: string };
-        const targets = body.call_id ? [pending.get(body.call_id)].filter(Boolean) : [...pending.values()];
+        const targets = body.call_id
+          ? [pending.get(body.call_id)].filter(Boolean)
+          : [...pending.values()];
         for (const call of targets) call?.release();
         return sendJson(res, 200, { released: targets.map((c) => c?.call_id) });
       }
@@ -237,7 +261,11 @@ export async function startFixture(options: FixtureOptions): Promise<FixtureHand
 /** Client for the private harness API. */
 export class FixtureHarness {
   constructor(readonly baseUrl: string) {}
-  async state(): Promise<{ counter: number; ledger: import("./ledger.ts").LedgerEntry[]; pending: PendingSlowCall[] }> {
+  async state(): Promise<{
+    counter: number;
+    ledger: import("./ledger.ts").LedgerEntry[];
+    pending: PendingSlowCall[];
+  }> {
     const res = await fetch(`${this.baseUrl}/state`);
     return (await res.json()) as never;
   }
@@ -245,7 +273,9 @@ export class FixtureHarness {
     await fetch(`${this.baseUrl}/reset`, { method: "POST" });
   }
   async waitEntered(timeoutMs = 60_000): Promise<{ call_id: string; mode: string }> {
-    const res = await fetch(`${this.baseUrl}/wait-entered?timeout_ms=${timeoutMs}`, { method: "POST" });
+    const res = await fetch(`${this.baseUrl}/wait-entered?timeout_ms=${timeoutMs}`, {
+      method: "POST",
+    });
     if (!res.ok) throw new Error(`wait-entered failed: ${res.status} ${await res.text()}`);
     return (await res.json()) as never;
   }

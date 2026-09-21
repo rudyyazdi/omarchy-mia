@@ -1,5 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  writeSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import type { CatalogPaths } from "./catalog.ts";
 
@@ -32,13 +42,15 @@ export class ObjectStore {
   put(bytes: Uint8Array): StoredObject {
     const digest = ObjectStore.digestOf(bytes);
     const target = this.pathFor(digest);
-    if (existsSync(target)) return { digest, byteCount: bytes.byteLength, storageKey: this.storageKey(digest) };
+    if (existsSync(target))
+      return { digest, byteCount: bytes.byteLength, storageKey: this.storageKey(digest) };
     mkdirSync(this.paths.staging, { recursive: true, mode: 0o700 });
     const staged = join(this.paths.staging, `${randomUUID()}.tmp`);
     const fd = openSync(staged, "w", 0o600);
     try {
       let offset = 0;
-      while (offset < bytes.byteLength) offset += writeSync(fd, bytes, offset, bytes.byteLength - offset);
+      while (offset < bytes.byteLength)
+        offset += writeSync(fd, bytes, offset, bytes.byteLength - offset);
       fsyncSync(fd);
     } finally {
       closeSync(fd);

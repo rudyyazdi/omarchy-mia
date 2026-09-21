@@ -20,7 +20,11 @@ process.stdin.on("end", () => {
     };
     if (out) appendFileSync(out, JSON.stringify(record) + "\n");
   } catch {
-    if (out) appendFileSync(out, JSON.stringify({ received_at: new Date().toISOString(), malformed: true }) + "\n");
+    if (out)
+      appendFileSync(
+        out,
+        JSON.stringify({ received_at: new Date().toISOString(), malformed: true }) + "\n",
+      );
   }
   process.stdout.write("{}");
   process.exit(0);

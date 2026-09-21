@@ -1,5 +1,15 @@
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, relative } from "node:path";
 import type { Catalog } from "./catalog.ts";
 import { ObjectStore } from "./objects.ts";
@@ -20,7 +30,13 @@ export interface ExportManifest {
   record_counts: Record<string, number>;
   artifact_count: number;
   coverage: Record<string, number>;
-  objects: { included: number; missing: string[]; corrupt: string[]; external_only: number; pending: number };
+  objects: {
+    included: number;
+    missing: string[];
+    corrupt: string[];
+    external_only: number;
+    pending: number;
+  };
   unresolved_references: ConversationSnapshot["unresolved_references"];
   ongoing_tasks: string[];
   redaction: string;
@@ -33,7 +49,11 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
  * Export one conversation into a self-contained directory: records, events, report, referenced objects, manifest.
  * Written to <out>.partial and renamed only after verification passes; a failed export is left labelled partial.
  */
-export function exportConversation(catalog: Catalog, conversationId: string, outDir: string): { manifest: ExportManifest; directory: string } {
+export function exportConversation(
+  catalog: Catalog,
+  conversationId: string,
+  outDir: string,
+): { manifest: ExportManifest; directory: string } {
   if (existsSync(outDir)) throw new Error(`export target ${outDir} already exists`);
   const staging = `${outDir}.partial`;
   rmSync(staging, { recursive: true, force: true });
@@ -53,10 +73,33 @@ export function exportConversation(catalog: Catalog, conversationId: string, out
   for (const table of EXPORT_TABLES) {
     const rows = snapshot.tables[table];
     counts[table] = rows.length;
-    if (table === "events") write("events.jsonl", rows.map((r) => JSON.stringify(r)).join("\n") + (rows.length ? "\n" : ""));
-    else write(`records/${table}.jsonl`, rows.map((r) => JSON.stringify(r)).join("\n") + (rows.length ? "\n" : ""));
+    if (table === "events")
+      write(
+        "events.jsonl",
+        rows.map((r) => JSON.stringify(r)).join("\n") + (rows.length ? "\n" : ""),
+      );
+    else
+      write(
+        `records/${table}.jsonl`,
+        rows.map((r) => JSON.stringify(r)).join("\n") + (rows.length ? "\n" : ""),
+      );
   }
-  write("conversation.json", JSON.stringify({ conversation: snapshot.tables.conversations[0], tasks: snapshot.tables.tasks, executions: snapshot.tables.executions, provenance_sets: snapshot.tables.provenance_sets, provenance_entries: snapshot.tables.provenance_entries, cutoff_sequence: snapshot.cutoff_sequence, captured_at: snapshot.captured_at }, null, 2));
+  write(
+    "conversation.json",
+    JSON.stringify(
+      {
+        conversation: snapshot.tables.conversations[0],
+        tasks: snapshot.tables.tasks,
+        executions: snapshot.tables.executions,
+        provenance_sets: snapshot.tables.provenance_sets,
+        provenance_entries: snapshot.tables.provenance_entries,
+        cutoff_sequence: snapshot.cutoff_sequence,
+        captured_at: snapshot.captured_at,
+      },
+      null,
+      2,
+    ),
+  );
 
   const missing: string[] = [];
   const corrupt: string[] = [];
@@ -91,13 +134,18 @@ export function exportConversation(catalog: Catalog, conversationId: string, out
 
   const artifacts = snapshot.tables.artifacts;
   const coverage: Record<string, number> = {};
-  for (const type of new Set(snapshot.tables.events.map((e) => e.type as string))) coverage[type] = snapshot.tables.events.filter((e) => e.type === type).length;
+  for (const type of new Set(snapshot.tables.events.map((e) => e.type as string)))
+    coverage[type] = snapshot.tables.events.filter((e) => e.type === type).length;
   const partialReasons: string[] = [];
   if (missing.length) partialReasons.push(`${missing.length} referenced object(s) missing`);
   if (corrupt.length) partialReasons.push(`${corrupt.length} referenced object(s) corrupt`);
-  if (snapshot.unresolved_references.length) partialReasons.push(`${snapshot.unresolved_references.length} unresolved reference(s)`);
-  const failedCaptures = artifacts.filter((a) => a.capture_status === "missing" || a.capture_status === "failed").length;
-  if (failedCaptures) partialReasons.push(`${failedCaptures} artifact capture(s) missing or failed`);
+  if (snapshot.unresolved_references.length)
+    partialReasons.push(`${snapshot.unresolved_references.length} unresolved reference(s)`);
+  const failedCaptures = artifacts.filter(
+    (a) => a.capture_status === "missing" || a.capture_status === "failed",
+  ).length;
+  if (failedCaptures)
+    partialReasons.push(`${failedCaptures} artifact capture(s) missing or failed`);
   const manifestWithoutFiles: Omit<ExportManifest, "files"> = {
     export_version: EXPORT_VERSION,
     schema_version: SCHEMA_VERSION,
@@ -109,17 +157,29 @@ export function exportConversation(catalog: Catalog, conversationId: string, out
     record_counts: counts,
     artifact_count: artifacts.length,
     coverage,
-    objects: { included, missing, corrupt, external_only: artifacts.filter((a) => a.capture_status === "external_only").length, pending: artifacts.filter((a) => a.capture_status === "pending").length },
+    objects: {
+      included,
+      missing,
+      corrupt,
+      external_only: artifacts.filter((a) => a.capture_status === "external_only").length,
+      pending: artifacts.filter((a) => a.capture_status === "pending").length,
+    },
     unresolved_references: snapshot.unresolved_references,
     ongoing_tasks: snapshot.ongoing_tasks,
-    redaction: "credentials and secret-shaped values were redacted before persistence; conversation content is not redacted",
+    redaction:
+      "credentials and secret-shaped values were redacted before persistence; conversation content is not redacted",
   };
   const manifest: ExportManifest = { ...manifestWithoutFiles, files };
   writeFileSync(join(staging, "manifest.json"), JSON.stringify(manifest, null, 2), { mode: 0o600 });
   const verification = verifyExport(staging);
   if (!verification.ok) {
-    writeFileSync(join(staging, "VERIFICATION-FAILED.txt"), verification.problems.join("\n") + "\n");
-    throw new Error(`export verification failed; left at ${staging}: ${verification.problems.slice(0, 5).join("; ")}`);
+    writeFileSync(
+      join(staging, "VERIFICATION-FAILED.txt"),
+      verification.problems.join("\n") + "\n",
+    );
+    throw new Error(
+      `export verification failed; left at ${staging}: ${verification.problems.slice(0, 5).join("; ")}`,
+    );
   }
   renameSync(staging, outDir);
   return { manifest, directory: outDir };
@@ -137,7 +197,14 @@ export interface VerificationResult {
 export function verifyExport(dir: string): VerificationResult {
   const problems: string[] = [];
   const manifestPath = join(dir, "manifest.json");
-  if (!existsSync(manifestPath)) return { ok: false, complete: false, problems: ["manifest.json missing"], checked_files: 0, checked_objects: 0 };
+  if (!existsSync(manifestPath))
+    return {
+      ok: false,
+      complete: false,
+      problems: ["manifest.json missing"],
+      checked_files: 0,
+      checked_objects: 0,
+    };
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as ExportManifest;
   let checkedFiles = 0;
   for (const [rel, expected] of Object.entries(manifest.files)) {
@@ -147,17 +214,22 @@ export function verifyExport(dir: string): VerificationResult {
       continue;
     }
     const bytes = readFileSync(path);
-    if (bytes.byteLength !== expected.bytes || sha256(bytes) !== expected.sha256) problems.push(`checksum mismatch: ${rel}`);
+    if (bytes.byteLength !== expected.bytes || sha256(bytes) !== expected.sha256)
+      problems.push(`checksum mismatch: ${rel}`);
     checkedFiles++;
   }
   // Every file present must be listed (except manifest itself).
-  const walk = (d: string): string[] => readdirSync(d).flatMap((n) => (statSync(join(d, n)).isDirectory() ? walk(join(d, n)) : [join(d, n)]));
+  const walk = (d: string): string[] =>
+    readdirSync(d).flatMap((n) =>
+      statSync(join(d, n)).isDirectory() ? walk(join(d, n)) : [join(d, n)],
+    );
   for (const f of walk(dir)) {
     const rel = relative(dir, f);
     if (rel !== "manifest.json" && !manifest.files[rel]) problems.push(`unlisted file: ${rel}`);
   }
   const readTable = (name: string): Record<string, unknown>[] => {
-    const path = name === "events" ? join(dir, "events.jsonl") : join(dir, "records", `${name}.jsonl`);
+    const path =
+      name === "events" ? join(dir, "events.jsonl") : join(dir, "records", `${name}.jsonl`);
     if (!existsSync(path)) return [];
     const rows: Record<string, unknown>[] = [];
     for (const line of readFileSync(path, "utf8").split("\n").filter(Boolean)) {
@@ -170,10 +242,15 @@ export function verifyExport(dir: string): VerificationResult {
     return rows;
   };
   const t = Object.fromEntries(EXPORT_TABLES.map((n) => [n, readTable(n)]));
-  for (const [name, rows] of Object.entries(t)) if (manifest.record_counts[name] !== rows.length) problems.push(`record count mismatch for ${name}: manifest ${manifest.record_counts[name]} vs ${rows.length}`);
+  for (const [name, rows] of Object.entries(t))
+    if (manifest.record_counts[name] !== rows.length)
+      problems.push(
+        `record count mismatch for ${name}: manifest ${manifest.record_counts[name]} vs ${rows.length}`,
+      );
   const ids = (name: string) => new Set(t[name]!.map((r) => r.id as string));
   const conv = t.conversations![0];
-  if (!conv || conv.id !== manifest.root_conversation_id) problems.push("root conversation row missing or mismatched");
+  if (!conv || conv.id !== manifest.root_conversation_id)
+    problems.push("root conversation row missing or mismatched");
   const taskIds = ids("tasks");
   const eventIds = ids("events");
   const toolCallIds = ids("tool_calls");
@@ -185,13 +262,23 @@ export function verifyExport(dir: string): VerificationResult {
     if (seq <= lastSeq) problems.push(`event sequence not increasing at ${seq}`);
     lastSeq = seq;
     if (seq > manifest.cutoff_sequence) problems.push(`event ${e.id} beyond cutoff`);
-    if (e.task_id && !taskIds.has(e.task_id as string)) problems.push(`event ${e.id} references unknown task ${e.task_id}`);
-    if (e.caused_by_event_id && !eventIds.has(e.caused_by_event_id as string)) problems.push(`event ${e.id} caused_by unknown event`);
+    if (e.task_id && !taskIds.has(e.task_id as string))
+      problems.push(`event ${e.id} references unknown task ${e.task_id}`);
+    if (e.caused_by_event_id && !eventIds.has(e.caused_by_event_id as string))
+      problems.push(`event ${e.id} caused_by unknown event`);
   }
-  for (const c of t.tool_calls!) if (!taskIds.has(c.task_id as string)) problems.push(`tool call ${c.id} references unknown task`);
-  for (const a of t.approvals!) if (!toolCallIds.has(a.tool_call_id as string)) problems.push(`approval ${a.id} references unknown tool call`);
-  for (const l of t.artifact_links!) if (!artifactIds.has(l.artifact_id as string)) problems.push(`link ${l.id} references unknown artifact`);
-  for (const p of t.provenance_entries!) if (p.artifact_id && !artifactIds.has(p.artifact_id as string)) problems.push(`provenance entry ${p.id} references unknown artifact`);
+  for (const c of t.tool_calls!)
+    if (!taskIds.has(c.task_id as string))
+      problems.push(`tool call ${c.id} references unknown task`);
+  for (const a of t.approvals!)
+    if (!toolCallIds.has(a.tool_call_id as string))
+      problems.push(`approval ${a.id} references unknown tool call`);
+  for (const l of t.artifact_links!)
+    if (!artifactIds.has(l.artifact_id as string))
+      problems.push(`link ${l.id} references unknown artifact`);
+  for (const p of t.provenance_entries!)
+    if (p.artifact_id && !artifactIds.has(p.artifact_id as string))
+      problems.push(`provenance entry ${p.id} references unknown artifact`);
   let checkedObjects = 0;
   for (const a of t.artifacts!) {
     if (a.capture_status !== "retained") continue;
@@ -203,35 +290,57 @@ export function verifyExport(dir: string): VerificationResult {
     if (!objectDigests.has(digest)) problems.push(`artifact ${a.id} digest not in objects table`);
     const path = join(dir, "objects", "sha256", digest.slice(0, 2), digest);
     if (!existsSync(path)) {
-      if (!manifest.objects.missing.includes(digest) && !manifest.objects.corrupt.includes(digest)) problems.push(`object bytes missing and not declared: ${digest}`);
+      if (!manifest.objects.missing.includes(digest) && !manifest.objects.corrupt.includes(digest))
+        problems.push(`object bytes missing and not declared: ${digest}`);
       continue;
     }
     if (sha256(readFileSync(path)) !== digest) problems.push(`object corrupt: ${digest}`);
     checkedObjects++;
   }
-  const report = existsSync(join(dir, "report.html")) ? readFileSync(join(dir, "report.html"), "utf8") : null;
+  const report = existsSync(join(dir, "report.html"))
+    ? readFileSync(join(dir, "report.html"), "utf8")
+    : null;
   if (!report) problems.push("report.html missing");
   else {
     if (/<script\b/i.test(report)) problems.push("report contains a script tag");
-    if (!/Content-Security-Policy/.test(report)) problems.push("report lacks a Content-Security-Policy");
+    if (!/Content-Security-Policy/.test(report))
+      problems.push("report lacks a Content-Security-Policy");
     if (/\b(src|href)=["']https?:/i.test(report)) problems.push("report references remote content");
   }
   const complete = manifest.complete && problems.length === 0;
-  return { ok: problems.length === 0, complete, problems, checked_files: checkedFiles, checked_objects: checkedObjects };
+  return {
+    ok: problems.length === 0,
+    complete,
+    problems,
+    checked_files: checkedFiles,
+    checked_objects: checkedObjects,
+  };
 }
 
 /** Find objects on disk that no catalog row references, and catalog objects whose bytes are missing/corrupt. */
-export function reconcileObjects(catalog: Catalog): { orphans: string[]; missing: string[]; corrupt: string[] } {
+export function reconcileObjects(catalog: Catalog): {
+  orphans: string[];
+  missing: string[];
+  corrupt: string[];
+} {
   const store = new ObjectStore(catalog.paths);
-  const known = new Set(catalog.all<{ digest: string; byte_count: number }>("SELECT digest, byte_count FROM objects").map((o) => o.digest));
+  const known = new Set(
+    catalog
+      .all<{ digest: string; byte_count: number }>("SELECT digest, byte_count FROM objects")
+      .map((o) => o.digest),
+  );
   const orphans: string[] = [];
   const root = catalog.paths.objects;
   if (existsSync(root)) {
-    for (const prefix of readdirSync(root)) for (const digest of readdirSync(join(root, prefix))) if (!known.has(digest)) orphans.push(digest);
+    for (const prefix of readdirSync(root))
+      for (const digest of readdirSync(join(root, prefix)))
+        if (!known.has(digest)) orphans.push(digest);
   }
   const missing: string[] = [];
   const corrupt: string[] = [];
-  for (const o of catalog.all<{ digest: string; byte_count: number }>("SELECT digest, byte_count FROM objects")) {
+  for (const o of catalog.all<{ digest: string; byte_count: number }>(
+    "SELECT digest, byte_count FROM objects",
+  )) {
     const s = store.verify(o.digest, o.byte_count);
     if (s === "missing") missing.push(o.digest);
     if (s === "corrupt") corrupt.push(o.digest);

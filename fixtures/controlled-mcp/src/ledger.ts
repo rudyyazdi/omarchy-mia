@@ -1,7 +1,8 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export type LedgerKind = "entered" | "committed" | "cancelled" | "returned" | "rejected" | "released";
+export type LedgerKind =
+  "entered" | "committed" | "cancelled" | "returned" | "rejected" | "released";
 
 export interface LedgerEntry {
   seq: number;
@@ -28,8 +29,21 @@ export class Ledger {
     this.seq = this.entries().length;
   }
 
-  append(kind: LedgerKind, tool: string, callId: string, args: unknown, detail?: string): LedgerEntry {
-    const entry: LedgerEntry = { seq: ++this.seq, at: new Date().toISOString(), kind, tool, call_id: callId, args };
+  append(
+    kind: LedgerKind,
+    tool: string,
+    callId: string,
+    args: unknown,
+    detail?: string,
+  ): LedgerEntry {
+    const entry: LedgerEntry = {
+      seq: ++this.seq,
+      at: new Date().toISOString(),
+      kind,
+      tool,
+      call_id: callId,
+      args,
+    };
     if (detail !== undefined) entry.detail = detail;
     appendFileSync(this.ledgerPath, JSON.stringify(entry) + "\n");
     return entry;
@@ -60,6 +74,8 @@ export class Ledger {
   }
 
   commits(tool?: string): LedgerEntry[] {
-    return this.entries().filter((e) => e.kind === "committed" && (tool === undefined || e.tool === tool));
+    return this.entries().filter(
+      (e) => e.kind === "committed" && (tool === undefined || e.tool === tool),
+    );
   }
 }

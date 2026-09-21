@@ -75,9 +75,11 @@ export class Catalog {
 
   private migrate(): void {
     this.db.exec(SCHEMA_SQL);
-    const row = this.db.prepare("SELECT version FROM schema_version LIMIT 1").get() as { version: number } | undefined;
+    const row = this.db.prepare("SELECT version FROM schema_version LIMIT 1").get() as
+      { version: number } | undefined;
     if (!row) this.db.prepare("INSERT INTO schema_version(version) VALUES (?)").run(SCHEMA_VERSION);
-    else if (row.version !== SCHEMA_VERSION) throw new Error(`catalog schema version ${row.version} does not match ${SCHEMA_VERSION}`);
+    else if (row.version !== SCHEMA_VERSION)
+      throw new Error(`catalog schema version ${row.version} does not match ${SCHEMA_VERSION}`);
   }
 
   /** Run fn inside one write transaction (no nesting). */
@@ -119,7 +121,10 @@ export class Catalog {
   }
 
   nextSequence(conversationId: string): number {
-    const row = this.get<{ next: number }>("SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM events WHERE conversation_id = ?", conversationId);
+    const row = this.get<{ next: number }>(
+      "SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM events WHERE conversation_id = ?",
+      conversationId,
+    );
     return row?.next ?? 1;
   }
 

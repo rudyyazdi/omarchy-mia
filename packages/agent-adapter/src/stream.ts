@@ -4,7 +4,9 @@ import { z } from "zod";
  * Loose schemas for the Claude Code stream-json output. Only the fields Mia relies on are typed;
  * everything else is preserved as raw and retained (redacted) as evidence.
  */
-const base = z.object({ type: z.string(), session_id: z.string().optional(), uuid: z.string().optional() }).passthrough();
+const base = z
+  .object({ type: z.string(), session_id: z.string().optional(), uuid: z.string().optional() })
+  .passthrough();
 
 export const InitMessageSchema = base.extend({
   type: z.literal("system"),
@@ -19,7 +21,10 @@ export const InitMessageSchema = base.extend({
   apiKeySource: z.string().optional(),
 });
 
-export const OtherSystemMessageSchema = base.extend({ type: z.literal("system"), subtype: z.string() });
+export const OtherSystemMessageSchema = base.extend({
+  type: z.literal("system"),
+  subtype: z.string(),
+});
 
 const contentBlock = z
   .object({
@@ -36,13 +41,21 @@ const contentBlock = z
 
 export const AssistantMessageSchema = base.extend({
   type: z.literal("assistant"),
-  message: z.object({ role: z.literal("assistant"), content: z.array(contentBlock), model: z.string().optional() }).passthrough(),
+  message: z
+    .object({
+      role: z.literal("assistant"),
+      content: z.array(contentBlock),
+      model: z.string().optional(),
+    })
+    .passthrough(),
   parent_tool_use_id: z.string().nullable().optional(),
 });
 
 export const UserMessageSchema = base.extend({
   type: z.literal("user"),
-  message: z.object({ role: z.literal("user"), content: z.union([z.string(), z.array(contentBlock)]) }).passthrough(),
+  message: z
+    .object({ role: z.literal("user"), content: z.union([z.string(), z.array(contentBlock)]) })
+    .passthrough(),
   parent_tool_use_id: z.string().nullable().optional(),
   tool_use_result: z.unknown().optional(),
 });
@@ -54,7 +67,14 @@ export const StreamEventSchema = base.extend({
       type: z.string(),
       index: z.number().optional(),
       content_block: contentBlock.optional(),
-      delta: z.object({ type: z.string().optional(), text: z.string().optional(), partial_json: z.string().optional() }).passthrough().optional(),
+      delta: z
+        .object({
+          type: z.string().optional(),
+          text: z.string().optional(),
+          partial_json: z.string().optional(),
+        })
+        .passthrough()
+        .optional(),
       message: z.unknown().optional(),
       usage: z.unknown().optional(),
     })
@@ -94,8 +114,7 @@ export type InitMessage = z.infer<typeof InitMessageSchema>;
 export type ResultMessage = z.infer<typeof ResultMessageSchema>;
 
 export type ParsedLine =
-  | { ok: true; message: RuntimeMessage; raw: string }
-  | { ok: false; raw: string; error: string };
+  { ok: true; message: RuntimeMessage; raw: string } | { ok: false; raw: string; error: string };
 
 export function parseStreamLine(line: string): ParsedLine | null {
   const trimmed = line.trim();
@@ -104,14 +123,27 @@ export function parseStreamLine(line: string): ParsedLine | null {
   try {
     json = JSON.parse(trimmed);
   } catch (error) {
-    return { ok: false, raw: trimmed, error: `invalid JSON: ${error instanceof Error ? error.message : String(error)}` };
+    return {
+      ok: false,
+      raw: trimmed,
+      error: `invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
   const parsed = KnownMessageSchema.safeParse(json);
   if (parsed.success) return { ok: true, message: parsed.data, raw: trimmed };
   const other = base.safeParse(json);
   const knownTypes = new Set(["system", "assistant", "user", "stream_event", "result"]);
-  if (other.success && !knownTypes.has(other.data.type)) return { ok: true, message: { type: "other", original_type: other.data.type, raw: json }, raw: trimmed };
-  return { ok: false, raw: trimmed, error: `malformed runtime message: ${parsed.error.message.slice(0, 300)}` };
+  if (other.success && !knownTypes.has(other.data.type))
+    return {
+      ok: true,
+      message: { type: "other", original_type: other.data.type, raw: json },
+      raw: trimmed,
+    };
+  return {
+    ok: false,
+    raw: trimmed,
+    error: `malformed runtime message: ${parsed.error.message.slice(0, 300)}`,
+  };
 }
 
 /** Incremental newline-delimited JSON splitter. */

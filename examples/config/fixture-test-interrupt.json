@@ -1,7 +1,11 @@
 {
   "profile": "fixture-test-interrupt",
   "stateDirectory": "../../.mia-state/fixture-test-interrupt",
-  "server": { "host": "127.0.0.1", "port": 48732, "secretFile": "../../.mia-state/fixture-test-interrupt/client-secret" },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 48732,
+    "secretFile": "../../.mia-state/fixture-test-interrupt/client-secret"
+  },
   "runtime": {
     "kind": "claude-code",
     "executable": "claude",
@@ -23,5 +27,7 @@
     "extraSettings": {}
   },
   "architectureDocument": "../../docs/D1/PLAN.md",
-  "notes": ["Second test profile from docs/D1/TEST-PLAN.md: change is policy-allow so gating is proven independently of approval prompts."]
+  "notes": [
+    "Second test profile from docs/D1/TEST-PLAN.md: change is policy-allow so gating is proven independently of approval prompts."
+  ]
 }

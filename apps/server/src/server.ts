@@ -18,7 +18,12 @@ export interface MiaServer {
 
 export const SOURCE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
-export async function startServer(input: { profilePath?: string; profile?: Profile; adapter?: TurnRunner; log?: (m: string) => void }): Promise<MiaServer> {
+export async function startServer(input: {
+  profilePath?: string;
+  profile?: Profile;
+  adapter?: TurnRunner;
+  log?: (m: string) => void;
+}): Promise<MiaServer> {
   const profile = input.profile ?? loadProfile(input.profilePath!);
   const log = input.log ?? ((m: string) => process.stderr.write(`[mia-server] ${m}\n`));
   mkdirSync(profile.stateDirectory, { recursive: true, mode: 0o700 });
@@ -35,9 +40,18 @@ export async function startServer(input: { profilePath?: string; profile?: Profi
     sourceRoot: SOURCE_ROOT,
     log,
   });
-  const gateway = await startGateway({ host: profile.server.host, port: profile.server.port, secretFile: profile.server.secretFile, engine, writer, log });
+  const gateway = await startGateway({
+    host: profile.server.host,
+    port: profile.server.port,
+    secretFile: profile.server.secretFile,
+    engine,
+    writer,
+    log,
+  });
   engine.send = gateway.send;
-  log(`listening on ${gateway.url} (profile ${profile.profile}, model ${profile.runtime.model}, effort ${profile.runtime.effort})`);
+  log(
+    `listening on ${gateway.url} (profile ${profile.profile}, model ${profile.runtime.model}, effort ${profile.runtime.effort})`,
+  );
   return {
     profile,
     gateway,

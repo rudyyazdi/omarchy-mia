@@ -24,7 +24,10 @@ export interface LaunchPlan {
   };
 }
 
-export const HOOK_SCRIPT_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "hook-capture.mjs");
+export const HOOK_SCRIPT_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "hook-capture.mjs",
+);
 
 /** Timeout for a held permission prompt or long tool call: 24h, so a human decision is never timed out by the runtime. */
 export const MCP_TOOL_TIMEOUT_MS = 24 * 60 * 60 * 1000;
@@ -61,7 +64,10 @@ export function prepareLaunch(input: LaunchInput): LaunchPlan {
   const askRules = Object.entries(config.toolPolicy)
     .filter(([, policy]) => policy !== "deny")
     .map(([identity]) => identity);
-  const hookEvidence = join(runtimeDir, `turn-${String(input.turnIndex).padStart(3, "0")}.hooks.jsonl`);
+  const hookEvidence = join(
+    runtimeDir,
+    `turn-${String(input.turnIndex).padStart(3, "0")}.hooks.jsonl`,
+  );
   const settings = {
     ...config.extraSettings,
     permissions: {
@@ -75,7 +81,12 @@ export function prepareLaunch(input: LaunchInput): LaunchPlan {
       PreToolUse: [
         {
           matcher: "",
-          hooks: [{ type: "command", command: `${JSON.stringify(process.execPath)} ${JSON.stringify(HOOK_SCRIPT_PATH)} ${JSON.stringify(hookEvidence)}` }],
+          hooks: [
+            {
+              type: "command",
+              command: `${JSON.stringify(process.execPath)} ${JSON.stringify(HOOK_SCRIPT_PATH)} ${JSON.stringify(hookEvidence)}`,
+            },
+          ],
         },
       ],
     },
@@ -112,7 +123,13 @@ export function prepareLaunch(input: LaunchInput): LaunchPlan {
     sessionId,
   ];
   // Diagnostics only: MIA_RUNTIME_DEBUG=mcp adds the runtime's own debug logging (stderr) for that category.
-  if (process.env.MIA_RUNTIME_DEBUG) args.push("--debug", process.env.MIA_RUNTIME_DEBUG, "--debug-file", join(runtimeDir, "runtime-debug.log"));
+  if (process.env.MIA_RUNTIME_DEBUG)
+    args.push(
+      "--debug",
+      process.env.MIA_RUNTIME_DEBUG,
+      "--debug-file",
+      join(runtimeDir, "runtime-debug.log"),
+    );
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
   Object.assign(env, config.env);

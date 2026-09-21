@@ -12,20 +12,30 @@ export class LiveCallBudget {
   ) {}
 
   static fromEnv(defaultFile: string): LiveCallBudget {
-    return new LiveCallBudget(process.env.MIA_LIVE_BUDGET_FILE ?? defaultFile, Number(process.env.MIA_LIVE_CALL_CAP ?? "50"));
+    return new LiveCallBudget(
+      process.env.MIA_LIVE_BUDGET_FILE ?? defaultFile,
+      Number(process.env.MIA_LIVE_CALL_CAP ?? "50"),
+    );
   }
 
   used(): number {
     if (!existsSync(this.file)) return 0;
-    return readFileSync(this.file, "utf8").split("\n").filter((l) => l.trim()).length;
+    return readFileSync(this.file, "utf8")
+      .split("\n")
+      .filter((l) => l.trim()).length;
   }
 
   /** Reserve one call or throw. */
   take(label: string, model: string): number {
     const used = this.used();
-    if (used >= this.cap) throw new Error(`live call cap reached (${used}/${this.cap}); refusing to start "${label}"`);
+    if (used >= this.cap)
+      throw new Error(`live call cap reached (${used}/${this.cap}); refusing to start "${label}"`);
     mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 });
-    appendFileSync(this.file, JSON.stringify({ at: new Date().toISOString(), label, model }) + "\n", { mode: 0o600 });
+    appendFileSync(
+      this.file,
+      JSON.stringify({ at: new Date().toISOString(), label, model }) + "\n",
+      { mode: 0o600 },
+    );
     return used + 1;
   }
 }

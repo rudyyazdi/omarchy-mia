@@ -1,7 +1,11 @@
 {
   "profile": "production-opus",
   "stateDirectory": "${XDG_STATE_HOME}/mia",
-  "server": { "host": "127.0.0.1", "port": 48730, "secretFile": "${XDG_STATE_HOME}/mia/client-secret" },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 48730,
+    "secretFile": "${XDG_STATE_HOME}/mia/client-secret"
+  },
   "runtime": {
     "kind": "claude-code",
     "executable": "claude",

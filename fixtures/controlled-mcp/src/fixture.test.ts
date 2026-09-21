@@ -30,7 +30,13 @@ describe("controlled fixture", () => {
   it("lists exactly the five tools", async () => {
     const c = await client();
     const tools = await c.listTools();
-    expect(tools.tools.map((t) => t.name).sort()).toEqual(["artifact", "change", "forbidden", "read", "slow"]);
+    expect(tools.tools.map((t) => t.name).sort()).toEqual([
+      "artifact",
+      "change",
+      "forbidden",
+      "read",
+      "slow",
+    ]);
     await c.close();
   });
 
@@ -89,10 +95,18 @@ describe("controlled fixture", () => {
   it("artifact rejects paths outside the fixture directory and registers digests", async () => {
     await harness.reset();
     const c = await client();
-    const bad = await c.callTool({ name: "artifact", arguments: { name: "../escape.txt", text: "x" } });
+    const bad = await c.callTool({
+      name: "artifact",
+      arguments: { name: "../escape.txt", text: "x" },
+    });
     expect(bad.isError).toBe(true);
-    const good = await c.callTool({ name: "artifact", arguments: { name: "result.txt", text: "D1" } });
-    const parsed = JSON.parse((good.content as Array<{ text: string }>)[0]!.text) as { artifact: { sha256: string; path: string } };
+    const good = await c.callTool({
+      name: "artifact",
+      arguments: { name: "result.txt", text: "D1" },
+    });
+    const parsed = JSON.parse((good.content as Array<{ text: string }>)[0]!.text) as {
+      artifact: { sha256: string; path: string };
+    };
     expect(parsed.artifact.path.startsWith(join(dir, "artifacts"))).toBe(true);
     expect(parsed.artifact.sha256).toHaveLength(64);
     await c.close();

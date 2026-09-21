@@ -2,7 +2,15 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, mkdtempSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Catalog, ObjectStore, RecordWriter, exportConversation, reconcileObjects, snapshotConversation, verifyExport } from "@mia/records";
+import {
+  Catalog,
+  ObjectStore,
+  RecordWriter,
+  exportConversation,
+  reconcileObjects,
+  snapshotConversation,
+  verifyExport,
+} from "@mia/records";
 import type { MiaClient } from "@mia/text-client";
 import { ScriptedRuntime } from "./scripted-runtime.ts";
 import { startTestServer, tick, type TestServer } from "./harness.ts";
@@ -34,22 +42,42 @@ async function richConversation(): Promise<{ conversationId: string; artifactFil
   const taskId = ack.result!.task_id as string;
   const turn = await next;
   turn.init("scripted-model");
-  turn.text("Working <script>alert(1)</script> on it. secret sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 leaked?");
-  const p1 = turn.request("mcp__d1__change", { delta: 1, token: "super-secret-value-123456" }, "toolu_1");
-  const r1 = await client.waitFor("approval_requested", (e) => e.payload.runtime_call_id === "toolu_1");
+  turn.text(
+    "Working <script>alert(1)</script> on it. secret sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 leaked?",
+  );
+  const p1 = turn.request(
+    "mcp__d1__change",
+    { delta: 1, token: "super-secret-value-123456" },
+    "toolu_1",
+  );
+  const r1 = await client.waitFor(
+    "approval_requested",
+    (e) => e.payload.runtime_call_id === "toolu_1",
+  );
   await client.decide(taskId, r1.payload.approval_id, "approve");
   await p1;
   turn.toolResult("toolu_1", JSON.stringify({ counter: 1 }));
   const p2 = turn.request("mcp__d1__change", { delta: 1 }, "toolu_2");
-  const r2 = await client.waitFor("approval_requested", (e) => e.payload.runtime_call_id === "toolu_2");
+  const r2 = await client.waitFor(
+    "approval_requested",
+    (e) => e.payload.runtime_call_id === "toolu_2",
+  );
   await client.decide(taskId, r2.payload.approval_id, "reject");
   await p2;
   turn.toolResult("toolu_2", "denied", true);
   const p3 = turn.request("mcp__d1__artifact", { name: "result.txt", text: "D1" }, "toolu_3");
-  const r3 = await client.waitFor("approval_requested", (e) => e.payload.runtime_call_id === "toolu_3");
+  const r3 = await client.waitFor(
+    "approval_requested",
+    (e) => e.payload.runtime_call_id === "toolu_3",
+  );
   await client.decide(taskId, r3.payload.approval_id, "approve");
   await p3;
-  turn.toolResult("toolu_3", JSON.stringify({ artifact: { path: artifactFile, name: "result.txt", mime_type: "text/plain" } }));
+  turn.toolResult(
+    "toolu_3",
+    JSON.stringify({
+      artifact: { path: artifactFile, name: "result.txt", mime_type: "text/plain" },
+    }),
+  );
   await turn.request("mcp__d1__mystery", {}, "toolu_4"); // produces an error event
   turn.end();
   await client.waitFor("task_finished", (e) => e.payload.task_id === taskId);
@@ -61,7 +89,10 @@ async function richConversation(): Promise<{ conversationId: string; artifactFil
   const turn2 = await next;
   turn2.init();
   const slow = turn2.request("mcp__d1__slow", { mode: "uncancellable" }, "toolu_5");
-  const r5 = await client.waitFor("approval_requested", (e) => e.payload.runtime_call_id === "toolu_5");
+  const r5 = await client.waitFor(
+    "approval_requested",
+    (e) => e.payload.runtime_call_id === "toolu_5",
+  );
   await client.decide(task2, r5.payload.approval_id, "approve");
   await slow;
   await client.interrupt(task2);
@@ -77,13 +108,30 @@ describe("records, report and export", () => {
     const snapshot = snapshotConversation(catalog, conversationId);
     expect(snapshot.tables.tasks).toHaveLength(2);
     expect(snapshot.tables.events.some((e) => e.type === "text_delta")).toBe(true);
-    expect(snapshot.tables.approvals.map((a) => a.status).sort()).toEqual(["approved", "approved", "approved", "rejected"]);
+    expect(snapshot.tables.approvals.map((a) => a.status).sort()).toEqual([
+      "approved",
+      "approved",
+      "approved",
+      "rejected",
+    ]);
     expect(snapshot.tables.events.some((e) => e.type === "interruption_outcome")).toBe(true);
     expect(snapshot.tables.events.some((e) => e.type === "error")).toBe(true);
     expect(snapshot.tables.diagnostics.length).toBeGreaterThan(0);
-    expect(snapshot.tables.artifacts.some((a) => a.kind === "tool_output" && a.capture_status === "retained")).toBe(true);
-    expect(snapshot.tables.provenance_entries.some((p) => p.role === "agent_prompt" && p.availability === "retained")).toBe(true);
-    expect(snapshot.tables.provenance_entries.some((p) => p.role === "runtime_instructions" && p.availability === "unavailable")).toBe(true);
+    expect(
+      snapshot.tables.artifacts.some(
+        (a) => a.kind === "tool_output" && a.capture_status === "retained",
+      ),
+    ).toBe(true);
+    expect(
+      snapshot.tables.provenance_entries.some(
+        (p) => p.role === "agent_prompt" && p.availability === "retained",
+      ),
+    ).toBe(true);
+    expect(
+      snapshot.tables.provenance_entries.some(
+        (p) => p.role === "runtime_instructions" && p.availability === "unavailable",
+      ),
+    ).toBe(true);
     // Seeded credentials never reach the records.
     const dump = JSON.stringify(snapshot.tables);
     expect(dump).not.toContain("sk-ant-api03");
@@ -103,9 +151,22 @@ describe("records, report and export", () => {
     writeFileSync(artifactFile, "changed later");
     writeFileSync(ts.profile.runtime.agentPromptFile, "edited prompt");
     expect(verifyExport(exportDir).ok).toBe(true);
-    const artifacts = readFileSync(join(exportDir, "records/artifacts.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { logical_name: string; object_digest: string });
+    const artifacts = readFileSync(join(exportDir, "records/artifacts.jsonl"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as { logical_name: string; object_digest: string });
     const retained = artifacts.find((a) => a.logical_name === "result.txt")!;
-    expect(readFileSync(join(exportDir, "objects/sha256", retained.object_digest.slice(0, 2), retained.object_digest), "utf8")).toBe("D1");
+    expect(
+      readFileSync(
+        join(
+          exportDir,
+          "objects/sha256",
+          retained.object_digest.slice(0, 2),
+          retained.object_digest,
+        ),
+        "utf8",
+      ),
+    ).toBe("D1");
   });
 
   it("exports from one consistent snapshot: events written during export do not leak", async () => {
@@ -125,7 +186,10 @@ describe("records, report and export", () => {
     const result = exportConversation(catalog, client.conversationId!, exportDir);
     catalog.close();
     expect(result.manifest.cutoff_sequence).toBeGreaterThanOrEqual(before);
-    const events = readFileSync(join(exportDir, "events.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { sequence: number });
+    const events = readFileSync(join(exportDir, "events.jsonl"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as { sequence: number });
     expect(Math.max(...events.map((e) => e.sequence))).toBe(result.manifest.cutoff_sequence);
     expect(result.manifest.ongoing_tasks).toEqual([ack.result!.task_id]);
     const report = readFileSync(join(exportDir, "report.html"), "utf8");
@@ -157,17 +221,28 @@ describe("records, report and export", () => {
     turn2.end();
     await client.waitFor("task_finished", (e) => e.payload.conversation_id === second);
     const catalog = ts.catalog();
-    const promptDigest = catalog.get<{ object_digest: string }>("SELECT a.object_digest FROM artifacts a JOIN provenance_entries p ON p.artifact_id = a.id WHERE p.role = 'agent_prompt' LIMIT 1")!.object_digest;
-    const promptArtifacts = catalog.all("SELECT a.id FROM artifacts a JOIN provenance_entries p ON p.artifact_id = a.id WHERE p.role = 'agent_prompt'");
+    const promptDigest = catalog.get<{ object_digest: string }>(
+      "SELECT a.object_digest FROM artifacts a JOIN provenance_entries p ON p.artifact_id = a.id WHERE p.role = 'agent_prompt' LIMIT 1",
+    )!.object_digest;
+    const promptArtifacts = catalog.all(
+      "SELECT a.id FROM artifacts a JOIN provenance_entries p ON p.artifact_id = a.id WHERE p.role = 'agent_prompt'",
+    );
     expect(promptArtifacts).toHaveLength(2); // two logical records
-    expect(catalog.all("SELECT digest FROM objects WHERE digest = ?", promptDigest)).toHaveLength(1); // one object
+    expect(catalog.all("SELECT digest FROM objects WHERE digest = ?", promptDigest)).toHaveLength(
+      1,
+    ); // one object
     const exportDir = join(ts.dir, "export-3");
     const result = exportConversation(catalog, first, exportDir);
     catalog.close();
     expect(result.manifest.complete).toBe(true);
-    const all = readFileSync(join(exportDir, "events.jsonl"), "utf8") + readFileSync(join(exportDir, "records/tasks.jsonl"), "utf8") + readFileSync(join(exportDir, "report.html"), "utf8");
+    const all =
+      readFileSync(join(exportDir, "events.jsonl"), "utf8") +
+      readFileSync(join(exportDir, "records/tasks.jsonl"), "utf8") +
+      readFileSync(join(exportDir, "report.html"), "utf8");
     expect(all).not.toContain("UNRELATED-SECOND");
-    expect(existsSync(join(exportDir, "objects/sha256", promptDigest.slice(0, 2), promptDigest))).toBe(true);
+    expect(
+      existsSync(join(exportDir, "objects/sha256", promptDigest.slice(0, 2), promptDigest)),
+    ).toBe(true);
     expect(result.manifest.record_counts.conversations).toBe(1);
   });
 
@@ -175,13 +250,17 @@ describe("records, report and export", () => {
     await richConversation();
     const catalog = ts.catalog();
     const store = new ObjectStore(catalog.paths);
-    const artifact = catalog.get<{ object_digest: string }>("SELECT object_digest FROM artifacts WHERE logical_name = 'result.txt'")!;
+    const artifact = catalog.get<{ object_digest: string }>(
+      "SELECT object_digest FROM artifacts WHERE logical_name = 'result.txt'",
+    )!;
     const path = store.pathFor(artifact.object_digest);
     rmSync(path, { force: true });
     // Orphan object: bytes published without a catalog row (simulated crash between publish and commit).
     const orphan = store.put(Buffer.from("orphan bytes"));
     // Corrupt a provenance object.
-    const prov = catalog.get<{ object_digest: string }>("SELECT a.object_digest FROM artifacts a JOIN provenance_entries p ON p.artifact_id = a.id WHERE p.role = 'configuration'")!;
+    const prov = catalog.get<{ object_digest: string }>(
+      "SELECT a.object_digest FROM artifacts a JOIN provenance_entries p ON p.artifact_id = a.id WHERE p.role = 'configuration'",
+    )!;
     const provPath = store.pathFor(prov.object_digest);
     const { chmodSync } = await import("node:fs");
     chmodSync(provPath, 0o600);

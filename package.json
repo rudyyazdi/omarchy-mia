@@ -24,17 +24,30 @@
     "client": "tsx apps/text-client/src/main.ts",
     "mia": "tsx apps/debug-cli/src/main.ts",
     "fixture": "tsx fixtures/controlled-mcp/src/main.ts",
-    "live": "tsx tests/acceptance/promptfoo/run.ts"
+    "live": "tsx tests/acceptance/promptfoo/run.ts",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@types/node": "26.6.1",
     "@types/ws": "8.18.1",
+    "eslint": "10.11.0",
+    "eslint-config-prettier": "10.1.8",
+    "globals": "17.12.0",
+    "prettier": "3.9.8",
     "tsx": "4.23.13",
     "typescript": "5.9.3",
+    "typescript-eslint": "8.70.0",
     "vitest": "4.1.11"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
+    "commander": "15.0.0",
+    "ts-pattern": "5.9.0",
     "ws": "8.21.3",
     "zod": "4.6.5"
   }

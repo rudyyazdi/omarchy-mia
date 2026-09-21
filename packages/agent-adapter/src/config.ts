@@ -7,8 +7,20 @@ export const ToolPolicySchema = z.enum(["allow", "ask", "deny"]);
 export type ToolPolicy = z.infer<typeof ToolPolicySchema>;
 
 export const McpServerConfigSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("http"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional() }).strict(),
-  z.object({ type: z.literal("sse"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional() }).strict(),
+  z
+    .object({
+      type: z.literal("http"),
+      url: z.string().url(),
+      headers: z.record(z.string(), z.string()).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("sse"),
+      url: z.string().url(),
+      headers: z.record(z.string(), z.string()).optional(),
+    })
+    .strict(),
   z
     .object({
       type: z.literal("stdio"),
@@ -43,7 +55,10 @@ export const RuntimeConfigSchema = z
      * deny: rejected before any prompt.
      * Tools not listed are denied with a visible error.
      */
-    toolPolicy: z.record(z.string().regex(/^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_.-]+$/), ToolPolicySchema),
+    toolPolicy: z.record(
+      z.string().regex(/^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_.-]+$/),
+      ToolPolicySchema,
+    ),
     /** Mia-owned agent instructions appended to the runtime's system prompt. */
     agentPromptFile: z.string().min(1),
     /** Directories from which tool-result-declared artifacts may be collected. */
@@ -66,11 +81,15 @@ export function validateRuntimeConfig(config: RuntimeConfig): void {
     const match = /^mcp__([A-Za-z0-9_-]+)__/.exec(identity);
     const server = match?.[1];
     if (!server || !(server in config.mcpServers)) {
-      throw new ConfigurationError(`toolPolicy names ${identity} but no MCP server "${server}" is configured`);
+      throw new ConfigurationError(
+        `toolPolicy names ${identity} but no MCP server "${server}" is configured`,
+      );
     }
   }
   if ("mia_approval" in config.mcpServers) {
-    throw new ConfigurationError(`mcpServers may not define "mia_approval"; that name is reserved for the approval bridge`);
+    throw new ConfigurationError(
+      `mcpServers may not define "mia_approval"; that name is reserved for the approval bridge`,
+    );
   }
   for (const tool of config.builtinTools) {
     // Built-in tools are not routed through the approval bridge by rule; D1 has proven gating only for MCP tools.
@@ -80,6 +99,7 @@ export function validateRuntimeConfig(config: RuntimeConfig): void {
   }
   const secretLike = /(token|secret|password|api[-_]?key|authorization)/i;
   for (const key of Object.keys(config.env)) {
-    if (secretLike.test(key)) throw new ConfigurationError(`env must not carry credentials (found key ${key})`);
+    if (secretLike.test(key))
+      throw new ConfigurationError(`env must not carry credentials (found key ${key})`);
   }
 }

@@ -4,7 +4,16 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { dirname } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
-import { ClientCommandSchema, EnvelopeHeadSchema, LIMITS, PROTOCOL_VERSION, registerSecret, type ClientCommand, type ErrorCode, type ServerEvent } from "@mia/protocol";
+import {
+  ClientCommandSchema,
+  EnvelopeHeadSchema,
+  LIMITS,
+  PROTOCOL_VERSION,
+  registerSecret,
+  type ClientCommand,
+  type ErrorCode,
+  type ServerEvent,
+} from "@mia/protocol";
 import { nowIso, type RecordWriter } from "@mia/records";
 import type { CommandResult, Engine } from "./engine.ts";
 
@@ -29,7 +38,8 @@ export interface GatewayHandle {
 export function loadOrCreateSecret(path: string): string {
   if (existsSync(path)) {
     const secret = readFileSync(path, "utf8").trim();
-    if (secret.length < 32) throw new Error(`secret file ${path} is too short; delete it to regenerate`);
+    if (secret.length < 32)
+      throw new Error(`secret file ${path} is too short; delete it to regenerate`);
     registerSecret(secret);
     return secret;
   }
@@ -89,7 +99,12 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
     conn.socket.send(JSON.stringify(event));
   };
 
-  const ack = (conn: ConnectionState, commandId: string, disposition: "accepted" | "duplicate" | "rejected", extra: { error?: { code: ErrorCode; message: string }; result?: Record<string, unknown> } = {}) => {
+  const ack = (
+    conn: ConnectionState,
+    commandId: string,
+    disposition: "accepted" | "duplicate" | "rejected",
+    extra: { error?: { code: ErrorCode; message: string }; result?: Record<string, unknown> } = {},
+  ) => {
     const event: ServerEvent = {
       protocol_version: PROTOCOL_VERSION,
       message_id: randomUUID(),
@@ -102,19 +117,37 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
     if (conn.socket.readyState === conn.socket.OPEN) conn.socket.send(JSON.stringify(event));
   };
 
-  const rejectRaw = (conn: ConnectionState, commandId: string, code: ErrorCode, message: string) => {
+  const rejectRaw = (
+    conn: ConnectionState,
+    commandId: string,
+    code: ErrorCode,
+    message: string,
+  ) => {
     ack(conn, commandId, "rejected", { error: { code, message } });
   };
 
   wss.on("connection", (socket) => {
-    const conn: ConnectionState = { id: `conn_${randomUUID().replace(/-/g, "")}`, socket, clientId: null, clientBuild: null, opened: false };
+    const conn: ConnectionState = {
+      id: `conn_${randomUUID().replace(/-/g, "")}`,
+      socket,
+      clientId: null,
+      clientBuild: null,
+      opened: false,
+    };
     connections.set(conn.id, conn);
     options.log(`connection ${conn.id} opened`);
 
     socket.on("message", (data, isBinary) => {
-      if (isBinary) return rejectRaw(conn, "unknown", "invalid_message", "binary frames are not accepted");
+      if (isBinary)
+        return rejectRaw(conn, "unknown", "invalid_message", "binary frames are not accepted");
       const text = data.toString("utf8");
-      if (text.length > LIMITS.maxEnvelopeBytes) return rejectRaw(conn, "unknown", "invalid_message", `envelope exceeds ${LIMITS.maxEnvelopeBytes} bytes`);
+      if (text.length > LIMITS.maxEnvelopeBytes)
+        return rejectRaw(
+          conn,
+          "unknown",
+          "invalid_message",
+          `envelope exceeds ${LIMITS.maxEnvelopeBytes} bytes`,
+        );
       let json: unknown;
       try {
         json = JSON.parse(text);
@@ -122,46 +155,118 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
         return rejectRaw(conn, "unknown", "invalid_message", "envelope is not valid JSON");
       }
       const head = EnvelopeHeadSchema.safeParse(json);
-      const commandId = head.success && typeof head.data.message_id === "string" ? head.data.message_id : "unknown";
-      if (!head.success) return rejectRaw(conn, commandId, "invalid_message", "envelope must carry protocol_version, message_id, client_id, type and payload");
+      const commandId =
+        head.success && typeof head.data.message_id === "string" ? head.data.message_id : "unknown";
+      if (!head.success)
+        return rejectRaw(
+          conn,
+          commandId,
+          "invalid_message",
+          "envelope must carry protocol_version, message_id, client_id, type and payload",
+        );
       if (head.data.protocol_version !== PROTOCOL_VERSION) {
-        return rejectRaw(conn, commandId, "unsupported_protocol_version", `this server speaks protocol_version ${PROTOCOL_VERSION}; received ${JSON.stringify(head.data.protocol_version)}. Upgrade the client or server.`);
+        return rejectRaw(
+          conn,
+          commandId,
+          "unsupported_protocol_version",
+          `this server speaks protocol_version ${PROTOCOL_VERSION}; received ${JSON.stringify(head.data.protocol_version)}. Upgrade the client or server.`,
+        );
       }
       const parsed = ClientCommandSchema.safeParse(json);
       if (!parsed.success) {
-        return rejectRaw(conn, commandId, "invalid_message", `invalid ${String(head.data.type)} command: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+        return rejectRaw(
+          conn,
+          commandId,
+          "invalid_message",
+          `invalid ${String(head.data.type)} command: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
+        );
       }
       const command = parsed.data;
-      if (conn.clientId && conn.clientId !== command.client_id) return rejectRaw(conn, commandId, "invalid_message", "client_id changed within a connection");
+      if (conn.clientId && conn.clientId !== command.client_id)
+        return rejectRaw(
+          conn,
+          commandId,
+          "invalid_message",
+          "client_id changed within a connection",
+        );
       try {
         if (!conn.opened) {
           conn.clientId = command.client_id;
-          conn.clientBuild = command.type === "diagnostic_snapshot" ? command.payload.diagnostics.build : null;
+          conn.clientBuild =
+            command.type === "diagnostic_snapshot" ? command.payload.diagnostics.build : null;
           options.writer.ensureClient(command.client_id, "text-client");
-          options.writer.openConnection({ connectionId: conn.id, clientId: command.client_id, build: conn.clientBuild });
+          options.writer.openConnection({
+            connectionId: conn.id,
+            clientId: command.client_id,
+            build: conn.clientBuild,
+          });
           conn.opened = true;
           options.engine.adoptConnection(conn.id, command.client_id);
         } else if (command.type === "diagnostic_snapshot" && !conn.clientBuild) {
           conn.clientBuild = command.payload.diagnostics.build;
         }
         options.writer.touchConnection(conn.id);
-        const conversationId = "conversation_id" in command.payload ? (command.payload.conversation_id as string | null) : null;
-        const recorded = options.writer.recordCommand({ connectionId: conn.id, clientId: command.client_id, clientCommandId: command.message_id, type: command.type, payload: command.payload, conversationId });
+        const conversationId =
+          "conversation_id" in command.payload
+            ? (command.payload.conversation_id as string | null)
+            : null;
+        const recorded = options.writer.recordCommand({
+          connectionId: conn.id,
+          clientId: command.client_id,
+          clientCommandId: command.message_id,
+          type: command.type,
+          payload: command.payload,
+          conversationId,
+        });
         if (recorded.duplicate) {
-          if (!recorded.sameDigest) return rejectRaw(conn, commandId, "duplicate_command_conflict", "message_id reused with a different payload; nothing executed");
-          return ack(conn, commandId, "duplicate", recorded.error ? { error: { code: "invalid_state", message: recorded.error } } : {});
+          if (!recorded.sameDigest)
+            return rejectRaw(
+              conn,
+              commandId,
+              "duplicate_command_conflict",
+              "message_id reused with a different payload; nothing executed",
+            );
+          return ack(
+            conn,
+            commandId,
+            "duplicate",
+            recorded.error ? { error: { code: "invalid_state", message: recorded.error } } : {},
+          );
         }
-        const result = dispatch(options.engine, { connectionId: conn.id, clientId: command.client_id, commandId: command.message_id, clientBuild: conn.clientBuild }, command);
+        const result = dispatch(
+          options.engine,
+          {
+            connectionId: conn.id,
+            clientId: command.client_id,
+            commandId: command.message_id,
+            clientBuild: conn.clientBuild,
+          },
+          command,
+        );
         if (result.ok) {
           options.writer.finishCommand(recorded.commandId, "accepted", null, null);
           ack(conn, commandId, "accepted", result.result ? { result: result.result } : {});
         } else {
-          options.writer.finishCommand(recorded.commandId, "rejected", `${result.code}: ${result.message}`, null);
-          ack(conn, commandId, "rejected", { error: { code: result.code, message: result.message } });
+          options.writer.finishCommand(
+            recorded.commandId,
+            "rejected",
+            `${result.code}: ${result.message}`,
+            null,
+          );
+          ack(conn, commandId, "rejected", {
+            error: { code: result.code, message: result.message },
+          });
         }
       } catch (error) {
-        options.log(`command handling failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
-        rejectRaw(conn, commandId, "internal", "internal error while handling the command; nothing executed");
+        options.log(
+          `command handling failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+        );
+        rejectRaw(
+          conn,
+          commandId,
+          "internal",
+          "internal error while handling the command; nothing executed",
+        );
       }
     });
 
@@ -198,7 +303,11 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
   };
 }
 
-function dispatch(engine: Engine, ctx: { connectionId: string; clientId: string; commandId: string; clientBuild: unknown }, command: ClientCommand): CommandResult {
+function dispatch(
+  engine: Engine,
+  ctx: { connectionId: string; clientId: string; commandId: string; clientBuild: unknown },
+  command: ClientCommand,
+): CommandResult {
   switch (command.type) {
     case "start_conversation":
       return engine.startConversation(ctx);

@@ -75,7 +75,11 @@ interface StepRecord {
   first_turn: boolean;
   prompt: string;
   events: AdapterEvent[];
-  permission_requests: Array<{ request: unknown; decision: PermissionDecision; abandoned: boolean }>;
+  permission_requests: Array<{
+    request: unknown;
+    decision: PermissionDecision;
+    abandoned: boolean;
+  }>;
   turn: TurnResult | null;
   ledger_after: unknown;
   hook_evidence: unknown;
@@ -87,18 +91,25 @@ const records: StepRecord[] = [];
 const log = (...args: unknown[]) => console.log(`[probe]`, ...args);
 
 function save(name: string, data: unknown) {
-  writeFileSync(join(outDir, `${name}.json`), JSON.stringify(redactValue(data), null, 2), { mode: 0o600 });
+  writeFileSync(join(outDir, `${name}.json`), JSON.stringify(redactValue(data), null, 2), {
+    mode: 0o600,
+  });
 }
 
 const staticReport = probeStaticCapabilities(baseConfig());
 save("static-capabilities", staticReport);
 log("static:", JSON.stringify(staticReport, null, 1));
 if (staticReport.errors.length > 0) {
-  console.error("Static probe found blockers:\n" + staticReport.errors.map((e) => ` - ${e}`).join("\n"));
+  console.error(
+    "Static probe found blockers:\n" + staticReport.errors.map((e) => ` - ${e}`).join("\n"),
+  );
   await shutdown(1);
 }
 
-type Decider = (req: PermissionRequest, step: StepRecord) => Promise<PermissionDecision> | PermissionDecision;
+type Decider = (
+  req: PermissionRequest,
+  step: StepRecord,
+) => Promise<PermissionDecision> | PermissionDecision;
 
 async function runStep(opts: {
   name: string;
@@ -137,11 +148,23 @@ async function runStep(opts: {
     onEvent: (event) => {
       step.events.push(event);
       if (event.type === "text_delta") process.stdout.write(event.text);
-      else if (event.type !== "assistant_message") log(event.type, event.type === "tool_proposed" ? `${event.tool_identity} ${event.runtime_call_id}` : event.type === "runtime_stderr" ? event.text.trim() : "");
+      else if (event.type !== "assistant_message")
+        log(
+          event.type,
+          event.type === "tool_proposed"
+            ? `${event.tool_identity} ${event.runtime_call_id}`
+            : event.type === "runtime_stderr"
+              ? event.text.trim()
+              : "",
+        );
     },
     permissionHandler: async (req) => {
       const decision = await opts.decide(req, step);
-      step.permission_requests.push({ request: req.raw, decision, abandoned: req.abandoned.aborted });
+      step.permission_requests.push({
+        request: req.raw,
+        decision,
+        abandoned: req.abandoned.aborted,
+      });
       log("permission", req.tool_name, req.tool_use_id, "->", decision.behavior);
       return decision;
     },
@@ -173,20 +196,42 @@ if (want("stream-approve")) {
       "Remember the marker K7. Then call d1.read once and report the counter. Then call d1.change with delta 1 exactly once and report the new counter. Do not retry any denied call.",
     decide: (req) => ({ behavior: "allow" }),
   });
-  const ledger = step.ledger_after as { counter: number; ledger: Array<{ kind: string; tool: string }> };
-  const reqs = step.permission_requests.map((p) => p.request as { tool_name?: string; tool_use_id?: string });
-  step.checks.deltas_before_result = step.events.findIndex((e) => e.type === "text_delta") < step.events.findIndex((e) => e.type === "turn_result");
+  const ledger = step.ledger_after as {
+    counter: number;
+    ledger: Array<{ kind: string; tool: string }>;
+  };
+  const reqs = step.permission_requests.map(
+    (p) => p.request as { tool_name?: string; tool_use_id?: string },
+  );
+  step.checks.deltas_before_result =
+    step.events.findIndex((e) => e.type === "text_delta") <
+    step.events.findIndex((e) => e.type === "turn_result");
   step.checks.read_routed_through_bridge = reqs.some((r) => r.tool_name === "mcp__d1__read");
   step.checks.change_routed_through_bridge = reqs.some((r) => r.tool_name === "mcp__d1__change");
-  step.checks.tool_use_id_present_on_all_requests = reqs.every((r) => typeof r.tool_use_id === "string" && r.tool_use_id.length > 0);
+  step.checks.tool_use_id_present_on_all_requests = reqs.every(
+    (r) => typeof r.tool_use_id === "string" && r.tool_use_id.length > 0,
+  );
   step.checks.tool_use_id_matches_streamed_tool_use = reqs.every((r) =>
-    step.events.some((e) => e.type === "tool_proposed" && e.runtime_call_id === r.tool_use_id && e.tool_identity === r.tool_name),
+    step.events.some(
+      (e) =>
+        e.type === "tool_proposed" &&
+        e.runtime_call_id === r.tool_use_id &&
+        e.tool_identity === r.tool_name,
+    ),
   );
   step.checks.exactly_one_commit = ledger.ledger.filter((e) => e.kind === "committed").length === 1;
-  const hooks = step.hook_evidence as Array<{ effort?: { level?: string } | string; env_claude_effort?: string }>;
-  const efforts = hooks.map((h) => (typeof h.effort === "object" && h.effort ? h.effort.level : h.effort) ?? h.env_claude_effort);
-  step.checks.effort_evidence = efforts.length > 0 ? JSON.stringify(efforts) : "no hook evidence captured";
-  step.checks.effort_flag_beats_settings_layer = efforts.length > 0 && efforts.every((e) => e === "medium");
+  const hooks = step.hook_evidence as Array<{
+    effort?: { level?: string } | string;
+    env_claude_effort?: string;
+  }>;
+  const efforts = hooks.map(
+    (h) =>
+      (typeof h.effort === "object" && h.effort ? h.effort.level : h.effort) ?? h.env_claude_effort,
+  );
+  step.checks.effort_evidence =
+    efforts.length > 0 ? JSON.stringify(efforts) : "no hook evidence captured";
+  step.checks.effort_flag_beats_settings_layer =
+    efforts.length > 0 && efforts.every((e) => e === "medium");
   step.checks.init_model = step.turn?.init?.model ?? "no init";
   log("checks", step.checks);
   save("step-1-checks", step.checks);
@@ -205,21 +250,39 @@ if (want("followup-everycall-deny")) {
     decide: (req) => {
       if (req.tool_name === "mcp__d1__change") {
         changeCount += 1;
-        return changeCount === 1 ? { behavior: "allow" } : { behavior: "deny", message: "The user rejected this call." };
+        return changeCount === 1
+          ? { behavior: "allow" }
+          : { behavior: "deny", message: "The user rejected this call." };
       }
       return { behavior: "deny", message: "Not permitted." };
     },
   });
-  const ledger = step.ledger_after as { counter: number; ledger: Array<{ kind: string; tool: string }> };
-  const reqs = step.permission_requests.map((p) => p.request as { tool_name?: string; tool_use_id?: string });
+  const ledger = step.ledger_after as {
+    counter: number;
+    ledger: Array<{ kind: string; tool: string }>;
+  };
+  const reqs = step.permission_requests.map(
+    (p) => p.request as { tool_name?: string; tool_use_id?: string },
+  );
   const changeIds = reqs.filter((r) => r.tool_name === "mcp__d1__change").map((r) => r.tool_use_id);
-  step.checks.marker_recalled = step.events.some((e) => e.type === "assistant_message" && JSON.stringify(e.message).includes("K7"));
-  step.checks.two_distinct_change_requests = changeIds.length === 2 && new Set(changeIds).size === 2;
-  step.checks.commits_total_after_step = String(ledger.ledger.filter((e) => e.kind === "committed" && e.tool === "change").length);
-  step.checks.forbidden_never_reached_bridge = !reqs.some((r) => r.tool_name === "mcp__d1__forbidden");
+  step.checks.marker_recalled = step.events.some(
+    (e) => e.type === "assistant_message" && JSON.stringify(e.message).includes("K7"),
+  );
+  step.checks.two_distinct_change_requests =
+    changeIds.length === 2 && new Set(changeIds).size === 2;
+  step.checks.commits_total_after_step = String(
+    ledger.ledger.filter((e) => e.kind === "committed" && e.tool === "change").length,
+  );
+  step.checks.forbidden_never_reached_bridge = !reqs.some(
+    (r) => r.tool_name === "mcp__d1__forbidden",
+  );
   step.checks.forbidden_never_executed = !ledger.ledger.some((e) => e.tool === "forbidden");
-  step.checks.forbidden_proposed_by_model = step.events.some((e) => e.type === "tool_proposed" && e.tool_identity === "mcp__d1__forbidden");
-  step.checks.runtime_reported_denials = JSON.stringify(step.turn?.result?.permission_denials ?? null).slice(0, 500);
+  step.checks.forbidden_proposed_by_model = step.events.some(
+    (e) => e.type === "tool_proposed" && e.tool_identity === "mcp__d1__forbidden",
+  );
+  step.checks.runtime_reported_denials = JSON.stringify(
+    step.turn?.result?.permission_denials ?? null,
+  ).slice(0, 500);
   log("checks", step.checks);
   save("step-2-checks", step.checks);
 }
@@ -234,7 +297,8 @@ if (want("interrupt-cancellable")) {
     sessionId: s2,
     firstTurn: true,
     turnIndex: 1,
-    prompt: "Call d1.slow with mode cancellable exactly once. After it returns, call d1.change with delta 1 exactly once. Report the results.",
+    prompt:
+      "Call d1.slow with mode cancellable exactly once. After it returns, call d1.change with delta 1 exactly once. Report the results.",
     decide: () => ({ behavior: "allow" }),
     during: async (handle, step) => {
       const entered = await harness.waitEntered(120_000);
@@ -250,10 +314,18 @@ if (want("interrupt-cancellable")) {
       }
     },
   });
-  const ledger = step.ledger_after as { counter: number; ledger: Array<{ kind: string; tool: string }>; pending: unknown[] };
-  step.checks.slow_cancelled_in_ledger = ledger.ledger.some((e) => e.kind === "cancelled" && e.tool === "slow");
+  const ledger = step.ledger_after as {
+    counter: number;
+    ledger: Array<{ kind: string; tool: string }>;
+    pending: unknown[];
+  };
+  step.checks.slow_cancelled_in_ledger = ledger.ledger.some(
+    (e) => e.kind === "cancelled" && e.tool === "slow",
+  );
   step.checks.zero_commits = ledger.ledger.filter((e) => e.kind === "committed").length === 0;
-  step.checks.no_change_proposed_after_interrupt = !step.events.some((e) => e.type === "tool_proposed" && e.tool_identity === "mcp__d1__change");
+  step.checks.no_change_proposed_after_interrupt = !step.events.some(
+    (e) => e.type === "tool_proposed" && e.tool_identity === "mcp__d1__change",
+  );
   step.checks.runtime_exit = JSON.stringify(step.turn?.exit);
   step.checks.runtime_cancellation = step.turn?.runtimeCancellation ?? "";
   step.checks.result_message_received = step.turn?.result !== null;
@@ -268,7 +340,8 @@ if (want("resume-after-kill")) {
     sessionId: s2,
     firstTurn: false,
     turnIndex: 2,
-    prompt: "In one or two sentences: what happened with the tool calls in your previous turn? Do not call any tools now.",
+    prompt:
+      "In one or two sentences: what happened with the tool calls in your previous turn? Do not call any tools now.",
     decide: () => ({ behavior: "deny", message: "No tools are permitted in this turn." }),
   });
   step.checks.resumed_ok = step.turn?.status === "completed";
@@ -287,7 +360,8 @@ if (want("interrupt-uncancellable")) {
     sessionId: s3,
     firstTurn: true,
     turnIndex: 1,
-    prompt: "Call d1.slow with mode uncancellable exactly once. After it returns, call d1.change with delta 1 exactly once. Report the results.",
+    prompt:
+      "Call d1.slow with mode uncancellable exactly once. After it returns, call d1.change with delta 1 exactly once. Report the results.",
     decide: () => ({ behavior: "allow" }),
     during: async (handle, step) => {
       const entered = await harness.waitEntered(120_000);
@@ -295,7 +369,9 @@ if (want("interrupt-uncancellable")) {
       const outcome = await handle.interrupt();
       step.notes.push(`interrupt -> ${outcome}`);
       const before = await harness.state();
-      step.notes.push(`after kill, before release: counter=${before.counter} pending=${before.pending.length}`);
+      step.notes.push(
+        `after kill, before release: counter=${before.counter} pending=${before.pending.length}`,
+      );
       await harness.release(entered.call_id);
       for (let i = 0; i < 200; i++) {
         const s = await harness.state();
@@ -304,9 +380,15 @@ if (want("interrupt-uncancellable")) {
       }
     },
   });
-  const ledger = step.ledger_after as { counter: number; ledger: Array<{ kind: string; tool: string }> };
-  step.checks.slow_committed_after_release = ledger.ledger.filter((e) => e.kind === "committed" && e.tool === "slow").length === 1;
-  step.checks.no_change_commit = !ledger.ledger.some((e) => e.kind === "committed" && e.tool === "change");
+  const ledger = step.ledger_after as {
+    counter: number;
+    ledger: Array<{ kind: string; tool: string }>;
+  };
+  step.checks.slow_committed_after_release =
+    ledger.ledger.filter((e) => e.kind === "committed" && e.tool === "slow").length === 1;
+  step.checks.no_change_commit = !ledger.ledger.some(
+    (e) => e.kind === "committed" && e.tool === "change",
+  );
   step.checks.runtime_cancellation = step.turn?.runtimeCancellation ?? "";
   log("checks", step.checks, step.notes);
   save("step-5-checks", { checks: step.checks, notes: step.notes });
@@ -317,22 +399,40 @@ if (want("effort-control")) {
   const s4 = randomUUID();
   const config = baseConfig({ extraSettings: { effortLevel: "high" } });
   const runtimeDir = join(outDir, "runtime", s4);
-  const plan = prepareLaunch({ config, runtimeDir, bridgeUrl: bridge.url, sessionId: s4, resume: false, turnIndex: 1, agentPromptFile: config.agentPromptFile });
+  const plan = prepareLaunch({
+    config,
+    runtimeDir,
+    bridgeUrl: bridge.url,
+    sessionId: s4,
+    resume: false,
+    turnIndex: 1,
+    agentPromptFile: config.agentPromptFile,
+  });
   const idx = plan.args.indexOf("--effort");
   const args = [...plan.args];
   if (idx >= 0) args.splice(idx, 2);
   const n = budget.take("probe:effort-control", config.model);
   log(`step effort-control (live call ${n}/${budget.cap}) — launching without --effort`);
   bridge.setHandler(async () => ({ behavior: "allow" }));
-  const child = spawn(plan.command, args, { cwd: plan.cwd, env: plan.env, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(plan.command, args, {
+    cwd: plan.cwd,
+    env: plan.env,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   child.stdin.end("Call d1.read once and report the counter.");
   let stdout = "";
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (c: string) => (stdout += c));
   const exit = await new Promise<number | null>((r) => child.once("close", (code) => r(code)));
   bridge.setHandler(null);
-  const hooks = readHookEvidence(plan.files.hookEvidence) as Array<{ effort?: { level?: string } | string; env_claude_effort?: string }>;
-  const efforts = hooks.map((h) => (typeof h.effort === "object" && h.effort ? h.effort.level : h.effort) ?? h.env_claude_effort);
+  const hooks = readHookEvidence(plan.files.hookEvidence) as Array<{
+    effort?: { level?: string } | string;
+    env_claude_effort?: string;
+  }>;
+  const efforts = hooks.map(
+    (h) =>
+      (typeof h.effort === "object" && h.effort ? h.effort.level : h.effort) ?? h.env_claude_effort,
+  );
   const control = { exit, efforts, stdout_lines: stdout.split("\n").filter(Boolean).length };
   writeFileSync(join(runtimeDir, "control.stream.jsonl"), stdout, { mode: 0o600 });
   save("step-6-effort-control", control);
@@ -340,8 +440,11 @@ if (want("effort-control")) {
 }
 
 // ---- Freeze redacted protocol examples ----
-function firstEvent<T extends AdapterEvent["type"]>(type: T): Extract<AdapterEvent, { type: T }> | undefined {
-  for (const r of records) for (const e of r.events) if (e.type === type) return e as Extract<AdapterEvent, { type: T }>;
+function firstEvent<T extends AdapterEvent["type"]>(
+  type: T,
+): Extract<AdapterEvent, { type: T }> | undefined {
+  for (const r of records)
+    for (const e of r.events) if (e.type === type) return e as Extract<AdapterEvent, { type: T }>;
   return undefined;
 }
 const examples: Record<string, unknown> = {
@@ -351,14 +454,21 @@ const examples: Record<string, unknown> = {
   model: values.model,
   init: firstEvent("runtime_init")?.init ?? null,
   tool_proposed: firstEvent("tool_proposed") ?? null,
-  permission_request_payload: records.find((r) => r.permission_requests.length > 0)?.permission_requests[0]?.request ?? null,
-  permission_response_examples: [{ behavior: "allow" }, { behavior: "deny", message: "The user rejected this call." }],
+  permission_request_payload:
+    records.find((r) => r.permission_requests.length > 0)?.permission_requests[0]?.request ?? null,
+  permission_response_examples: [
+    { behavior: "allow" },
+    { behavior: "deny", message: "The user rejected this call." },
+  ],
   tool_result: firstEvent("tool_result") ?? null,
   turn_result: firstEvent("turn_result")?.result ?? null,
   hook_evidence: records[0]?.hook_evidence ?? null,
   launch_description: records[0]?.turn?.launch ?? null,
 };
-writeFileSync(join(examplesDir, "captured-examples.json"), JSON.stringify(redactValue(examples), null, 2));
+writeFileSync(
+  join(examplesDir, "captured-examples.json"),
+  JSON.stringify(redactValue(examples), null, 2),
+);
 // stream sample: first 40 raw lines of the first turn
 const firstStream = records[0]?.turn?.streamLogPath;
 if (firstStream && existsSync(firstStream)) {
@@ -367,7 +477,13 @@ if (firstStream && existsSync(firstStream)) {
 }
 save("summary", {
   static: staticReport,
-  steps: records.map((r) => ({ name: r.name, checks: r.checks, notes: r.notes, status: r.turn?.status, error: r.turn?.error })),
+  steps: records.map((r) => ({
+    name: r.name,
+    checks: r.checks,
+    notes: r.notes,
+    status: r.turn?.status,
+    error: r.turn?.error,
+  })),
   live_calls_used: budget.used(),
 });
 log("done. evidence in", outDir);

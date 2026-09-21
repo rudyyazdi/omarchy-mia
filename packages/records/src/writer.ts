@@ -41,7 +41,15 @@ export interface ArtifactInput {
   redaction?: string | null;
 }
 
-export type LinkRelation = "provenance" | "task_output" | "event_payload" | "tool_result" | "diagnostic" | "runtime_transcript" | "client_build" | "agent_prompt";
+export type LinkRelation =
+  | "provenance"
+  | "task_output"
+  | "event_payload"
+  | "tool_result"
+  | "diagnostic"
+  | "runtime_transcript"
+  | "client_build"
+  | "agent_prompt";
 
 export interface LinkInput {
   conversationId: string;
@@ -72,7 +80,12 @@ export class RecordWriter {
     if (!existing) this.catalog.insert("clients", { id: clientId, first_seen_at: nowIso(), kind });
   }
 
-  openConnection(input: { connectionId: string; clientId: string; build: unknown; provenanceSetId?: string | null }): void {
+  openConnection(input: {
+    connectionId: string;
+    clientId: string;
+    build: unknown;
+    provenanceSetId?: string | null;
+  }): void {
     this.catalog.insert("client_connections", {
       id: input.connectionId,
       client_id: input.clientId,
@@ -101,15 +114,34 @@ export class RecordWriter {
     type: string;
     payload: unknown;
     conversationId?: string | null;
-  }): { duplicate: true; disposition: string; sameDigest: boolean; error: string | null; commandId: string } | { duplicate: false; commandId: string } {
+  }):
+    | {
+        duplicate: true;
+        disposition: string;
+        sameDigest: boolean;
+        error: string | null;
+        commandId: string;
+      }
+    | { duplicate: false; commandId: string } {
     const digest = canonicalDigest(input.payload);
-    const existing = this.catalog.get<{ id: string; payload_digest: string; disposition: string; error: string | null }>(
+    const existing = this.catalog.get<{
+      id: string;
+      payload_digest: string;
+      disposition: string;
+      error: string | null;
+    }>(
       "SELECT id, payload_digest, disposition, error FROM commands WHERE client_connection_id = ? AND client_command_id = ?",
       input.connectionId,
       input.clientCommandId,
     );
     if (existing) {
-      return { duplicate: true, disposition: existing.disposition, sameDigest: existing.payload_digest === digest, error: existing.error, commandId: existing.id };
+      return {
+        duplicate: true,
+        disposition: existing.disposition,
+        sameDigest: existing.payload_digest === digest,
+        error: existing.error,
+        commandId: existing.id,
+      };
     }
     const id = newId("cmd");
     this.catalog.insert("commands", {
@@ -126,8 +158,17 @@ export class RecordWriter {
     return { duplicate: false, commandId: id };
   }
 
-  finishCommand(commandId: string, disposition: "accepted" | "rejected", error: string | null, resultEventId: string | null): void {
-    this.catalog.update("commands", commandId, { disposition, error, result_event_id: resultEventId });
+  finishCommand(
+    commandId: string,
+    disposition: "accepted" | "rejected",
+    error: string | null,
+    resultEventId: string | null,
+  ): void {
+    this.catalog.update("commands", commandId, {
+      disposition,
+      error,
+      result_event_id: resultEventId,
+    });
   }
 
   // ---- provenance & artifacts ----
@@ -138,7 +179,11 @@ export class RecordWriter {
     return id;
   }
 
-  registerArtifact(input: ArtifactInput): { artifactId: string; digest: string | null; byteSize: number | null } {
+  registerArtifact(input: ArtifactInput): {
+    artifactId: string;
+    digest: string | null;
+    byteSize: number | null;
+  } {
     const id = newId("art");
     let digest: string | null = null;
     let byteSize: number | null = null;
@@ -148,7 +193,13 @@ export class RecordWriter {
       digest = stored.digest;
       byteSize = stored.byteCount;
       if (!this.catalog.get("SELECT digest FROM objects WHERE digest = ?", digest)) {
-        this.catalog.insert("objects", { digest, byte_count: byteSize, storage_key: stored.storageKey, integrity: "verified", created_at: nowIso() });
+        this.catalog.insert("objects", {
+          digest,
+          byte_count: byteSize,
+          storage_key: stored.storageKey,
+          integrity: "verified",
+          created_at: nowIso(),
+        });
       }
       status = "retained";
     }
@@ -212,7 +263,11 @@ export class RecordWriter {
   }
 
   addDependency(parentArtifactId: string, requiredArtifactId: string, relation: string): void {
-    this.catalog.insert("artifact_dependencies", { parent_artifact_id: parentArtifactId, required_artifact_id: requiredArtifactId, relation });
+    this.catalog.insert("artifact_dependencies", {
+      parent_artifact_id: parentArtifactId,
+      required_artifact_id: requiredArtifactId,
+      relation,
+    });
   }
 
   /** Link every artifact referenced by a provenance set into a conversation (shared snapshots get a link per conversation). */
@@ -221,15 +276,28 @@ export class RecordWriter {
       "SELECT artifact_id FROM provenance_entries WHERE provenance_set_id = ? AND artifact_id IS NOT NULL",
       provenanceSetId,
     );
-    for (const e of entries) this.linkArtifact({ conversationId, artifactId: e.artifact_id, relation: "provenance", provenanceSetId });
+    for (const e of entries)
+      this.linkArtifact({
+        conversationId,
+        artifactId: e.artifact_id,
+        relation: "provenance",
+        provenanceSetId,
+      });
   }
 
   // ---- conversations, tasks, executions ----
 
-  createConversation(input: { provenanceSetId: string; runtimeConversationId: string }): { id: string; startedAt: string; directory: string } {
+  createConversation(input: { provenanceSetId: string; runtimeConversationId: string }): {
+    id: string;
+    startedAt: string;
+    directory: string;
+  } {
     const startedAt = nowIso();
     const id = newId("conv");
-    const directory = join(this.catalog.paths.conversations, `${startedAt.replace(/[:.]/g, "-")}_${id}`);
+    const directory = join(
+      this.catalog.paths.conversations,
+      `${startedAt.replace(/[:.]/g, "-")}_${id}`,
+    );
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     this.catalog.insert("conversations", {
       id,
@@ -292,14 +360,24 @@ export class RecordWriter {
 
   updateExecution(
     id: string,
-    fields: { status?: string; endedAt?: string | null; reportedModel?: string | null; reportedEffort?: string | null; effortEvidence?: unknown; usage?: unknown },
+    fields: {
+      status?: string;
+      endedAt?: string | null;
+      reportedModel?: string | null;
+      reportedEffort?: string | null;
+      effortEvidence?: unknown;
+      usage?: unknown;
+    },
   ): void {
     this.catalog.update("executions", id, {
       status: fields.status,
       ended_at: fields.endedAt,
       reported_model: fields.reportedModel,
       reported_effort: fields.reportedEffort,
-      effort_evidence: fields.effortEvidence === undefined ? undefined : JSON.stringify(redactValue(fields.effortEvidence)),
+      effort_evidence:
+        fields.effortEvidence === undefined
+          ? undefined
+          : JSON.stringify(redactValue(fields.effortEvidence)),
       usage: fields.usage === undefined ? undefined : JSON.stringify(redactValue(fields.usage)),
     });
   }
@@ -368,7 +446,16 @@ export class RecordWriter {
     return id;
   }
 
-  updateToolCall(id: string, fields: { status?: string; detail?: string | null; dispatchEventId?: string | null; resultEventId?: string | null; proposalEventId?: string | null }): void {
+  updateToolCall(
+    id: string,
+    fields: {
+      status?: string;
+      detail?: string | null;
+      dispatchEventId?: string | null;
+      resultEventId?: string | null;
+      proposalEventId?: string | null;
+    },
+  ): void {
     this.catalog.update("tool_calls", id, {
       status: fields.status,
       detail: fields.detail,
@@ -379,7 +466,11 @@ export class RecordWriter {
     });
   }
 
-  createApproval(input: { toolCallId: string; executionEpoch: number; requestingEventId: string | null }): string {
+  createApproval(input: {
+    toolCallId: string;
+    executionEpoch: number;
+    requestingEventId: string | null;
+  }): string {
     const id = newId("appr");
     this.catalog.insert("approvals", {
       id,
@@ -392,7 +483,15 @@ export class RecordWriter {
     return id;
   }
 
-  updateApproval(id: string, fields: { status: "approved" | "rejected" | "invalidated" | "expired"; reason?: string | null; decisionEventId?: string | null; decisionClientId?: string | null }): void {
+  updateApproval(
+    id: string,
+    fields: {
+      status: "approved" | "rejected" | "invalidated" | "expired";
+      reason?: string | null;
+      decisionEventId?: string | null;
+      decisionClientId?: string | null;
+    },
+  ): void {
     this.catalog.update("approvals", id, {
       status: fields.status,
       reason: fields.reason,

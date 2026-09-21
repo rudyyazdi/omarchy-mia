@@ -24,12 +24,23 @@ export function collectBuildInfo(name: string, sourceRoot: string): BuildInfo {
   const root = resolve(sourceRoot);
   let version = "0.0.0";
   try {
-    version = (JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")) as { version?: string }).version ?? version;
+    version =
+      (JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")) as { version?: string })
+        .version ?? version;
   } catch {
     /* keep default */
   }
   const commit = git(["rev-parse", "HEAD"], root)?.trim() ?? null;
-  if (!commit) return { name, version, commit: null, dirty: null, local_changes_digest: null, local_changes: null, source_root: root };
+  if (!commit)
+    return {
+      name,
+      version,
+      commit: null,
+      dirty: null,
+      local_changes_digest: null,
+      local_changes: null,
+      source_root: root,
+    };
   const status = git(["status", "--porcelain"], root) ?? "";
   const dirty = status.trim().length > 0;
   let local_changes: string | null = null;

@@ -17,7 +17,9 @@ const handle = await startFixture({
   mcpPort: Number(values["mcp-port"]),
   harnessPort: Number(values["harness-port"]),
 });
-console.log(JSON.stringify({ mcp_url: handle.mcpUrl, harness_url: handle.harnessUrl, dir: values.dir }));
+console.log(
+  JSON.stringify({ mcp_url: handle.mcpUrl, harness_url: handle.harnessUrl, dir: values.dir }),
+);
 const shutdown = async () => {
   await handle.close();
   process.exit(0);

@@ -55,12 +55,16 @@ export class ApprovalBridge {
       host,
       port,
       createServer: (ctx) => {
-        const server = new McpServer({ name: BRIDGE_SERVER_NAME, version: "0.1.0" }, { capabilities: { tools: {} } });
+        const server = new McpServer(
+          { name: BRIDGE_SERVER_NAME, version: "0.1.0" },
+          { capabilities: { tools: {} } },
+        );
         server.server.setRequestHandler(ListToolsRequestSchema, async () => ({
           tools: [
             {
               name: BRIDGE_TOOL_NAME,
-              description: "Mia approval bridge. Holds a proposed tool call until the authenticated user decides.",
+              description:
+                "Mia approval bridge. Holds a proposed tool call until the authenticated user decides.",
               inputSchema: {
                 type: "object",
                 properties: {
@@ -76,13 +80,31 @@ export class ApprovalBridge {
         server.server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           const received_at = new Date().toISOString();
           if (req.params.name !== BRIDGE_TOOL_NAME) {
-            return { isError: true, content: [{ type: "text", text: JSON.stringify({ behavior: "deny", message: "unknown bridge tool" }) }] };
+            return {
+              isError: true,
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({ behavior: "deny", message: "unknown bridge tool" }),
+                },
+              ],
+            };
           }
           const parsed = PermissionRequestPayloadSchema.safeParse(req.params.arguments ?? {});
-          const respond = (decision: PermissionDecision) => ({ content: [{ type: "text" as const, text: JSON.stringify(decision) }] });
-          if (!parsed.success) return respond({ behavior: "deny", message: `Mia rejected a malformed permission request: ${parsed.error.message.slice(0, 200)}` });
+          const respond = (decision: PermissionDecision) => ({
+            content: [{ type: "text" as const, text: JSON.stringify(decision) }],
+          });
+          if (!parsed.success)
+            return respond({
+              behavior: "deny",
+              message: `Mia rejected a malformed permission request: ${parsed.error.message.slice(0, 200)}`,
+            });
           const handler = this.handler;
-          if (!handler) return respond({ behavior: "deny", message: "Mia has no active task accepting tool calls." });
+          if (!handler)
+            return respond({
+              behavior: "deny",
+              message: "Mia has no active task accepting tool calls.",
+            });
           try {
             const decision = await handler({
               tool_name: parsed.data.tool_name,
@@ -94,7 +116,10 @@ export class ApprovalBridge {
             });
             return respond(decision);
           } catch (error) {
-            return respond({ behavior: "deny", message: `Mia could not evaluate this call: ${error instanceof Error ? error.message : String(error)}` });
+            return respond({
+              behavior: "deny",
+              message: `Mia could not evaluate this call: ${error instanceof Error ? error.message : String(error)}`,
+            });
           }
         });
         return server;

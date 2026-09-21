@@ -2,7 +2,16 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import WebSocket from "ws";
-import { PROTOCOL_VERSION, ServerEventSchema, type ClientCommand, type ClientDiagnostics, type Decision, type ServerEvent, type ServerEventOf, type ServerEventType } from "@mia/protocol";
+import {
+  PROTOCOL_VERSION,
+  ServerEventSchema,
+  type ClientCommand,
+  type ClientDiagnostics,
+  type Decision,
+  type ServerEvent,
+  type ServerEventOf,
+  type ServerEventType,
+} from "@mia/protocol";
 
 export interface MiaClientOptions {
   url: string;
@@ -38,12 +47,16 @@ export class MiaClient extends EventEmitter {
 
   async connect(): Promise<void> {
     this.connectionState = "connecting";
-    const socket = new WebSocket(this.options.url, { headers: { authorization: `Bearer ${this.options.secret}` } });
+    const socket = new WebSocket(this.options.url, {
+      headers: { authorization: `Bearer ${this.options.secret}` },
+    });
     this.socket = socket;
     await new Promise<void>((resolve, reject) => {
       socket.once("open", () => resolve());
       socket.once("error", (error) => reject(error));
-      socket.once("unexpected-response", (_, res) => reject(new Error(`server refused the connection: HTTP ${res.statusCode}`)));
+      socket.once("unexpected-response", (_, res) =>
+        reject(new Error(`server refused the connection: HTTP ${res.statusCode}`)),
+      );
     });
     this.connectionState = "connected";
     socket.on("message", (data) => this.onMessage(data.toString("utf8")));
@@ -92,10 +105,21 @@ export class MiaClient extends EventEmitter {
   }
 
   /** Send a command and wait for its acknowledgement. */
-  send<T extends ClientCommand["type"]>(type: T, payload: Extract<ClientCommand, { type: T }>["payload"], messageId = `cmd_${randomUUID()}`): Promise<AckPayload> {
+  send<T extends ClientCommand["type"]>(
+    type: T,
+    payload: Extract<ClientCommand, { type: T }>["payload"],
+    messageId = `cmd_${randomUUID()}`,
+  ): Promise<AckPayload> {
     const socket = this.socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error("not connected"));
-    const envelope = { protocol_version: PROTOCOL_VERSION, message_id: messageId, client_id: this.clientId, type, payload };
+    if (!socket || socket.readyState !== WebSocket.OPEN)
+      return Promise.reject(new Error("not connected"));
+    const envelope = {
+      protocol_version: PROTOCOL_VERSION,
+      message_id: messageId,
+      client_id: this.clientId,
+      type,
+      payload,
+    };
     this.recentInteractionIds.push(messageId);
     return new Promise<AckPayload>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -129,7 +153,8 @@ export class MiaClient extends EventEmitter {
 
   async startConversation(): Promise<string> {
     const ack = await this.send("start_conversation", {});
-    if (ack.disposition === "rejected") throw new Error(`start_conversation rejected: ${ack.error?.code}: ${ack.error?.message}`);
+    if (ack.disposition === "rejected")
+      throw new Error(`start_conversation rejected: ${ack.error?.code}: ${ack.error?.message}`);
     const id = (ack.result?.conversation_id as string | undefined) ?? this.conversationId;
     if (!id) throw new Error("server did not return a conversation id");
     this.conversationId = id;
@@ -141,27 +166,53 @@ export class MiaClient extends EventEmitter {
     return this.send("submit_text", { conversation_id: this.conversationId, text }, messageId);
   }
 
-  decide(taskId: string, approvalId: string, decision: Decision, messageId?: string): Promise<AckPayload> {
+  decide(
+    taskId: string,
+    approvalId: string,
+    decision: Decision,
+    messageId?: string,
+  ): Promise<AckPayload> {
     if (!this.conversationId) throw new Error("no conversation");
-    return this.send("approval_decision", { conversation_id: this.conversationId, task_id: taskId, approval_id: approvalId, decision }, messageId);
+    return this.send(
+      "approval_decision",
+      { conversation_id: this.conversationId, task_id: taskId, approval_id: approvalId, decision },
+      messageId,
+    );
   }
 
   interrupt(taskId: string, messageId?: string): Promise<AckPayload> {
     if (!this.conversationId) throw new Error("no conversation");
-    return this.send("interrupt_task", { conversation_id: this.conversationId, task_id: taskId }, messageId);
+    return this.send(
+      "interrupt_task",
+      { conversation_id: this.conversationId, task_id: taskId },
+      messageId,
+    );
   }
 
   sendDiagnostics(): Promise<AckPayload> {
-    return this.send("diagnostic_snapshot", { conversation_id: this.conversationId, diagnostics: this.diagnostics() });
+    return this.send("diagnostic_snapshot", {
+      conversation_id: this.conversationId,
+      diagnostics: this.diagnostics(),
+    });
   }
 
   heartbeat(): Promise<AckPayload> {
-    return this.send("heartbeat", { conversation_id: this.conversationId, captured_at: new Date().toISOString(), connection_state: this.connectionState });
+    return this.send("heartbeat", {
+      conversation_id: this.conversationId,
+      captured_at: new Date().toISOString(),
+      connection_state: this.connectionState,
+    });
   }
 
   /** Wait for the next event of a type that satisfies the predicate. */
-  waitFor<T extends ServerEventType>(type: T, predicate: (e: ServerEventOf<T>) => boolean = () => true, timeoutMs = 120_000): Promise<ServerEventOf<T>> {
-    const existing = this.events.find((e) => e.type === type && predicate(e as ServerEventOf<T>)) as ServerEventOf<T> | undefined;
+  waitFor<T extends ServerEventType>(
+    type: T,
+    predicate: (e: ServerEventOf<T>) => boolean = () => true,
+    timeoutMs = 120_000,
+  ): Promise<ServerEventOf<T>> {
+    const existing = this.events.find(
+      (e) => e.type === type && predicate(e as ServerEventOf<T>),
+    ) as ServerEventOf<T> | undefined;
     if (existing) return Promise.resolve(existing);
     const channel = type === "error" ? "server_error" : type;
     return new Promise((resolve, reject) => {

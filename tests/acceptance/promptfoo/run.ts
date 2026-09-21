@@ -27,10 +27,17 @@ mkdirSync(outDir, { recursive: true, mode: 0o700 });
 const log = (m: string) => console.log(`[live] ${m}`);
 
 type Row = Record<string, unknown>;
-function writeLiveResults(rows: Row[], summary: Record<string, unknown>, promptVersion: string, outDirAbs: string): void {
+function writeLiveResults(
+  rows: Row[],
+  summary: Record<string, unknown>,
+  promptVersion: string,
+  outDirAbs: string,
+): void {
   writeFileSync(join(outDirAbs, "acceptance-live.json"), JSON.stringify(summary, null, 2));
   // Committed markdown must not carry personal absolute paths.
-  const outDir = outDirAbs.startsWith(REPO_ROOT) ? outDirAbs.slice(REPO_ROOT.length + 1) : outDirAbs;
+  const outDir = outDirAbs.startsWith(REPO_ROOT)
+    ? outDirAbs.slice(REPO_ROOT.length + 1)
+    : outDirAbs;
   const md = [
     `# Live acceptance results (${promptVersion}, ${summary.model})`,
     "",
@@ -45,25 +52,45 @@ function writeLiveResults(rows: Row[], summary: Record<string, unknown>, promptV
     }),
   ];
   mkdirSync(join(REPO_ROOT, "docs/D1/acceptance"), { recursive: true });
-  writeFileSync(join(REPO_ROOT, "docs/D1/acceptance", `live-results-${promptVersion}.md`), md.join("\n") + "\n");
+  writeFileSync(
+    join(REPO_ROOT, "docs/D1/acceptance", `live-results-${promptVersion}.md`),
+    md.join("\n") + "\n",
+  );
 }
 
 const fixtureDir = join(outDir, "fixture");
 const fixture = await startFixture({ dir: fixtureDir });
 log(`fixture ${fixture.mcpUrl} harness ${fixture.harnessUrl}`);
-const env = { ...process.env, MIA_FIXTURE_MCP_URL: fixture.mcpUrl, MIA_FIXTURE_DIR: fixtureDir, XDG_STATE_HOME: process.env.XDG_STATE_HOME ?? join(process.env.HOME ?? ".", ".local", "state") };
-const promptVersion = resolve(REPO_ROOT, values["agent-prompt"]!).split("/").pop()!.replace(/\.md$/, "");
+const env = {
+  ...process.env,
+  MIA_FIXTURE_MCP_URL: fixture.mcpUrl,
+  MIA_FIXTURE_DIR: fixtureDir,
+  XDG_STATE_HOME: process.env.XDG_STATE_HOME ?? join(process.env.HOME ?? ".", ".local", "state"),
+};
+const promptVersion = resolve(REPO_ROOT, values["agent-prompt"]!)
+  .split("/")
+  .pop()!
+  .replace(/\.md$/, "");
 
 async function startProfile(name: string, index: number): Promise<MiaServer> {
   const profile = loadProfile(join(REPO_ROOT, "examples", "config", `${name}.json`), env);
   profile.stateDirectory = join(outDir, `state-${index}`);
-  profile.server = { ...profile.server, port: 0, secretFile: join(outDir, `state-${index}`, "client-secret") };
+  profile.server = {
+    ...profile.server,
+    port: 0,
+    secretFile: join(outDir, `state-${index}`, "client-secret"),
+  };
   profile.runtime.workingDirectory = join(outDir, `work-${index}`);
   profile.runtime.agentPromptFile = resolve(REPO_ROOT, values["agent-prompt"]!);
   profile.runtime.model = values.model!;
   const logs: string[] = [];
-  const server = await startServer({ profile, log: (m) => logs.push(`${new Date().toISOString()} ${m}`) });
-  process.on("exit", () => writeFileSync(join(outDir, `server-${index}.log`), logs.join("\n") + "\n"));
+  const server = await startServer({
+    profile,
+    log: (m) => logs.push(`${new Date().toISOString()} ${m}`),
+  });
+  process.on("exit", () =>
+    writeFileSync(join(outDir, `server-${index}.log`), logs.join("\n") + "\n"),
+  );
   log(`server ${name} at ${server.gateway.url}`);
   return server;
 }
@@ -87,11 +114,25 @@ const pfEnv = {
   NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=tsx`.trim(),
 };
 const resultsPath = join(outDir, "results.json");
-const args = ["eval", "-c", join(REPO_ROOT, "tests/acceptance/promptfoo/promptfooconfig.yaml"), "-o", resultsPath, "--no-cache", "--repeat", values.repeat!, "--no-progress-bar"];
+const args = [
+  "eval",
+  "-c",
+  join(REPO_ROOT, "tests/acceptance/promptfoo/promptfooconfig.yaml"),
+  "-o",
+  resultsPath,
+  "--no-cache",
+  "--repeat",
+  values.repeat!,
+  "--no-progress-bar",
+];
 if (values.scenarios) args.push("--filter-pattern", `^(${values.scenarios.split(",").join("|")})$`);
 log(`promptfoo ${args.join(" ")}`);
 const exitCode = await new Promise<number>((r) => {
-  const child = spawn(join(REPO_ROOT, "node_modules/.bin/promptfoo"), args, { cwd: join(REPO_ROOT, "tests/acceptance/promptfoo"), env: pfEnv, stdio: "inherit" });
+  const child = spawn(join(REPO_ROOT, "node_modules/.bin/promptfoo"), args, {
+    cwd: join(REPO_ROOT, "tests/acceptance/promptfoo"),
+    env: pfEnv,
+    stdio: "inherit",
+  });
   child.on("close", (code) => r(code ?? 1));
 });
 log(`promptfoo exited ${exitCode}`);
@@ -106,16 +147,24 @@ interface PfResult {
 }
 let rows: Row[] = [];
 if (existsSync(resultsPath)) {
-  const raw = JSON.parse(readFileSync(resultsPath, "utf8")) as { results?: { results?: PfResult[] } };
+  const raw = JSON.parse(readFileSync(resultsPath, "utf8")) as {
+    results?: { results?: PfResult[] };
+  };
   const results = raw.results?.results ?? [];
-  const catalogs = [new Catalog(server1.profile.stateDirectory, { readonly: true }), new Catalog(server2.profile.stateDirectory, { readonly: true })];
+  const catalogs = [
+    new Catalog(server1.profile.stateDirectory, { readonly: true }),
+    new Catalog(server2.profile.stateDirectory, { readonly: true }),
+  ];
   let repeatCounters: Record<string, number> = {};
   for (const r of results) {
     const scenario = String(r.testCase?.vars?.scenario ?? r.vars?.scenario ?? "?");
     repeatCounters[scenario] = (repeatCounters[scenario] ?? 0) + 1;
     let evidence: Record<string, unknown> = {};
     try {
-      evidence = typeof r.response?.output === "string" ? (JSON.parse(r.response.output) as Record<string, unknown>) : ((r.response?.output as Record<string, unknown>) ?? {});
+      evidence =
+        typeof r.response?.output === "string"
+          ? (JSON.parse(r.response.output) as Record<string, unknown>)
+          : ((r.response?.output as Record<string, unknown>) ?? {});
     } catch {
       evidence = { parse_error: true };
     }
@@ -123,16 +172,37 @@ if (existsSync(resultsPath)) {
     let runtime: Record<string, unknown> = {};
     let exportResult: Record<string, unknown> | null = null;
     if (conversationId) {
-      const catalog = catalogs.find((c) => c.get("SELECT id FROM conversations WHERE id = ?", conversationId));
+      const catalog = catalogs.find((c) =>
+        c.get("SELECT id FROM conversations WHERE id = ?", conversationId),
+      );
       if (catalog) {
         const snap = snapshotConversation(catalog, conversationId);
         const execs = snap.tables.executions;
         const identity = snap.tables.provenance_entries.find((p) => p.role === "runtime_identity");
-        const identityArtifact = identity?.artifact_id ? snap.tables.artifacts.find((a) => a.id === identity.artifact_id) : undefined;
+        const identityArtifact = identity?.artifact_id
+          ? snap.tables.artifacts.find((a) => a.id === identity.artifact_id)
+          : undefined;
         let runtimeVersion: string | null = null;
         if (identityArtifact?.object_digest) {
           try {
-            runtimeVersion = (JSON.parse(readFileSync(join(catalog.paths.root, identityArtifact.storage_key as string ?? join("objects", "sha256", String(identityArtifact.object_digest).slice(0, 2), String(identityArtifact.object_digest))), "utf8")) as { runtime_version?: string }).runtime_version ?? null;
+            runtimeVersion =
+              (
+                JSON.parse(
+                  readFileSync(
+                    join(
+                      catalog.paths.root,
+                      (identityArtifact.storage_key as string) ??
+                        join(
+                          "objects",
+                          "sha256",
+                          String(identityArtifact.object_digest).slice(0, 2),
+                          String(identityArtifact.object_digest),
+                        ),
+                    ),
+                    "utf8",
+                  ),
+                ) as { runtime_version?: string }
+              ).runtime_version ?? null;
           } catch {
             runtimeVersion = (identity?.version as string) ?? null;
           }
@@ -150,9 +220,20 @@ if (existsSync(resultsPath)) {
           const target = join(outDir, "exports", `${conversationId}-${repeatCounters[scenario]}`);
           mkdirSync(join(outDir, "exports"), { recursive: true });
           try {
-            const exported = exportConversation(new Catalog(catalog.paths.root, { readonly: false }), conversationId, target);
+            const exported = exportConversation(
+              new Catalog(catalog.paths.root, { readonly: false }),
+              conversationId,
+              target,
+            );
             const verification = verifyExport(target);
-            exportResult = { directory: target, complete: exported.manifest.complete, verified: verification.ok, problems: verification.problems, artifacts: exported.manifest.artifact_count, objects: exported.manifest.objects.included };
+            exportResult = {
+              directory: target,
+              complete: exported.manifest.complete,
+              verified: verification.ok,
+              problems: verification.problems,
+              artifacts: exported.manifest.artifact_count,
+              objects: exported.manifest.objects.included,
+            };
           } catch (error) {
             exportResult = { error: error instanceof Error ? error.message : String(error) };
           }
@@ -165,7 +246,9 @@ if (existsSync(resultsPath)) {
       repeat: repeatCounters[scenario],
       lane: "L",
       pass: r.success && exportOk,
-      reason: (r.gradingResult?.reason ?? r.error ?? r.response?.error ?? "") + (exportOk ? "" : `; export failed: ${JSON.stringify(exportResult)}`),
+      reason:
+        (r.gradingResult?.reason ?? r.error ?? r.response?.error ?? "") +
+        (exportOk ? "" : `; export failed: ${JSON.stringify(exportResult)}`),
       conversation_id: conversationId ?? null,
       profile: evidence.profile ?? null,
       prompt_version: evidence.prompt_version ?? promptVersion,
@@ -179,9 +262,19 @@ if (existsSync(resultsPath)) {
   }
   for (const c of catalogs) c.close();
 }
-const summary = { generated_at: new Date().toISOString(), out_dir: outDir, model: values.model, prompt_version: promptVersion, repeat: Number(values.repeat), promptfoo_exit: exitCode, rows };
+const summary = {
+  generated_at: new Date().toISOString(),
+  out_dir: outDir,
+  model: values.model,
+  prompt_version: promptVersion,
+  repeat: Number(values.repeat),
+  promptfoo_exit: exitCode,
+  rows,
+};
 writeLiveResults(rows, summary, promptVersion, outDir);
-log(`wrote docs/D1/acceptance/live-results-${promptVersion}.md and ${join(outDir, "acceptance-live.json")}`);
+log(
+  `wrote docs/D1/acceptance/live-results-${promptVersion}.md and ${join(outDir, "acceptance-live.json")}`,
+);
 await server1.close();
 await server2.close();
 await fixture.close();

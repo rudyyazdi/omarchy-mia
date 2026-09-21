@@ -1,7 +1,11 @@
 {
   "profile": "fixture-test",
   "stateDirectory": "../../.mia-state/fixture-test",
-  "server": { "host": "127.0.0.1", "port": 48731, "secretFile": "../../.mia-state/fixture-test/client-secret" },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 48731,
+    "secretFile": "../../.mia-state/fixture-test/client-secret"
+  },
   "runtime": {
     "kind": "claude-code",
     "executable": "claude",
@@ -23,5 +27,7 @@
     "extraSettings": {}
   },
   "architectureDocument": "../../docs/D1/PLAN.md",
-  "notes": ["Test profile: Sonnet was chosen by the maintainer for harness testing. Every tool is routed through the approval bridge; only deny becomes a runtime rule."]
+  "notes": [
+    "Test profile: Sonnet was chosen by the maintainer for harness testing. Every tool is routed through the approval bridge; only deny becomes a runtime rule."
+  ]
 }

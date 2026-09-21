@@ -42,14 +42,20 @@ async function readBody(req: IncomingMessage, limitBytes: number): Promise<strin
  * McpServer + transport so tool handlers can observe their own connection lifetime.
  * Set MIA_MCP_HTTP_LOG=<file> to log request/response lifecycle for diagnostics.
  */
-export async function startMcpHttpServer(options: McpHttpServerOptions): Promise<McpHttpServerHandle> {
+export async function startMcpHttpServer(
+  options: McpHttpServerOptions,
+): Promise<McpHttpServerHandle> {
   const host = options.host ?? "127.0.0.1";
   const path = "/mcp";
   let requestCounter = 0;
   const logFile = process.env.MIA_MCP_HTTP_LOG;
   let boundPort: number | null = null;
   const log = (entry: Record<string, unknown>) => {
-    if (logFile) appendFileSync(logFile, JSON.stringify({ at: new Date().toISOString(), port: boundPort, ...entry }) + "\n");
+    if (logFile)
+      appendFileSync(
+        logFile,
+        JSON.stringify({ at: new Date().toISOString(), port: boundPort, ...entry }) + "\n",
+      );
   };
 
   const httpServer: Server = createServer(async (req, res) => {
@@ -68,7 +74,13 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
         // tool call; refusing the stream removes that duplicate-execution trigger for Mia-owned servers.
         if (logFile) log({ ev: "request", req: reqNo, http: "GET", refused: true });
         res.writeHead(405, { allow: "POST, DELETE", "content-type": "application/json" });
-        res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null }));
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            error: { code: -32000, message: "Method not allowed." },
+            id: null,
+          }),
+        );
         return;
       }
       const bodyText = req.method === "POST" ? await readBody(req, 4 * 1024 * 1024) : "";
@@ -82,9 +94,27 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
       }
       if (logFile) {
         const rpc = (parsedBody ?? {}) as { method?: unknown; id?: unknown };
-        log({ ev: "request", req: reqNo, http: req.method, accept: req.headers.accept, rpc_method: rpc.method ?? null, rpc_id: rpc.id ?? null, body_bytes: bodyText.length });
-        res.on("finish", () => log({ ev: "finish", req: reqNo, status: res.statusCode, ms: Date.now() - startedAt }));
-        res.on("close", () => log({ ev: "close", req: reqNo, status: res.statusCode, finished: res.writableFinished, ms: Date.now() - startedAt }));
+        log({
+          ev: "request",
+          req: reqNo,
+          http: req.method,
+          accept: req.headers.accept,
+          rpc_method: rpc.method ?? null,
+          rpc_id: rpc.id ?? null,
+          body_bytes: bodyText.length,
+        });
+        res.on("finish", () =>
+          log({ ev: "finish", req: reqNo, status: res.statusCode, ms: Date.now() - startedAt }),
+        );
+        res.on("close", () =>
+          log({
+            ev: "close",
+            req: reqNo,
+            status: res.statusCode,
+            finished: res.writableFinished,
+            ms: Date.now() - startedAt,
+          }),
+        );
         req.socket.once("error", (e) => log({ ev: "socket_error", req: reqNo, error: String(e) }));
       }
       const closeController = new AbortController();
@@ -136,7 +166,10 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
 
 export { McpServer };
 
-export async function readJsonBody(req: IncomingMessage, limitBytes = 1024 * 1024): Promise<unknown> {
+export async function readJsonBody(
+  req: IncomingMessage,
+  limitBytes = 1024 * 1024,
+): Promise<unknown> {
   const text = await readBody(req, limitBytes);
   if (text.length === 0) return {};
   return JSON.parse(text);

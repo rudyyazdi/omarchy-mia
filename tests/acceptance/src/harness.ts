@@ -16,7 +16,11 @@ export interface TestServer {
 
 export const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 
-export function testProfile(dir: string, overrides: Partial<Profile["runtime"]> = {}, extra: Partial<Profile> = {}): Profile {
+export function testProfile(
+  dir: string,
+  overrides: Partial<Profile["runtime"]> = {},
+  extra: Partial<Profile> = {},
+): Profile {
   const promptFile = join(dir, "agent-prompt.md");
   writeFileSync(promptFile, "# test agent prompt v-test\nBe brief.\n");
   return {
@@ -50,7 +54,10 @@ export function testProfile(dir: string, overrides: Partial<Profile["runtime"]> 
   };
 }
 
-export async function startTestServer(adapter: TurnRunner, overrides: Partial<Profile["runtime"]> = {}): Promise<TestServer> {
+export async function startTestServer(
+  adapter: TurnRunner,
+  overrides: Partial<Profile["runtime"]> = {},
+): Promise<TestServer> {
   const dir = mkdtempSync(join(tmpdir(), "mia-acceptance-"));
   const profile = testProfile(dir, overrides);
   const logs: string[] = [];

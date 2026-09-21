@@ -5,15 +5,35 @@ import { redactString, redactValue } from "@mia/protocol";
 import type { ApprovalBridge, PermissionHandler } from "./bridge.ts";
 import type { RuntimeConfig } from "./config.ts";
 import { prepareLaunch, type LaunchPlan } from "./launch.ts";
-import { LineSplitter, parseStreamLine, type InitMessage, type ResultMessage, type RuntimeMessage } from "./stream.ts";
+import {
+  LineSplitter,
+  parseStreamLine,
+  type InitMessage,
+  type ResultMessage,
+  type RuntimeMessage,
+} from "./stream.ts";
 
 export type AdapterEvent =
   | { type: "runtime_started"; pid: number; launch: LaunchPlan["description"]; at: string }
   | { type: "runtime_init"; init: InitMessage; at: string }
   | { type: "text_delta"; text: string; at: string }
-  | { type: "tool_proposed"; runtime_call_id: string; tool_identity: string; arguments: unknown; complete: boolean; at: string }
+  | {
+      type: "tool_proposed";
+      runtime_call_id: string;
+      tool_identity: string;
+      arguments: unknown;
+      complete: boolean;
+      at: string;
+    }
   | { type: "assistant_message"; message: unknown; at: string }
-  | { type: "tool_result"; runtime_call_id: string; is_error: boolean; content: unknown; raw: unknown; at: string }
+  | {
+      type: "tool_result";
+      runtime_call_id: string;
+      is_error: boolean;
+      content: unknown;
+      raw: unknown;
+      at: string;
+    }
   | { type: "turn_result"; result: ResultMessage; at: string }
   | { type: "runtime_stderr"; text: string; at: string }
   | { type: "malformed_event"; raw: string; error: string; at: string }
@@ -90,7 +110,9 @@ const REQUIRED_FLAGS = [
 /** Static checks: nothing here contacts a model. */
 export function probeStaticCapabilities(config: RuntimeConfig): StaticCapabilities {
   const errors: string[] = [];
-  const which = spawnSync("sh", ["-c", `command -v ${JSON.stringify(config.executable)}`], { encoding: "utf8" });
+  const which = spawnSync("sh", ["-c", `command -v ${JSON.stringify(config.executable)}`], {
+    encoding: "utf8",
+  });
   const resolved = which.status === 0 ? which.stdout.trim() : null;
   if (!resolved) errors.push(`runtime executable "${config.executable}" not found on PATH`);
   let version: string | null = null;
@@ -98,20 +120,29 @@ export function probeStaticCapabilities(config: RuntimeConfig): StaticCapabiliti
   if (resolved) {
     const v = spawnSync(resolved, ["--version"], { encoding: "utf8", timeout: 20_000 });
     version = v.status === 0 ? v.stdout.trim() : null;
-    if (!version) errors.push(`"${resolved} --version" failed: ${v.stderr?.trim() || v.error?.message || "unknown"}`);
-    const help = spawnSync(resolved, ["--help"], { encoding: "utf8", timeout: 20_000 }).stdout ?? "";
+    if (!version)
+      errors.push(
+        `"${resolved} --version" failed: ${v.stderr?.trim() || v.error?.message || "unknown"}`,
+      );
+    const help =
+      spawnSync(resolved, ["--help"], { encoding: "utf8", timeout: 20_000 }).stdout ?? "";
     for (const flag of REQUIRED_FLAGS) {
       // help abbreviates paired flags as --append-system-prompt[-file]
       const abbreviated = flag.replace(/-file$/, "[-file]");
       flags[flag] = help.includes(flag) || help.includes(abbreviated);
     }
     // --permission-prompt-tool is referenced in help text but not listed; presence in help is enough for the static probe.
-    for (const [flag, present] of Object.entries(flags)) if (!present) errors.push(`required flag ${flag} not present in --help`);
+    for (const [flag, present] of Object.entries(flags))
+      if (!present) errors.push(`required flag ${flag} not present in --help`);
   }
   let credential: StaticCapabilities["credential_source"] = "none_detected";
   if (process.env.ANTHROPIC_API_KEY) credential = "ANTHROPIC_API_KEY";
-  else if (existsSync(join(process.env.HOME ?? "", ".claude", ".credentials.json"))) credential = "claude_credentials_file";
-  if (credential === "none_detected") errors.push("no runtime credential source detected (ANTHROPIC_API_KEY unset, ~/.claude/.credentials.json missing)");
+  else if (existsSync(join(process.env.HOME ?? "", ".claude", ".credentials.json")))
+    credential = "claude_credentials_file";
+  if (credential === "none_detected")
+    errors.push(
+      "no runtime credential source detected (ANTHROPIC_API_KEY unset, ~/.claude/.credentials.json missing)",
+    );
   return {
     executable_resolved: resolved,
     runtime_version: version,
@@ -143,7 +174,10 @@ export class ClaudeCodeAdapter {
       turnIndex: options.turnIndex,
       agentPromptFile: options.agentPromptFile ?? this.config.agentPromptFile,
     });
-    const streamLogPath = join(options.runtimeDir, `turn-${String(options.turnIndex).padStart(3, "0")}.stream.jsonl`);
+    const streamLogPath = join(
+      options.runtimeDir,
+      `turn-${String(options.turnIndex).padStart(3, "0")}.stream.jsonl`,
+    );
     const now = () => new Date().toISOString();
     const emit = options.onEvent;
 
@@ -151,7 +185,12 @@ export class ClaudeCodeAdapter {
     try {
       // detached: the runtime becomes a process-group leader so an interruption can kill it and any helper
       // processes it spawned (e.g. stdio MCP servers) in one signal.
-      child = spawn(launch.command, launch.args, { cwd: launch.cwd, env: launch.env, stdio: ["pipe", "pipe", "pipe"], detached: true });
+      child = spawn(launch.command, launch.args, {
+        cwd: launch.cwd,
+        env: launch.env,
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: true,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {
@@ -180,7 +219,14 @@ export class ClaudeCodeAdapter {
     let spawnError: string | null = null;
     const proposedComplete = new Set<string>();
 
-    child.once("spawn", () => emit({ type: "runtime_started", pid: child.pid ?? -1, launch: launch.description, at: now() }));
+    child.once("spawn", () =>
+      emit({
+        type: "runtime_started",
+        pid: child.pid ?? -1,
+        launch: launch.description,
+        at: now(),
+      }),
+    );
     child.once("error", (error) => {
       spawnError = error.message;
     });
@@ -197,9 +243,18 @@ export class ClaudeCodeAdapter {
           return;
         case "stream_event": {
           const ev = message.event;
-          if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta" && ev.delta.text) {
+          if (
+            ev.type === "content_block_delta" &&
+            ev.delta?.type === "text_delta" &&
+            ev.delta.text
+          ) {
             emit({ type: "text_delta", text: ev.delta.text, at: now() });
-          } else if (ev.type === "content_block_start" && ev.content_block?.type === "tool_use" && ev.content_block.id && ev.content_block.name) {
+          } else if (
+            ev.type === "content_block_start" &&
+            ev.content_block?.type === "tool_use" &&
+            ev.content_block.id &&
+            ev.content_block.name
+          ) {
             emit({
               type: "tool_proposed",
               runtime_call_id: ev.content_block.id,
@@ -214,9 +269,21 @@ export class ClaudeCodeAdapter {
         case "assistant": {
           emit({ type: "assistant_message", message: redactValue(message.message), at: now() });
           for (const block of message.message.content) {
-            if (block.type === "tool_use" && block.id && block.name && !proposedComplete.has(block.id)) {
+            if (
+              block.type === "tool_use" &&
+              block.id &&
+              block.name &&
+              !proposedComplete.has(block.id)
+            ) {
               proposedComplete.add(block.id);
-              emit({ type: "tool_proposed", runtime_call_id: block.id, tool_identity: block.name, arguments: block.input ?? {}, complete: true, at: now() });
+              emit({
+                type: "tool_proposed",
+                runtime_call_id: block.id,
+                tool_identity: block.name,
+                arguments: block.input ?? {},
+                complete: true,
+                at: now(),
+              });
             }
           }
           return;
@@ -254,30 +321,47 @@ export class ClaudeCodeAdapter {
         const parsed = parseStreamLine(line);
         if (!parsed) continue;
         // Retained transcript: structured redaction (sensitive keys and secret-shaped values) when the line parsed as JSON.
-        const retained = parsed.ok ? JSON.stringify(redactValue(JSON.parse(parsed.raw))) : redactString(parsed.raw);
+        const retained = parsed.ok
+          ? JSON.stringify(redactValue(JSON.parse(parsed.raw)))
+          : redactString(parsed.raw);
         try {
           appendFileSync(streamLogPath, retained + "\n", { mode: 0o600 });
         } catch (error) {
-          emit({ type: "runtime_stderr", text: `[mia] could not retain transcript line: ${error instanceof Error ? error.message : String(error)}`, at: now() });
+          emit({
+            type: "runtime_stderr",
+            text: `[mia] could not retain transcript line: ${error instanceof Error ? error.message : String(error)}`,
+            at: now(),
+          });
         }
         if (parsed.ok) handleMessage(parsed.message);
-        else emit({ type: "malformed_event", raw: redactString(parsed.raw).slice(0, 2000), error: parsed.error, at: now() });
+        else
+          emit({
+            type: "malformed_event",
+            raw: redactString(parsed.raw).slice(0, 2000),
+            error: parsed.error,
+            at: now(),
+          });
       }
     };
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => consume(splitter.push(chunk)));
     child.stderr?.setEncoding("utf8");
-    child.stderr?.on("data", (chunk: string) => emit({ type: "runtime_stderr", text: redactString(chunk), at: now() }));
+    child.stderr?.on("data", (chunk: string) =>
+      emit({ type: "runtime_stderr", text: redactString(chunk), at: now() }),
+    );
 
-    let settleExit: (exit: { code: number | null; signal: NodeJS.Signals | null }) => void = () => undefined;
-    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-      settleExit = resolve;
-      child.once("close", (code, signal) => {
-        consume(splitter.flush());
-        resolve({ code, signal });
-      });
-      child.once("error", () => resolve({ code: null, signal: null }));
-    });
+    let settleExit: (exit: { code: number | null; signal: NodeJS.Signals | null }) => void = () =>
+      undefined;
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolve) => {
+        settleExit = resolve;
+        child.once("close", (code, signal) => {
+          consume(splitter.flush());
+          resolve({ code, signal });
+        });
+        child.once("error", () => resolve({ code: null, signal: null }));
+      },
+    );
 
     let settle: () => void = () => undefined;
     const interruptSettled = {
@@ -287,7 +371,8 @@ export class ClaudeCodeAdapter {
       resolve: () => settle(),
     };
     const done: Promise<TurnResult> = exited.then(async (exit) => {
-      if (interrupted) await Promise.race([interruptSettled.promise, new Promise((r) => setTimeout(r, 6_000))]);
+      if (interrupted)
+        await Promise.race([interruptSettled.promise, new Promise((r) => setTimeout(r, 6_000))]);
       this.bridge.setHandler(null);
       emit({ type: "runtime_exit", code: exit.code, signal: exit.signal, at: now() });
       let status: TurnResult["status"];
@@ -334,7 +419,10 @@ export class ClaudeCodeAdapter {
       } catch {
         child.kill("SIGKILL");
       }
-      const outcome = await Promise.race([exited.then(() => "exited" as const), new Promise<"timeout">((r) => setTimeout(() => r("timeout"), EXIT_WAIT_MS))]);
+      const outcome = await Promise.race([
+        exited.then(() => "exited" as const),
+        new Promise<"timeout">((r) => setTimeout(() => r("timeout"), EXIT_WAIT_MS)),
+      ]);
       runtimeCancellation = outcome === "exited" ? "forced_kill" : "unknown";
       if (outcome === "timeout") {
         // Do not let a stuck process hold the task in "interrupting" forever: finish the turn and report uncertainty.

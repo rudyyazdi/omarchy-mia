@@ -26,7 +26,10 @@ describe("approval bridge", () => {
 
   it("denies when no handler is active", async () => {
     const c = await client();
-    const r = await c.callTool({ name: BRIDGE_TOOL_NAME, arguments: { tool_name: "mcp__d1__change", input: { delta: 1 }, tool_use_id: "toolu_1" } });
+    const r = await c.callTool({
+      name: BRIDGE_TOOL_NAME,
+      arguments: { tool_name: "mcp__d1__change", input: { delta: 1 }, tool_use_id: "toolu_1" },
+    });
     const text = (r.content as Array<{ text: string }>)[0]!.text;
     expect(JSON.parse(text).behavior).toBe("deny");
     await c.close();
@@ -39,8 +42,13 @@ describe("approval bridge", () => {
       return { behavior: "allow" };
     });
     const c = await client();
-    const r = await c.callTool({ name: BRIDGE_TOOL_NAME, arguments: { tool_name: "mcp__d1__change", input: { delta: 1 }, tool_use_id: "toolu_2" } });
-    expect(JSON.parse((r.content as Array<{ text: string }>)[0]!.text)).toEqual({ behavior: "allow" });
+    const r = await c.callTool({
+      name: BRIDGE_TOOL_NAME,
+      arguments: { tool_name: "mcp__d1__change", input: { delta: 1 }, tool_use_id: "toolu_2" },
+    });
+    expect(JSON.parse((r.content as Array<{ text: string }>)[0]!.text)).toEqual({
+      behavior: "allow",
+    });
     bridge.setHandler(null);
     await c.close();
   });
@@ -57,7 +65,10 @@ describe("approval bridge", () => {
         }),
     );
     const c = await client();
-    const p = c.callTool({ name: BRIDGE_TOOL_NAME, arguments: { tool_name: "mcp__d1__slow", input: {}, tool_use_id: "toolu_3" } });
+    const p = c.callTool({
+      name: BRIDGE_TOOL_NAME,
+      arguments: { tool_name: "mcp__d1__slow", input: {}, tool_use_id: "toolu_3" },
+    });
     p.catch(() => undefined);
     await new Promise((r) => setTimeout(r, 50));
     await c.close();

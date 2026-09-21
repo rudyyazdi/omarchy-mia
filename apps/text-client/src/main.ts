@@ -15,12 +15,19 @@ const { values } = parseArgs({
 
 function resolveConnection(): { url: string; secretFile: string } {
   if (values.config) {
-    const profile = JSON.parse(readFileSync(values.config, "utf8")) as { server: { host: string; port: number; secretFile: string } };
+    const profile = JSON.parse(readFileSync(values.config, "utf8")) as {
+      server: { host: string; port: number; secretFile: string };
+    };
     const base = resolve(values.config, "..");
-    return { url: `ws://${profile.server.host}:${profile.server.port}`, secretFile: resolve(base, profile.server.secretFile) };
+    return {
+      url: `ws://${profile.server.host}:${profile.server.port}`,
+      secretFile: resolve(base, profile.server.secretFile),
+    };
   }
   if (!values.url || !values["secret-file"]) {
-    console.error("usage: mia-client --config <profile.json> | --url ws://127.0.0.1:PORT --secret-file <path>");
+    console.error(
+      "usage: mia-client --config <profile.json> | --url ws://127.0.0.1:PORT --secret-file <path>",
+    );
     process.exit(2);
   }
   return { url: values.url, secretFile: values["secret-file"] };
@@ -28,11 +35,18 @@ function resolveConnection(): { url: string; secretFile: string } {
 
 const { url, secretFile } = resolveConnection();
 if (!existsSync(secretFile)) {
-  console.error(`secret file ${secretFile} not found; start the server first (it creates the secret)`);
+  console.error(
+    `secret file ${secretFile} not found; start the server first (it creates the secret)`,
+  );
   process.exit(1);
 }
-const commit = spawnSync("git", ["rev-parse", "--short", "HEAD"], { encoding: "utf8" }).stdout?.trim() || null;
-const client = new MiaClient({ url, secret: MiaClient.readSecret(secretFile), build: { name: "mia-text-client", version: "0.1.0", commit, dirty: null } });
+const commit =
+  spawnSync("git", ["rev-parse", "--short", "HEAD"], { encoding: "utf8" }).stdout?.trim() || null;
+const client = new MiaClient({
+  url,
+  secret: MiaClient.readSecret(secretFile),
+  build: { name: "mia-text-client", version: "0.1.0", commit, dirty: null },
+});
 
 // Server events arrive while the person may be mid-line. Every write first clears the prompt line and, once the
 // output is complete, redraws the prompt with whatever they had typed, so events never land inside their input.
@@ -60,7 +74,10 @@ const endStream = () => {
 };
 
 let currentTask: string | null = null;
-const pendingApprovals = new Map<string, { task_id: string; tool_identity: string; intended_action: string; redacted_arguments: unknown }>();
+const pendingApprovals = new Map<
+  string,
+  { task_id: string; tool_identity: string; intended_action: string; redacted_arguments: unknown }
+>();
 
 client.on("text_delta", (e) => {
   if (!streaming) {
@@ -88,22 +105,34 @@ client.on("approval_requested", (e) => {
 });
 client.on("approval_resolved", (e) => {
   pendingApprovals.delete(e.payload.approval_id);
-  out(`✓ approval ${e.payload.approval_id}: ${e.payload.status}${e.payload.reason ? ` (${e.payload.reason})` : ""}`);
+  out(
+    `✓ approval ${e.payload.approval_id}: ${e.payload.status}${e.payload.reason ? ` (${e.payload.reason})` : ""}`,
+  );
 });
 client.on("tool_call", (e) => {
   // Arguments are shown once, when the call is first proposed, so a policy-allowed dispatch is never opaque.
-  const args = e.payload.status === "proposed" && e.payload.redacted_arguments !== undefined ? ` ${JSON.stringify(e.payload.redacted_arguments)}` : "";
-  out(`  · ${e.payload.tool_identity} → ${e.payload.status}${args}${e.payload.detail ? ` (${e.payload.detail})` : ""}`);
+  const args =
+    e.payload.status === "proposed" && e.payload.redacted_arguments !== undefined
+      ? ` ${JSON.stringify(e.payload.redacted_arguments)}`
+      : "";
+  out(
+    `  · ${e.payload.tool_identity} → ${e.payload.status}${args}${e.payload.detail ? ` (${e.payload.detail})` : ""}`,
+  );
 });
 client.on("interruption_requested", () => out("⏹ interruption requested; action gate closed"));
 client.on("interruption_outcome", (e) => {
-  const lines = [`⏹ interruption outcome: task ${e.payload.task_status}; runtime ${e.payload.runtime_cancellation}`];
-  for (const a of e.payload.actions) lines.push(`    ${a.tool_identity}: ${a.status}${a.detail ? ` — ${a.detail}` : ""}`);
+  const lines = [
+    `⏹ interruption outcome: task ${e.payload.task_status}; runtime ${e.payload.runtime_cancellation}`,
+  ];
+  for (const a of e.payload.actions)
+    lines.push(`    ${a.tool_identity}: ${a.status}${a.detail ? ` — ${a.detail}` : ""}`);
   out(lines.join("\n"));
 });
 client.on("task_finished", (e) => {
   currentTask = null;
-  out(`■ task ${e.payload.task_id} ${e.payload.status}${e.payload.error ? `: ${e.payload.error}` : ""}`);
+  out(
+    `■ task ${e.payload.task_id} ${e.payload.status}${e.payload.error ? `: ${e.payload.error}` : ""}`,
+  );
 });
 client.on("server_error", (e) => out(`✗ error ${e.payload.code}: ${e.payload.message}`));
 client.on("client_error", (m: string) => out(`✗ client: ${m}`));
@@ -130,7 +159,10 @@ rl.on("line", async (line) => {
       case "":
         {
           const ack = await client.submitText(text);
-          if (ack.disposition !== "accepted") out(`submit ${ack.disposition}${ack.error ? `: ${ack.error.code}: ${ack.error.message}` : ""}`);
+          if (ack.disposition !== "accepted")
+            out(
+              `submit ${ack.disposition}${ack.error ? `: ${ack.error.code}: ${ack.error.message}` : ""}`,
+            );
         }
         break;
       case "/quit":
@@ -150,10 +182,17 @@ rl.on("line", async (line) => {
       case "/reject": {
         const id = rest[0];
         const pending = id ? pendingApprovals.get(id) : undefined;
-        if (!id || !pending) out(`unknown approval id; pending: ${[...pendingApprovals.keys()].join(", ") || "none"}`);
+        if (!id || !pending)
+          out(`unknown approval id; pending: ${[...pendingApprovals.keys()].join(", ") || "none"}`);
         else {
-          const ack = await client.decide(pending.task_id, id, cmd === "/approve" ? "approve" : "reject");
-          out(`decision ${ack.disposition}${ack.error ? `: ${ack.error.code}: ${ack.error.message}` : ""}`);
+          const ack = await client.decide(
+            pending.task_id,
+            id,
+            cmd === "/approve" ? "approve" : "reject",
+          );
+          out(
+            `decision ${ack.disposition}${ack.error ? `: ${ack.error.code}: ${ack.error.message}` : ""}`,
+          );
         }
         break;
       }
@@ -163,7 +202,9 @@ rl.on("line", async (line) => {
         break;
       default:
         // A mistyped command must not become a task for the agent.
-        out(`unknown command ${cmd}; commands: /approve <id>, /reject <id>, /interrupt, /diag, /quit`);
+        out(
+          `unknown command ${cmd}; commands: /approve <id>, /reject <id>, /interrupt, /diag, /quit`,
+        );
     }
   } catch (error) {
     out(`✗ ${error instanceof Error ? error.message : String(error)}`);

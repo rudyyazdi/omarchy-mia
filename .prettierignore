@@ -1,0 +1,7 @@
+node_modules/
+package-lock.json
+.mia-state/
+.mia-work/
+tests/acceptance/promptfoo/output/
+docs/
+prompts/

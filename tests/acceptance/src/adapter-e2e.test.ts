@@ -2,7 +2,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ApprovalBridge, ClaudeCodeAdapter, type AdapterEvent, type PermissionDecision, type PermissionRequest } from "@mia/agent-adapter";
+import {
+  ApprovalBridge,
+  ClaudeCodeAdapter,
+  type AdapterEvent,
+  type PermissionDecision,
+  type PermissionRequest,
+} from "@mia/agent-adapter";
 import { FixtureHarness, startFixture, type FixtureHandle } from "@mia/controlled-mcp";
 import { REPO_ROOT, testProfile } from "./harness.ts";
 
@@ -26,11 +32,18 @@ afterAll(async () => {
 });
 
 function adapter() {
-  const profile = testProfile(dir, { executable: FAKE, mcpServers: { d1: { type: "http", url: fixture.mcpUrl } } });
+  const profile = testProfile(dir, {
+    executable: FAKE,
+    mcpServers: { d1: { type: "http", url: fixture.mcpUrl } },
+  });
   return new ClaudeCodeAdapter(profile.runtime, bridge);
 }
 
-async function run(text: string, decide: (req: PermissionRequest) => PermissionDecision, during?: (handle: ReturnType<ClaudeCodeAdapter["submitTurn"]>) => Promise<void>) {
+async function run(
+  text: string,
+  decide: (req: PermissionRequest) => PermissionDecision,
+  during?: (handle: ReturnType<ClaudeCodeAdapter["submitTurn"]>) => Promise<void>,
+) {
   const events: AdapterEvent[] = [];
   const requests: PermissionRequest[] = [];
   const handle = adapter().submitTurn({
@@ -53,10 +66,22 @@ async function run(text: string, decide: (req: PermissionRequest) => PermissionD
 describe("real adapter against a fake runtime process", () => {
   it("parses the stream, routes permission through the bridge with tool_use_id, and records results", async () => {
     await harness.reset();
-    const { result, events, requests } = await run("READ then CHANGE", () => ({ behavior: "allow" }));
+    const { result, events, requests } = await run("READ then CHANGE", () => ({
+      behavior: "allow",
+    }));
     expect(result.status).toBe("completed");
     expect(result.init?.model).toBe("scripted-model");
-    expect(events.map((e) => e.type)).toEqual(expect.arrayContaining(["runtime_started", "runtime_init", "text_delta", "tool_proposed", "tool_result", "turn_result", "runtime_exit"]));
+    expect(events.map((e) => e.type)).toEqual(
+      expect.arrayContaining([
+        "runtime_started",
+        "runtime_init",
+        "text_delta",
+        "tool_proposed",
+        "tool_result",
+        "turn_result",
+        "runtime_exit",
+      ]),
+    );
     expect(requests.map((r) => [r.tool_name, r.tool_use_id])).toEqual([
       ["mcp__d1__read", "toolu_fake_read_1"],
       ["mcp__d1__change", "toolu_fake_change_1"],

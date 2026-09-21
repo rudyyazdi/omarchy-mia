@@ -27,7 +27,12 @@ export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 
 /** Client-reported diagnostics; voice/display fields are explicitly not applicable in D1. */
 export const ClientDiagnosticsSchema = z.object({
-  build: z.object({ name: z.string(), version: z.string(), commit: z.string().nullable(), dirty: z.boolean().nullable() }),
+  build: z.object({
+    name: z.string(),
+    version: z.string(),
+    commit: z.string().nullable(),
+    dirty: z.boolean().nullable(),
+  }),
   connection_state: z.enum(["connecting", "connected", "reconnecting", "disconnected"]),
   recent_interaction_ids: z.array(id).max(50),
   recent_errors: z.array(z.object({ at: isoTime, message: z.string().max(2000) })).max(20),
@@ -56,16 +61,27 @@ export const SubmitTextCommand = command(
 );
 export const ApprovalDecisionCommand = command(
   "approval_decision",
-  z.object({ conversation_id: id, task_id: id, approval_id: id, decision: DecisionSchema }).strict(),
+  z
+    .object({ conversation_id: id, task_id: id, approval_id: id, decision: DecisionSchema })
+    .strict(),
 );
-export const InterruptTaskCommand = command("interrupt_task", z.object({ conversation_id: id, task_id: id }).strict());
+export const InterruptTaskCommand = command(
+  "interrupt_task",
+  z.object({ conversation_id: id, task_id: id }).strict(),
+);
 export const DiagnosticSnapshotCommand = command(
   "diagnostic_snapshot",
   z.object({ conversation_id: id.nullable(), diagnostics: ClientDiagnosticsSchema }).strict(),
 );
 export const HeartbeatCommand = command(
   "heartbeat",
-  z.object({ conversation_id: id.nullable(), captured_at: isoTime, connection_state: z.string().max(32) }).strict(),
+  z
+    .object({
+      conversation_id: id.nullable(),
+      captured_at: isoTime,
+      connection_state: z.string().max(32),
+    })
+    .strict(),
 );
 
 export const ClientCommandSchema = z.discriminatedUnion("type", [
@@ -125,8 +141,18 @@ const eventPayloads = {
     error: z.object({ code: ErrorCodeSchema, message: z.string() }).optional(),
     result: z.record(z.string(), z.unknown()).optional(),
   }),
-  conversation_started: z.object({ conversation_id: id, started_at: isoTime, provenance_set_id: id }),
-  task_started: z.object({ conversation_id: id, task_id: id, execution_id: id, execution_epoch: z.number().int(), text: z.string() }),
+  conversation_started: z.object({
+    conversation_id: id,
+    started_at: isoTime,
+    provenance_set_id: id,
+  }),
+  task_started: z.object({
+    conversation_id: id,
+    task_id: id,
+    execution_id: id,
+    execution_epoch: z.number().int(),
+    text: z.string(),
+  }),
   text_delta: z.object({ conversation_id: id, task_id: id, execution_id: id, text: z.string() }),
   tool_call: z.object({
     conversation_id: id,
@@ -161,7 +187,11 @@ const eventPayloads = {
     status: z.enum(["approved", "rejected", "invalidated", "expired"]),
     reason: z.string().optional(),
   }),
-  interruption_requested: z.object({ conversation_id: id, task_id: id, execution_epoch: z.number().int() }),
+  interruption_requested: z.object({
+    conversation_id: id,
+    task_id: id,
+    execution_epoch: z.number().int(),
+  }),
   interruption_outcome: z.object({
     conversation_id: id,
     task_id: id,
@@ -183,7 +213,12 @@ const eventPayloads = {
     error: z.string().optional(),
     usage: z.unknown().optional(),
   }),
-  error: z.object({ code: ErrorCodeSchema, message: z.string(), conversation_id: id.optional(), task_id: id.optional() }),
+  error: z.object({
+    code: ErrorCodeSchema,
+    message: z.string(),
+    conversation_id: id.optional(),
+    task_id: id.optional(),
+  }),
 } as const;
 
 export type ServerEventType = keyof typeof eventPayloads;

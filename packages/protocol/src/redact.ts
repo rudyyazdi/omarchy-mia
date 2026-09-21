@@ -1,4 +1,5 @@
-const SENSITIVE_KEY = /(token|secret|password|passwd|api[-_]?key|authorization|credential|cookie|private[-_]?key|bearer)/i;
+const SENSITIVE_KEY =
+  /(token|secret|password|passwd|api[-_]?key|authorization|credential|cookie|private[-_]?key|bearer)/i;
 const SENSITIVE_VALUE: RegExp[] = [
   /sk-ant-[A-Za-z0-9_-]{8,}/g,
   /sk-[A-Za-z0-9_-]{20,}/g,
