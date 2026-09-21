@@ -254,3 +254,255 @@ export const EXPORT_TABLES = [
   "artifact_dependencies",
 ] as const;
 export type ExportTable = (typeof EXPORT_TABLES)[number];
+
+// ---- row types ----
+// One interface per table, mirroring the SQL columns above (so snake_case) with their nullability.
+// Catalog.get<T>/Catalog.all<T> name the row type at the SQLite boundary; nothing downstream casts.
+
+export interface ObjectRow {
+  digest: string;
+  byte_count: number;
+  storage_key: string;
+  integrity: "verified" | "missing" | "corrupt";
+  created_at: string;
+}
+
+export interface ProvenanceSetRow {
+  id: string;
+  created_at: string;
+  description: string | null;
+}
+
+export type CaptureStatus = "retained" | "pending" | "external_only" | "missing" | "failed";
+
+export interface ArtifactRow {
+  id: string;
+  kind: string;
+  mime_type: string | null;
+  schema_version: string | null;
+  logical_name: string;
+  created_at: string;
+  producer_execution_id: string | null;
+  producer_event_id: string | null;
+  object_digest: string | null;
+  byte_size: number | null;
+  capture_status: CaptureStatus;
+  external_locator: string | null;
+  capture_reason: string | null;
+  redaction: string | null;
+  original_path: string | null;
+}
+
+export interface ProvenanceEntryRow {
+  id: string;
+  provenance_set_id: string;
+  role: string;
+  ordinal: number;
+  version: string | null;
+  artifact_id: string | null;
+  availability: "retained" | "unavailable";
+  reason: string | null;
+}
+
+export interface ConversationRow {
+  id: string;
+  started_at: string;
+  status: string;
+  provenance_set_id: string;
+  directory: string;
+  runtime_conversation_id: string | null;
+}
+
+export interface ClientRow {
+  id: string;
+  first_seen_at: string;
+  kind: string;
+}
+
+export interface ClientConnectionRow {
+  id: string;
+  client_id: string;
+  build: string | null;
+  provenance_set_id: string | null;
+  connected_at: string;
+  disconnected_at: string | null;
+  last_received_at: string | null;
+}
+
+export interface TaskRow {
+  id: string;
+  conversation_id: string;
+  status: string;
+  created_at: string;
+  finished_at: string | null;
+  text: string;
+  client_id: string | null;
+}
+
+export interface ExecutionRow {
+  id: string;
+  task_id: string;
+  conversation_id: string;
+  runtime_identity: string;
+  runtime_conversation_id: string | null;
+  requested_model: string;
+  reported_model: string | null;
+  requested_effort: string;
+  reported_effort: string | null;
+  effort_evidence: string | null;
+  provenance_set_id: string | null;
+  execution_epoch: number;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+  usage: string | null;
+}
+
+export interface EventRow {
+  id: string;
+  conversation_id: string;
+  sequence: number;
+  type: string;
+  payload_version: number;
+  payload: string;
+  task_id: string | null;
+  execution_id: string | null;
+  client_id: string | null;
+  client_connection_id: string | null;
+  caused_by_event_id: string | null;
+  producer_id: string | null;
+  producer_event_id: string | null;
+  captured_at: string | null;
+  received_at: string;
+  duration_ms: number | null;
+  timing_source: string | null;
+}
+
+export interface CommandRow {
+  id: string;
+  conversation_id: string | null;
+  client_id: string;
+  client_connection_id: string;
+  client_command_id: string;
+  type: string;
+  payload_digest: string;
+  disposition: string;
+  error: string | null;
+  result_event_id: string | null;
+  received_at: string;
+}
+
+export interface ToolCallRow {
+  id: string;
+  conversation_id: string;
+  task_id: string;
+  execution_id: string;
+  runtime_call_id: string;
+  binding_revision: number;
+  tool_identity: string;
+  argument_digest: string;
+  redacted_arguments: string;
+  policy: string;
+  status: string;
+  detail: string | null;
+  proposal_event_id: string | null;
+  dispatch_event_id: string | null;
+  result_event_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "invalidated" | "expired";
+
+export interface ApprovalRow {
+  id: string;
+  tool_call_id: string;
+  execution_epoch: number;
+  status: ApprovalStatus;
+  reason: string | null;
+  requesting_event_id: string | null;
+  decision_event_id: string | null;
+  decision_client_id: string | null;
+  requested_at: string;
+  consumed_at: string | null;
+}
+
+export interface DiagnosticsRow {
+  id: string;
+  conversation_id: string | null;
+  client_id: string;
+  client_connection_id: string | null;
+  task_id: string | null;
+  event_id: string | null;
+  captured_at: string;
+  received_at: string;
+  base_snapshot_id: string | null;
+  state: string;
+}
+
+export type LinkRelation =
+  | "provenance"
+  | "task_output"
+  | "event_payload"
+  | "tool_result"
+  | "diagnostic"
+  | "runtime_transcript"
+  | "client_build"
+  | "agent_prompt";
+
+export interface ArtifactLinkRow {
+  id: string;
+  conversation_id: string;
+  artifact_id: string;
+  relation: LinkRelation;
+  task_id: string | null;
+  event_id: string | null;
+  tool_call_id: string | null;
+  diagnostic_id: string | null;
+  provenance_set_id: string | null;
+}
+
+export interface ArtifactDependencyRow {
+  parent_artifact_id: string;
+  required_artifact_id: string;
+  relation: string;
+}
+
+/** The rows of every export table, keyed by table name; the shape of a conversation snapshot and of a verified export. */
+export interface SnapshotTables {
+  objects: ObjectRow[];
+  provenance_sets: ProvenanceSetRow[];
+  artifacts: ArtifactRow[];
+  provenance_entries: ProvenanceEntryRow[];
+  conversations: ConversationRow[];
+  clients: ClientRow[];
+  client_connections: ClientConnectionRow[];
+  tasks: TaskRow[];
+  executions: ExecutionRow[];
+  events: EventRow[];
+  commands: CommandRow[];
+  tool_calls: ToolCallRow[];
+  approvals: ApprovalRow[];
+  diagnostics: DiagnosticsRow[];
+  artifact_links: ArtifactLinkRow[];
+  artifact_dependencies: ArtifactDependencyRow[];
+}
+
+export const emptySnapshotTables = (): SnapshotTables => ({
+  objects: [],
+  provenance_sets: [],
+  artifacts: [],
+  provenance_entries: [],
+  conversations: [],
+  clients: [],
+  client_connections: [],
+  tasks: [],
+  executions: [],
+  events: [],
+  commands: [],
+  tool_calls: [],
+  approvals: [],
+  diagnostics: [],
+  artifact_links: [],
+  artifact_dependencies: [],
+});

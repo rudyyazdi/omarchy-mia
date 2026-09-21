@@ -4,23 +4,31 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { SCHEMA_SQL, SCHEMA_VERSION } from "./schema.ts";
 
+/** Column values for an insert or update; an undefined value means "leave this column out". */
 export type Row = Record<string, SQLInputValue | undefined>;
 
-export function newId(prefix: string): string {
-  return `${prefix}_${randomUUID().replace(/-/g, "")}`;
-}
+type Column = [name: string, value: SQLInputValue];
 
-export function nowIso(): string {
-  return new Date().toISOString();
-}
+const definedColumns = (row: Row): Column[] =>
+  Object.entries(row).filter((entry): entry is Column => entry[1] !== undefined);
+
+export const newId = (prefix: string): string => `${prefix}_${randomUUID().replace(/-/g, "")}`;
+
+export const nowIso = (): string => new Date().toISOString();
+
+/**
+ * Parse JSON that this package wrote itself (event payloads, usage, export files). The caller names
+ * the shape it stored; the default is unknown for callers that only display the value.
+ */
+export const parseJson = <T = unknown>(text: string): T => JSON.parse(text);
 
 /** Resolve the private state directory: $XDG_STATE_HOME/mia or ~/.local/state/mia unless overridden. */
-export function defaultStateDir(): string {
+export const defaultStateDir = (): string => {
   if (process.env.MIA_STATE_DIR) return process.env.MIA_STATE_DIR;
   const xdg = process.env.XDG_STATE_HOME;
   const base = xdg && xdg.length > 0 ? xdg : join(process.env.HOME ?? ".", ".local", "state");
   return join(base, "mia");
-}
+};
 
 export interface CatalogPaths {
   root: string;
@@ -30,15 +38,13 @@ export interface CatalogPaths {
   staging: string;
 }
 
-export function catalogPaths(root: string): CatalogPaths {
-  return {
-    root,
-    database: join(root, "catalog.sqlite"),
-    objects: join(root, "objects", "sha256"),
-    conversations: join(root, "conversations"),
-    staging: join(root, "staging"),
-  };
-}
+export const catalogPaths = (root: string): CatalogPaths => ({
+  root,
+  database: join(root, "catalog.sqlite"),
+  objects: join(root, "objects", "sha256"),
+  conversations: join(root, "conversations"),
+  staging: join(root, "staging"),
+});
 
 export class Catalog {
   readonly db: DatabaseSync;
@@ -75,8 +81,7 @@ export class Catalog {
 
   private migrate(): void {
     this.db.exec(SCHEMA_SQL);
-    const row = this.db.prepare("SELECT version FROM schema_version LIMIT 1").get() as
-      { version: number } | undefined;
+    const row = this.get<{ version: number }>("SELECT version FROM schema_version LIMIT 1");
     if (!row) this.db.prepare("INSERT INTO schema_version(version) VALUES (?)").run(SCHEMA_VERSION);
     else if (row.version !== SCHEMA_VERSION)
       throw new Error(`catalog schema version ${row.version} does not match ${SCHEMA_VERSION}`);
@@ -100,23 +105,27 @@ export class Catalog {
   }
 
   insert(table: string, row: Row): void {
-    const keys = Object.keys(row).filter((k) => row[k] !== undefined);
-    const sql = `INSERT INTO ${table} (${keys.join(", ")}) VALUES (${keys.map(() => "?").join(", ")})`;
-    this.db.prepare(sql).run(...keys.map((k) => row[k] as SQLInputValue));
+    const columns = definedColumns(row);
+    const names = columns.map(([name]) => name);
+    const sql = `INSERT INTO ${table} (${names.join(", ")}) VALUES (${names.map(() => "?").join(", ")})`;
+    this.db.prepare(sql).run(...columns.map(([, value]) => value));
   }
 
   update(table: string, id: string, row: Row): void {
-    const keys = Object.keys(row).filter((k) => row[k] !== undefined);
-    if (keys.length === 0) return;
-    const sql = `UPDATE ${table} SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`;
-    this.db.prepare(sql).run(...keys.map((k) => row[k] as SQLInputValue), id);
+    const columns = definedColumns(row);
+    if (columns.length === 0) return;
+    const assignments = columns.map(([name]) => `${name} = ?`).join(", ");
+    const sql = `UPDATE ${table} SET ${assignments} WHERE id = ?`;
+    this.db.prepare(sql).run(...columns.map(([, value]) => value), id);
   }
 
   get<T = Record<string, unknown>>(sql: string, ...params: SQLInputValue[]): T | undefined {
+    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- node:sqlite returns untyped rows; callers name the row type
     return this.db.prepare(sql).get(...params) as T | undefined;
   }
 
   all<T = Record<string, unknown>>(sql: string, ...params: SQLInputValue[]): T[] {
+    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- node:sqlite returns untyped rows; callers name the row type
     return this.db.prepare(sql).all(...params) as T[];
   }
 

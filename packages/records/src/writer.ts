@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { canonicalDigest, redactValue } from "@mia/protocol";
 import { Catalog, newId, nowIso } from "./catalog.ts";
 import { ObjectStore } from "./objects.ts";
+import type { CaptureStatus, CommandRow, LinkRelation } from "./schema.ts";
 
 export interface EventInput {
   conversationId: string;
@@ -35,21 +36,11 @@ export interface ArtifactInput {
   producerExecutionId?: string | null;
   producerEventId?: string | null;
   originalPath?: string | null;
-  captureStatus?: "retained" | "pending" | "external_only" | "missing" | "failed";
+  captureStatus?: CaptureStatus;
   externalLocator?: string | null;
   captureReason?: string | null;
   redaction?: string | null;
 }
-
-export type LinkRelation =
-  | "provenance"
-  | "task_output"
-  | "event_payload"
-  | "tool_result"
-  | "diagnostic"
-  | "runtime_transcript"
-  | "client_build"
-  | "agent_prompt";
 
 export interface LinkInput {
   conversationId: string;
@@ -124,12 +115,9 @@ export class RecordWriter {
       }
     | { duplicate: false; commandId: string } {
     const digest = canonicalDigest(input.payload);
-    const existing = this.catalog.get<{
-      id: string;
-      payload_digest: string;
-      disposition: string;
-      error: string | null;
-    }>(
+    const existing = this.catalog.get<
+      Pick<CommandRow, "id" | "payload_digest" | "disposition" | "error">
+    >(
       "SELECT id, payload_digest, disposition, error FROM commands WHERE client_connection_id = ? AND client_command_id = ?",
       input.connectionId,
       input.clientCommandId,
@@ -160,14 +148,16 @@ export class RecordWriter {
 
   finishCommand(
     commandId: string,
-    disposition: "accepted" | "rejected",
-    error: string | null,
-    resultEventId: string | null,
+    outcome: {
+      disposition: "accepted" | "rejected";
+      error: string | null;
+      resultEventId: string | null;
+    },
   ): void {
     this.catalog.update("commands", commandId, {
-      disposition,
-      error,
-      result_event_id: resultEventId,
+      disposition: outcome.disposition,
+      error: outcome.error,
+      result_event_id: outcome.resultEventId,
     });
   }
 
@@ -276,10 +266,10 @@ export class RecordWriter {
       "SELECT artifact_id FROM provenance_entries WHERE provenance_set_id = ? AND artifact_id IS NOT NULL",
       provenanceSetId,
     );
-    for (const e of entries)
+    for (const entry of entries)
       this.linkArtifact({
         conversationId,
-        artifactId: e.artifact_id,
+        artifactId: entry.artifact_id,
         relation: "provenance",
         provenanceSetId,
       });

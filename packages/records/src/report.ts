@@ -1,7 +1,13 @@
-import { diagnosticsViews, taskViews, type ConversationSnapshot } from "./queries.ts";
+import { parseJson } from "./catalog.ts";
+import {
+  diagnosticsViews,
+  taskViews,
+  type ConversationSnapshot,
+  type TaskView,
+} from "./queries.ts";
 
-const esc = (v: unknown): string =>
-  String(v ?? "")
+const esc = (value: unknown): string =>
+  String(value ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -12,34 +18,101 @@ const esc = (v: unknown): string =>
 class Html {
   constructor(readonly markup: string) {}
 }
-const pre = (v: unknown): Html =>
-  new Html(`<pre>${esc(typeof v === "string" ? v : JSON.stringify(v, null, 2))}</pre>`);
+const pre = (value: unknown): Html =>
+  new Html(`<pre>${esc(typeof value === "string" ? value : JSON.stringify(value, null, 2))}</pre>`);
 
-function table(headers: string[], rows: unknown[][]): string {
+const cell = (value: unknown): string =>
+  `<td>${value instanceof Html ? value.markup : esc(value)}</td>`;
+
+const table = (headers: string[], rows: unknown[][]): string => {
   if (rows.length === 0) return "<p class=muted>none</p>";
-  return `<table><thead><tr>${headers.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows
-    .map(
-      (r) =>
-        `<tr>${r.map((c) => `<td>${c instanceof Html ? c.markup : esc(c)}</td>`).join("")}</tr>`,
-    )
-    .join("")}</tbody></table>`;
-}
+  const head = headers.map((header) => `<th>${esc(header)}</th>`).join("");
+  const body = rows.map((row) => `<tr>${row.map(cell).join("")}</tr>`).join("");
+  return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+};
+
+/** Parse a stored JSON column for display; null columns render as null. */
+const stored = (json: string | null): unknown => (json ? parseJson(json) : null);
+
+const taskSection = (task: TaskView): string => {
+  const partialNote = task.partial ? " (partial output; task did not complete)" : "";
+  const interruption = task.interruption
+    ? `<details open><summary>Interruption outcome</summary>${pre(task.interruption).markup}</details>`
+    : "";
+  const errors = task.errors.length
+    ? `<details open><summary>Errors and runtime stderr (${task.errors.length})</summary>${table(
+        ["seq", "type", "payload"],
+        task.errors.map((event) => [event.sequence, event.type, pre(parseJson(event.payload))]),
+      )}</details>`
+    : "";
+  return `<section class=task><h3>Task ${esc(task.id)} <span class="badge ${esc(task.status)}">${esc(task.status)}</span></h3>
+<p class=muted>${esc(task.created_at)} → ${esc(task.finished_at ?? "not finished")}</p>
+<div class=user><strong>User</strong>${pre(task.text).markup}</div>
+<div class=assistant><strong>Agent${partialNote}</strong>${pre(task.assistant_text || "(no text)").markup}</div>
+<details><summary>Tool calls and approvals (${task.tool_calls.length})</summary>${table(
+    [
+      "tool",
+      "runtime call",
+      "rev",
+      "policy",
+      "status",
+      "detail",
+      "arguments (redacted)",
+      "digest",
+      "approvals",
+    ],
+    task.tool_calls.map((call) => [
+      call.tool_identity,
+      call.runtime_call_id,
+      call.binding_revision,
+      call.policy,
+      call.status,
+      call.detail ?? "",
+      pre(parseJson(call.redacted_arguments)),
+      String(call.argument_digest).slice(0, 16) + "…",
+      pre(
+        call.approvals.map((approval) => ({
+          id: approval.id,
+          status: approval.status,
+          epoch: approval.execution_epoch,
+          reason: approval.reason,
+          client: approval.decision_client_id,
+          consumed_at: approval.consumed_at,
+        })),
+      ),
+    ]),
+  )}</details>
+${interruption}
+${errors}
+<details><summary>Event timeline (${task.events.length})</summary>${table(
+    ["seq", "received", "type", "caused by", "payload"],
+    task.events.map((event) => [
+      event.sequence,
+      event.received_at,
+      event.type,
+      event.caused_by_event_id ?? "",
+      pre(parseJson(event.payload)),
+    ]),
+  )}</details>
+</section>`;
+};
 
 /**
  * Offline, read-only whole-conversation report. No scripts, no remote content, everything escaped.
  * The CSP forbids script execution even if recorded text contains markup.
  */
-export function renderReport(
+export const renderReport = (
   snapshot: ConversationSnapshot,
   options: { objectStatus?: Record<string, string> } = {},
-): string {
-  const conv = snapshot.tables.conversations[0]!;
+): string => {
+  const conv = snapshot.tables.conversations[0];
+  if (!conv) throw new Error(`snapshot ${snapshot.conversation_id} has no conversation row`);
   const tasks = taskViews(snapshot);
   const diags = diagnosticsViews(snapshot, Date.parse(snapshot.captured_at));
   const provenance = snapshot.tables.provenance_entries;
   const artifacts = snapshot.tables.artifacts;
   const objectStatus = options.objectStatus ?? {};
-  const artifactById = new Map(artifacts.map((a) => [a.id as string, a]));
+  const artifactById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
 
   const sections: string[] = [];
   sections.push(`<h1>Conversation ${esc(conv.id)}</h1>
@@ -54,15 +127,15 @@ export function renderReport(
 
   sections.push(`<h2>Provenance and builds</h2>${table(
     ["role", "version", "availability", "artifact", "digest", "reason"],
-    provenance.map((p) => {
-      const art = p.artifact_id ? artifactById.get(p.artifact_id as string) : undefined;
+    provenance.map((entry) => {
+      const artifact = entry.artifact_id ? artifactById.get(entry.artifact_id) : undefined;
       return [
-        p.role,
-        p.version,
-        p.availability,
-        p.artifact_id ?? "",
-        art?.object_digest ?? "",
-        p.reason ?? "",
+        entry.role,
+        entry.version,
+        entry.availability,
+        entry.artifact_id ?? "",
+        artifact?.object_digest ?? "",
+        entry.reason ?? "",
       ];
     }),
   )}
@@ -79,95 +152,31 @@ ${table(
     "status",
     "usage",
   ],
-  snapshot.tables.executions.map((e) => [
-    e.id,
-    e.task_id,
-    e.execution_epoch,
-    e.requested_model,
-    e.reported_model ?? "unreported",
-    e.requested_effort,
-    e.reported_effort ?? "unverified",
-    pre(e.effort_evidence ? JSON.parse(e.effort_evidence as string) : null),
-    e.status,
-    pre(e.usage ? JSON.parse(e.usage as string) : null),
+  snapshot.tables.executions.map((execution) => [
+    execution.id,
+    execution.task_id,
+    execution.execution_epoch,
+    execution.requested_model,
+    execution.reported_model ?? "unreported",
+    execution.requested_effort,
+    execution.reported_effort ?? "unverified",
+    pre(stored(execution.effort_evidence)),
+    execution.status,
+    pre(stored(execution.usage)),
   ]),
 )}`);
 
-  sections.push(
-    `<h2>Transcript</h2>${tasks
-      .map(
-        (
-          t,
-        ) => `<section class=task><h3>Task ${esc(t.id)} <span class="badge ${esc(t.status)}">${esc(t.status)}</span></h3>
-<p class=muted>${esc(t.created_at)} → ${esc(t.finished_at ?? "not finished")}</p>
-<div class=user><strong>User</strong>${pre(t.text).markup}</div>
-<div class=assistant><strong>Agent${t.partial ? " (partial output; task did not complete)" : ""}</strong>${pre(t.assistant_text || "(no text)").markup}</div>
-<details><summary>Tool calls and approvals (${t.tool_calls.length})</summary>${table(
-          [
-            "tool",
-            "runtime call",
-            "rev",
-            "policy",
-            "status",
-            "detail",
-            "arguments (redacted)",
-            "digest",
-            "approvals",
-          ],
-          t.tool_calls.map((c) => [
-            c.tool_identity,
-            c.runtime_call_id,
-            c.binding_revision,
-            c.policy,
-            c.status,
-            c.detail ?? "",
-            pre(JSON.parse(c.redacted_arguments as string)),
-            String(c.argument_digest).slice(0, 16) + "…",
-            pre(
-              c.approvals.map((a) => ({
-                id: a.id,
-                status: a.status,
-                epoch: a.execution_epoch,
-                reason: a.reason,
-                client: a.decision_client_id,
-                consumed_at: a.consumed_at,
-              })),
-            ),
-          ]),
-        )}</details>
-${t.interruption ? `<details open><summary>Interruption outcome</summary>${pre(t.interruption).markup}</details>` : ""}
-${
-  t.errors.length
-    ? `<details open><summary>Errors and runtime stderr (${t.errors.length})</summary>${table(
-        ["seq", "type", "payload"],
-        t.errors.map((e) => [e.sequence, e.type, pre(JSON.parse(e.payload as string))]),
-      )}</details>`
-    : ""
-}
-<details><summary>Event timeline (${t.events.length})</summary>${table(
-          ["seq", "received", "type", "caused by", "payload"],
-          t.events.map((e) => [
-            e.sequence,
-            e.received_at,
-            e.type,
-            e.caused_by_event_id ?? "",
-            pre(JSON.parse(e.payload as string)),
-          ]),
-        )}</details>
-</section>`,
-      )
-      .join("")}`,
-  );
+  sections.push(`<h2>Transcript</h2>${tasks.map(taskSection).join("")}`);
 
-  const conversationEvents = snapshot.tables.events.filter((e) => !e.task_id);
+  const conversationEvents = snapshot.tables.events.filter((event) => !event.task_id);
   sections.push(
     `<h2>Conversation-level events</h2>${table(
       ["seq", "received", "type", "payload"],
-      conversationEvents.map((e) => [
-        e.sequence,
-        e.received_at,
-        e.type,
-        pre(JSON.parse(e.payload as string)),
+      conversationEvents.map((event) => [
+        event.sequence,
+        event.received_at,
+        event.type,
+        pre(parseJson(event.payload)),
       ]),
     )}`,
   );
@@ -175,13 +184,13 @@ ${
   sections.push(
     `<h2>Client diagnostics</h2>${table(
       ["client", "connection", "captured", "received", "freshness", "state"],
-      diags.map((d) => [
-        d.client_id,
-        d.connection_id ?? "",
-        d.captured_at,
-        d.received_at,
-        d.freshness,
-        pre(d.state),
+      diags.map((diagnostic) => [
+        diagnostic.client_id,
+        diagnostic.connection_id ?? "",
+        diagnostic.captured_at,
+        diagnostic.received_at,
+        diagnostic.freshness,
+        pre(diagnostic.state),
       ]),
     )}<p class=muted>freshness: current = received within 60s of the cutoff; stale = older; disconnected = the reporting connection has closed. Absent rows mean no diagnostics were received, not that the client was healthy.</p>`,
   );
@@ -200,37 +209,37 @@ ${
       "original path / locator",
       "reason",
     ],
-    artifacts.map((a) => [
-      a.id,
-      a.kind,
-      a.logical_name,
-      a.mime_type ?? "",
-      a.byte_size ?? "",
-      a.capture_status,
-      a.object_digest ?? "",
-      a.object_digest ? (objectStatus[a.object_digest as string] ?? "not checked") : "n/a",
-      a.producer_execution_id ?? a.producer_event_id ?? "",
-      a.original_path ?? a.external_locator ?? "",
-      a.capture_reason ?? "",
+    artifacts.map((artifact) => [
+      artifact.id,
+      artifact.kind,
+      artifact.logical_name,
+      artifact.mime_type ?? "",
+      artifact.byte_size ?? "",
+      artifact.capture_status,
+      artifact.object_digest ?? "",
+      artifact.object_digest ? (objectStatus[artifact.object_digest] ?? "not checked") : "n/a",
+      artifact.producer_execution_id ?? artifact.producer_event_id ?? "",
+      artifact.original_path ?? artifact.external_locator ?? "",
+      artifact.capture_reason ?? "",
     ]),
   )}
 <h3>Links</h3>${table(
     ["artifact", "relation", "task", "event", "tool call", "provenance set"],
-    snapshot.tables.artifact_links.map((l) => [
-      l.artifact_id,
-      l.relation,
-      l.task_id ?? "",
-      l.event_id ?? "",
-      l.tool_call_id ?? "",
-      l.provenance_set_id ?? "",
+    snapshot.tables.artifact_links.map((link) => [
+      link.artifact_id,
+      link.relation,
+      link.task_id ?? "",
+      link.event_id ?? "",
+      link.tool_call_id ?? "",
+      link.provenance_set_id ?? "",
     ]),
   )}
 <h3>Dependencies</h3>${table(
     ["parent", "requires", "relation"],
-    snapshot.tables.artifact_dependencies.map((d) => [
-      d.parent_artifact_id,
-      d.required_artifact_id,
-      d.relation,
+    snapshot.tables.artifact_dependencies.map((dependency) => [
+      dependency.parent_artifact_id,
+      dependency.required_artifact_id,
+      dependency.relation,
     ]),
   )}`);
 
@@ -238,15 +247,18 @@ ${
     `<h2>Coverage and gaps</h2>${table(
       ["gap", "detail"],
       [
-        ...snapshot.unresolved_references.map((u) => [`${u.table} ${u.id}`, u.reason]),
+        ...snapshot.unresolved_references.map((unresolved) => [
+          `${unresolved.table} ${unresolved.id}`,
+          unresolved.reason,
+        ]),
         ...provenance
-          .filter((p) => p.availability === "unavailable")
-          .map((p) => [`provenance ${p.role}`, p.reason ?? "unavailable"]),
+          .filter((entry) => entry.availability === "unavailable")
+          .map((entry) => [`provenance ${entry.role}`, entry.reason ?? "unavailable"]),
         ...artifacts
-          .filter((a) => a.capture_status !== "retained")
-          .map((a) => [
-            `artifact ${a.id} (${a.logical_name})`,
-            `${a.capture_status}: ${a.capture_reason ?? ""}`,
+          .filter((artifact) => artifact.capture_status !== "retained")
+          .map((artifact) => [
+            `artifact ${artifact.id} (${artifact.logical_name})`,
+            `${artifact.capture_status}: ${artifact.capture_reason ?? ""}`,
           ]),
       ],
     )}<p class=muted>This report shows retained and observable evidence only. Hidden provider reasoning, the runtime's full system prompt and files the agent touched without declaring them are not captured.</p>`,
@@ -269,4 +281,4 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;max-width:60ch;font-size
 .badge.completed{background:#d7f5dd}.badge.interrupted,.badge.outcome_unknown{background:#ffe9c7}.badge.failed{background:#ffd6d6}
 details{margin:6px 0}
 </style></head><body>${sections.join("\n")}</body></html>`;
-}
+};

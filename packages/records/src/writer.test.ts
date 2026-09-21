@@ -41,14 +41,18 @@ describe("record writer", () => {
       provenanceSetId: prov,
       runtimeConversationId: "rt-1",
     });
-    const a = writer.appendEvent({
+    const first = writer.appendEvent({
       conversationId: conv.id,
       type: "x",
       payload: { api_key: "sk-ant-abcdefghijklmnop", text: "Bearer abcdefghijklmnopqrstuvwxyz" },
     });
-    const b = writer.appendEvent({ conversationId: conv.id, type: "y", payload: {} });
-    expect([a.sequence, b.sequence]).toEqual([1, 2]);
-    const row = catalog.get<{ payload: string }>("SELECT payload FROM events WHERE id = ?", a.id)!;
+    const second = writer.appendEvent({ conversationId: conv.id, type: "y", payload: {} });
+    expect([first.sequence, second.sequence]).toEqual([1, 2]);
+    const row = catalog.get<{ payload: string }>(
+      "SELECT payload FROM events WHERE id = ?",
+      first.id,
+    );
+    if (!row) throw new Error("event row missing");
     expect(row.payload).not.toContain("sk-ant");
     expect(row.payload).not.toContain("abcdefghijklmnopqrstuvwxyz");
     expect(row.payload).toContain("[REDACTED]");
@@ -68,7 +72,8 @@ describe("record writer", () => {
     expect(one.digest).toBe(two.digest);
     expect(one.artifactId).not.toBe(two.artifactId);
     expect(catalog.all("SELECT * FROM objects")).toHaveLength(1);
-    expect(writer.objects.verify(one.digest!)).toBe("verified");
+    if (!one.digest) throw new Error("artifact bytes were not stored");
+    expect(writer.objects.verify(one.digest)).toBe("verified");
   });
 
   it("rejects duplicate approvals for the same binding and epoch, and duplicate command IDs", () => {

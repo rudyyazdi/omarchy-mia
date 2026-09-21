@@ -11,13 +11,18 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
-import type { Catalog } from "./catalog.ts";
+import { parseJson, type Catalog } from "./catalog.ts";
 import { ObjectStore } from "./objects.ts";
-import { snapshotConversation, type ConversationSnapshot } from "./queries.ts";
+import { snapshotConversation, type UnresolvedReference } from "./queries.ts";
 import { renderReport } from "./report.ts";
-import { EXPORT_TABLES, SCHEMA_VERSION } from "./schema.ts";
+import { EXPORT_TABLES, SCHEMA_VERSION, type ExportTable, type SnapshotTables } from "./schema.ts";
 
 export const EXPORT_VERSION = 1;
+
+export interface ExportedFile {
+  sha256: string;
+  bytes: number;
+}
 
 export interface ExportManifest {
   export_version: number;
@@ -37,30 +42,37 @@ export interface ExportManifest {
     external_only: number;
     pending: number;
   };
-  unresolved_references: ConversationSnapshot["unresolved_references"];
+  unresolved_references: UnresolvedReference[];
   ongoing_tasks: string[];
   redaction: string;
-  files: Record<string, { sha256: string; bytes: number }>;
+  files: Record<string, ExportedFile>;
 }
 
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+/** Where a table's rows live inside an export directory. */
+const tableFile = (table: ExportTable): string =>
+  table === "events" ? "events.jsonl" : join("records", `${table}.jsonl`);
+
+const toJsonl = (rows: unknown[]): string =>
+  rows.map((row) => JSON.stringify(row)).join("\n") + (rows.length ? "\n" : "");
 
 /**
  * Export one conversation into a self-contained directory: records, events, report, referenced objects, manifest.
  * Written to <out>.partial and renamed only after verification passes; a failed export is left labelled partial.
  */
-export function exportConversation(
+export const exportConversation = (
   catalog: Catalog,
   conversationId: string,
   outDir: string,
-): { manifest: ExportManifest; directory: string } {
+): { manifest: ExportManifest; directory: string } => {
   if (existsSync(outDir)) throw new Error(`export target ${outDir} already exists`);
   const staging = `${outDir}.partial`;
   rmSync(staging, { recursive: true, force: true });
   mkdirSync(join(staging, "records"), { recursive: true, mode: 0o700 });
   const snapshot = snapshotConversation(catalog, conversationId);
   const store = new ObjectStore(catalog.paths);
-  const files: Record<string, { sha256: string; bytes: number }> = {};
+  const files: Record<string, ExportedFile> = {};
   const write = (rel: string, bytes: Uint8Array | string) => {
     const buf = typeof bytes === "string" ? Buffer.from(bytes, "utf8") : Buffer.from(bytes);
     const path = join(staging, rel);
@@ -73,16 +85,7 @@ export function exportConversation(
   for (const table of EXPORT_TABLES) {
     const rows = snapshot.tables[table];
     counts[table] = rows.length;
-    if (table === "events")
-      write(
-        "events.jsonl",
-        rows.map((r) => JSON.stringify(r)).join("\n") + (rows.length ? "\n" : ""),
-      );
-    else
-      write(
-        `records/${table}.jsonl`,
-        rows.map((r) => JSON.stringify(r)).join("\n") + (rows.length ? "\n" : ""),
-      );
+    write(tableFile(table), toJsonl(rows));
   }
   write(
     "conversation.json",
@@ -105,9 +108,9 @@ export function exportConversation(
   const corrupt: string[] = [];
   const objectStatus: Record<string, string> = {};
   let included = 0;
-  for (const obj of snapshot.tables.objects) {
-    const digest = obj.digest as string;
-    const status = store.verify(digest, obj.byte_count as number);
+  for (const object of snapshot.tables.objects) {
+    const digest = object.digest;
+    const status = store.verify(digest, object.byte_count);
     objectStatus[digest] = status;
     if (status === "missing") {
       missing.push(digest);
@@ -134,15 +137,15 @@ export function exportConversation(
 
   const artifacts = snapshot.tables.artifacts;
   const coverage: Record<string, number> = {};
-  for (const type of new Set(snapshot.tables.events.map((e) => e.type as string)))
-    coverage[type] = snapshot.tables.events.filter((e) => e.type === type).length;
+  for (const event of snapshot.tables.events)
+    coverage[event.type] = (coverage[event.type] ?? 0) + 1;
   const partialReasons: string[] = [];
   if (missing.length) partialReasons.push(`${missing.length} referenced object(s) missing`);
   if (corrupt.length) partialReasons.push(`${corrupt.length} referenced object(s) corrupt`);
   if (snapshot.unresolved_references.length)
     partialReasons.push(`${snapshot.unresolved_references.length} unresolved reference(s)`);
   const failedCaptures = artifacts.filter(
-    (a) => a.capture_status === "missing" || a.capture_status === "failed",
+    (artifact) => artifact.capture_status === "missing" || artifact.capture_status === "failed",
   ).length;
   if (failedCaptures)
     partialReasons.push(`${failedCaptures} artifact capture(s) missing or failed`);
@@ -161,8 +164,9 @@ export function exportConversation(
       included,
       missing,
       corrupt,
-      external_only: artifacts.filter((a) => a.capture_status === "external_only").length,
-      pending: artifacts.filter((a) => a.capture_status === "pending").length,
+      external_only: artifacts.filter((artifact) => artifact.capture_status === "external_only")
+        .length,
+      pending: artifacts.filter((artifact) => artifact.capture_status === "pending").length,
     },
     unresolved_references: snapshot.unresolved_references,
     ongoing_tasks: snapshot.ongoing_tasks,
@@ -183,7 +187,7 @@ export function exportConversation(
   }
   renameSync(staging, outDir);
   return { manifest, directory: outDir };
-}
+};
 
 export interface VerificationResult {
   ok: boolean;
@@ -193,8 +197,17 @@ export interface VerificationResult {
   checked_objects: number;
 }
 
+/** Every regular file below dir, as absolute paths. */
+const walk = (dir: string): string[] =>
+  readdirSync(dir).flatMap((name) => {
+    const path = join(dir, name);
+    return statSync(path).isDirectory() ? walk(path) : [path];
+  });
+
+const idsOf = (rows: { id: string }[]): Set<string> => new Set(rows.map((row) => row.id));
+
 /** Verify an export offline: file checksums, object digests, referential integrity, report safety. */
-export function verifyExport(dir: string): VerificationResult {
+export const verifyExport = (dir: string): VerificationResult => {
   const problems: string[] = [];
   const manifestPath = join(dir, "manifest.json");
   if (!existsSync(manifestPath))
@@ -205,7 +218,7 @@ export function verifyExport(dir: string): VerificationResult {
       checked_files: 0,
       checked_objects: 0,
     };
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as ExportManifest;
+  const manifest = parseJson<ExportManifest>(readFileSync(manifestPath, "utf8"));
   let checkedFiles = 0;
   for (const [rel, expected] of Object.entries(manifest.files)) {
     const path = join(dir, rel);
@@ -219,75 +232,89 @@ export function verifyExport(dir: string): VerificationResult {
     checkedFiles++;
   }
   // Every file present must be listed (except manifest itself).
-  const walk = (d: string): string[] =>
-    readdirSync(d).flatMap((n) =>
-      statSync(join(d, n)).isDirectory() ? walk(join(d, n)) : [join(d, n)],
-    );
-  for (const f of walk(dir)) {
-    const rel = relative(dir, f);
+  for (const file of walk(dir)) {
+    const rel = relative(dir, file);
     if (rel !== "manifest.json" && !manifest.files[rel]) problems.push(`unlisted file: ${rel}`);
   }
-  const readTable = (name: string): Record<string, unknown>[] => {
-    const path =
-      name === "events" ? join(dir, "events.jsonl") : join(dir, "records", `${name}.jsonl`);
-    if (!existsSync(path)) return [];
-    const rows: Record<string, unknown>[] = [];
+  // Rows are read back as the row types this package wrote; a line that is not JSON is reported.
+  const readTable = <Table extends ExportTable>(table: Table): SnapshotTables[Table] => {
+    const path = join(dir, tableFile(table));
+    const rows: SnapshotTables[Table] = [];
+    if (!existsSync(path)) return rows;
     for (const line of readFileSync(path, "utf8").split("\n").filter(Boolean)) {
       try {
-        rows.push(JSON.parse(line) as Record<string, unknown>);
+        rows.push(parseJson(line));
       } catch {
-        problems.push(`unparsable record in ${name}`);
+        problems.push(`unparsable record in ${table}`);
       }
     }
     return rows;
   };
-  const t = Object.fromEntries(EXPORT_TABLES.map((n) => [n, readTable(n)]));
-  for (const [name, rows] of Object.entries(t))
-    if (manifest.record_counts[name] !== rows.length)
+  const tables: SnapshotTables = {
+    objects: readTable("objects"),
+    provenance_sets: readTable("provenance_sets"),
+    artifacts: readTable("artifacts"),
+    provenance_entries: readTable("provenance_entries"),
+    conversations: readTable("conversations"),
+    clients: readTable("clients"),
+    client_connections: readTable("client_connections"),
+    tasks: readTable("tasks"),
+    executions: readTable("executions"),
+    events: readTable("events"),
+    commands: readTable("commands"),
+    tool_calls: readTable("tool_calls"),
+    approvals: readTable("approvals"),
+    diagnostics: readTable("diagnostics"),
+    artifact_links: readTable("artifact_links"),
+    artifact_dependencies: readTable("artifact_dependencies"),
+  };
+  for (const table of EXPORT_TABLES) {
+    const count = tables[table].length;
+    if (manifest.record_counts[table] !== count)
       problems.push(
-        `record count mismatch for ${name}: manifest ${manifest.record_counts[name]} vs ${rows.length}`,
+        `record count mismatch for ${table}: manifest ${manifest.record_counts[table]} vs ${count}`,
       );
-  const ids = (name: string) => new Set(t[name]!.map((r) => r.id as string));
-  const conv = t.conversations![0];
-  if (!conv || conv.id !== manifest.root_conversation_id)
+  }
+  const conversation = tables.conversations[0];
+  if (!conversation || conversation.id !== manifest.root_conversation_id)
     problems.push("root conversation row missing or mismatched");
-  const taskIds = ids("tasks");
-  const eventIds = ids("events");
-  const toolCallIds = ids("tool_calls");
-  const artifactIds = ids("artifacts");
-  const objectDigests = new Set(t.objects!.map((o) => o.digest as string));
+  const taskIds = idsOf(tables.tasks);
+  const eventIds = idsOf(tables.events);
+  const toolCallIds = idsOf(tables.tool_calls);
+  const artifactIds = idsOf(tables.artifacts);
+  const objectDigests = new Set(tables.objects.map((object) => object.digest));
   let lastSeq = 0;
-  for (const e of t.events!) {
-    const seq = e.sequence as number;
+  for (const event of tables.events) {
+    const seq = event.sequence;
     if (seq <= lastSeq) problems.push(`event sequence not increasing at ${seq}`);
     lastSeq = seq;
-    if (seq > manifest.cutoff_sequence) problems.push(`event ${e.id} beyond cutoff`);
-    if (e.task_id && !taskIds.has(e.task_id as string))
-      problems.push(`event ${e.id} references unknown task ${e.task_id}`);
-    if (e.caused_by_event_id && !eventIds.has(e.caused_by_event_id as string))
-      problems.push(`event ${e.id} caused_by unknown event`);
+    if (seq > manifest.cutoff_sequence) problems.push(`event ${event.id} beyond cutoff`);
+    if (event.task_id && !taskIds.has(event.task_id))
+      problems.push(`event ${event.id} references unknown task ${event.task_id}`);
+    if (event.caused_by_event_id && !eventIds.has(event.caused_by_event_id))
+      problems.push(`event ${event.id} caused_by unknown event`);
   }
-  for (const c of t.tool_calls!)
-    if (!taskIds.has(c.task_id as string))
-      problems.push(`tool call ${c.id} references unknown task`);
-  for (const a of t.approvals!)
-    if (!toolCallIds.has(a.tool_call_id as string))
-      problems.push(`approval ${a.id} references unknown tool call`);
-  for (const l of t.artifact_links!)
-    if (!artifactIds.has(l.artifact_id as string))
-      problems.push(`link ${l.id} references unknown artifact`);
-  for (const p of t.provenance_entries!)
-    if (p.artifact_id && !artifactIds.has(p.artifact_id as string))
-      problems.push(`provenance entry ${p.id} references unknown artifact`);
+  for (const call of tables.tool_calls)
+    if (!taskIds.has(call.task_id)) problems.push(`tool call ${call.id} references unknown task`);
+  for (const approval of tables.approvals)
+    if (!toolCallIds.has(approval.tool_call_id))
+      problems.push(`approval ${approval.id} references unknown tool call`);
+  for (const link of tables.artifact_links)
+    if (!artifactIds.has(link.artifact_id))
+      problems.push(`link ${link.id} references unknown artifact`);
+  for (const entry of tables.provenance_entries)
+    if (entry.artifact_id && !artifactIds.has(entry.artifact_id))
+      problems.push(`provenance entry ${entry.id} references unknown artifact`);
   let checkedObjects = 0;
-  for (const a of t.artifacts!) {
-    if (a.capture_status !== "retained") continue;
-    const digest = a.object_digest as string | null;
+  for (const artifact of tables.artifacts) {
+    if (artifact.capture_status !== "retained") continue;
+    const digest = artifact.object_digest;
     if (!digest) {
-      problems.push(`retained artifact ${a.id} has no digest`);
+      problems.push(`retained artifact ${artifact.id} has no digest`);
       continue;
     }
-    if (!objectDigests.has(digest)) problems.push(`artifact ${a.id} digest not in objects table`);
+    if (!objectDigests.has(digest))
+      problems.push(`artifact ${artifact.id} digest not in objects table`);
     const path = join(dir, "objects", "sha256", digest.slice(0, 2), digest);
     if (!existsSync(path)) {
       if (!manifest.objects.missing.includes(digest) && !manifest.objects.corrupt.includes(digest))
@@ -297,9 +324,8 @@ export function verifyExport(dir: string): VerificationResult {
     if (sha256(readFileSync(path)) !== digest) problems.push(`object corrupt: ${digest}`);
     checkedObjects++;
   }
-  const report = existsSync(join(dir, "report.html"))
-    ? readFileSync(join(dir, "report.html"), "utf8")
-    : null;
+  const reportPath = join(dir, "report.html");
+  const report = existsSync(reportPath) ? readFileSync(reportPath, "utf8") : null;
   if (!report) problems.push("report.html missing");
   else {
     if (/<script\b/i.test(report)) problems.push("report contains a script tag");
@@ -315,20 +341,21 @@ export function verifyExport(dir: string): VerificationResult {
     checked_files: checkedFiles,
     checked_objects: checkedObjects,
   };
-}
+};
 
 /** Find objects on disk that no catalog row references, and catalog objects whose bytes are missing/corrupt. */
-export function reconcileObjects(catalog: Catalog): {
+export const reconcileObjects = (
+  catalog: Catalog,
+): {
   orphans: string[];
   missing: string[];
   corrupt: string[];
-} {
+} => {
   const store = new ObjectStore(catalog.paths);
-  const known = new Set(
-    catalog
-      .all<{ digest: string; byte_count: number }>("SELECT digest, byte_count FROM objects")
-      .map((o) => o.digest),
+  const objects = catalog.all<{ digest: string; byte_count: number }>(
+    "SELECT digest, byte_count FROM objects",
   );
+  const known = new Set(objects.map((object) => object.digest));
   const orphans: string[] = [];
   const root = catalog.paths.objects;
   if (existsSync(root)) {
@@ -338,12 +365,10 @@ export function reconcileObjects(catalog: Catalog): {
   }
   const missing: string[] = [];
   const corrupt: string[] = [];
-  for (const o of catalog.all<{ digest: string; byte_count: number }>(
-    "SELECT digest, byte_count FROM objects",
-  )) {
-    const s = store.verify(o.digest, o.byte_count);
-    if (s === "missing") missing.push(o.digest);
-    if (s === "corrupt") corrupt.push(o.digest);
+  for (const object of objects) {
+    const status = store.verify(object.digest, object.byte_count);
+    if (status === "missing") missing.push(object.digest);
+    if (status === "corrupt") corrupt.push(object.digest);
   }
   return { orphans, missing, corrupt };
-}
+};
