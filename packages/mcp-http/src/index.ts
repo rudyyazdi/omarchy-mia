@@ -1,8 +1,8 @@
 import { appendFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { errorMessage } from "@mia/protocol";
 
 /** Per-HTTP-request context handed to the MCP server factory. */
 export interface McpRequestContext {
@@ -25,26 +25,30 @@ export interface McpHttpServerHandle {
   close(): Promise<void>;
 }
 
-async function readBody(req: IncomingMessage, limitBytes: number): Promise<string> {
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const readBody = async (req: IncomingMessage, limitBytes: number): Promise<string> => {
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
+  const stream: AsyncIterable<unknown> = req;
+  for await (const chunk of stream) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
     size += buf.length;
     if (size > limitBytes) throw new Error("request body too large");
     chunks.push(buf);
   }
   return Buffer.concat(chunks).toString("utf8");
-}
+};
 
 /**
  * Serve an MCP server over Streamable HTTP on loopback, in stateless mode: each POST gets a fresh
  * McpServer + transport so tool handlers can observe their own connection lifetime.
  * Set MIA_MCP_HTTP_LOG=<file> to log request/response lifecycle for diagnostics.
  */
-export async function startMcpHttpServer(
+export const startMcpHttpServer = async (
   options: McpHttpServerOptions,
-): Promise<McpHttpServerHandle> {
+): Promise<McpHttpServerHandle> => {
   const host = options.host ?? "127.0.0.1";
   const path = "/mcp";
   let requestCounter = 0;
@@ -93,7 +97,7 @@ export async function startMcpHttpServer(
         }
       }
       if (logFile) {
-        const rpc = (parsedBody ?? {}) as { method?: unknown; id?: unknown };
+        const rpc: Record<string, unknown> = isRecord(parsedBody) ? parsedBody : {};
         log({
           ev: "request",
           req: reqNo,
@@ -115,7 +119,9 @@ export async function startMcpHttpServer(
             ms: Date.now() - startedAt,
           }),
         );
-        req.socket.once("error", (e) => log({ ev: "socket_error", req: reqNo, error: String(e) }));
+        req.socket.once("error", (socketError) =>
+          log({ ev: "socket_error", req: reqNo, error: String(socketError) }),
+        );
       }
       const closeController = new AbortController();
       let completed = false;
@@ -138,7 +144,7 @@ export async function startMcpHttpServer(
       log({ ev: "handler_error", req: reqNo, error: String(error) });
       if (!res.headersSent) {
         res.writeHead(500, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+        res.end(JSON.stringify({ error: errorMessage(error) }));
       } else {
         res.end();
       }
@@ -150,7 +156,9 @@ export async function startMcpHttpServer(
     httpServer.once("error", reject);
     httpServer.listen(options.port ?? 0, host, () => resolve());
   });
-  const address = httpServer.address() as AddressInfo;
+  const address = httpServer.address();
+  if (address === null || typeof address === "string")
+    throw new Error("MCP HTTP server did not bind a TCP address");
   boundPort = address.port;
   return {
     url: `http://${host}:${address.port}${path}`,
@@ -162,20 +170,20 @@ export async function startMcpHttpServer(
         httpServer.close(() => resolve());
       }),
   };
-}
+};
 
 export { McpServer };
 
-export async function readJsonBody(
+export const readJsonBody = async (
   req: IncomingMessage,
   limitBytes = 1024 * 1024,
-): Promise<unknown> {
+): Promise<unknown> => {
   const text = await readBody(req, limitBytes);
   if (text.length === 0) return {};
   return JSON.parse(text);
-}
+};
 
-export function sendJson(res: ServerResponse, status: number, body: unknown): void {
+export const sendJson = (res: ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
-}
+};

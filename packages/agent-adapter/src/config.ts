@@ -76,7 +76,7 @@ export class ConfigurationError extends Error {
 }
 
 /** Validate policy against wiring: every policy entry must name a configured MCP server. */
-export function validateRuntimeConfig(config: RuntimeConfig): void {
+export const validateRuntimeConfig = (config: RuntimeConfig): void => {
   for (const identity of Object.keys(config.toolPolicy)) {
     const match = /^mcp__([A-Za-z0-9_-]+)__/.exec(identity);
     const server = match?.[1];
@@ -102,4 +102,4 @@ export function validateRuntimeConfig(config: RuntimeConfig): void {
     if (secretLike.test(key))
       throw new ConfigurationError(`env must not carry credentials (found key ${key})`);
   }
-}
+};

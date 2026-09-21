@@ -6,7 +6,16 @@ import tseslint from "typescript-eslint";
 const BYPASS_NOTE = "Bypass with an eslint-disable-next-line comment that carries a `-- reason`.";
 
 export default tseslint.config(
-  { ignores: ["node_modules/", "dist/", "**/node_modules/", "tests/acceptance/promptfoo/output/"] },
+  {
+    ignores: [
+      "node_modules/",
+      "dist/",
+      "**/node_modules/",
+      ".mia-work/",
+      ".mia-state/",
+      "tests/acceptance/promptfoo/output/",
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.strict,
   ...tseslint.configs.stylistic,

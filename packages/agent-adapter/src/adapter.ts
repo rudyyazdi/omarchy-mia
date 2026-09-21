@@ -1,11 +1,15 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { redactString, redactValue } from "@mia/protocol";
+import { setTimeout as sleep } from "node:timers/promises";
+import { match } from "ts-pattern";
+import { z } from "zod";
+import { errorMessage, redactString, redactValue } from "@mia/protocol";
 import type { ApprovalBridge, PermissionHandler } from "./bridge.ts";
 import type { RuntimeConfig } from "./config.ts";
 import { prepareLaunch, type LaunchPlan } from "./launch.ts";
 import {
+  InitMessageSchema,
   LineSplitter,
   parseStreamLine,
   type InitMessage,
@@ -19,8 +23,8 @@ export type AdapterEvent =
   | { type: "text_delta"; text: string; at: string }
   | {
       type: "tool_proposed";
-      runtime_call_id: string;
-      tool_identity: string;
+      runtimeCallId: string;
+      toolIdentity: string;
       arguments: unknown;
       complete: boolean;
       at: string;
@@ -28,8 +32,8 @@ export type AdapterEvent =
   | { type: "assistant_message"; message: unknown; at: string }
   | {
       type: "tool_result";
-      runtime_call_id: string;
-      is_error: boolean;
+      runtimeCallId: string;
+      isError: boolean;
       content: unknown;
       raw: unknown;
       at: string;
@@ -54,10 +58,15 @@ export interface TurnOptions {
 /** not_needed: no interruption; forced_kill: SIGKILL delivered and exit observed; unknown: kill sent, exit not observed in time. */
 export type RuntimeCancellation = "not_needed" | "forced_kill" | "unknown";
 
+interface RuntimeExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
 export interface TurnResult {
   status: "completed" | "failed" | "killed";
   result: ResultMessage | null;
-  exit: { code: number | null; signal: NodeJS.Signals | null } | null;
+  exit: RuntimeExit | null;
   error: string | null;
   streamLogPath: string;
   hookEvidencePath: string;
@@ -79,7 +88,10 @@ export interface TurnHandle {
 
 /** How long to wait for the killed process to exit before reporting the cancellation outcome as unknown. */
 const EXIT_WAIT_MS = 5_000;
+/** How long the turn result waits for a pending interrupt() to settle after the process exit is observed. */
+const INTERRUPT_SETTLE_MS = 6_000;
 
+/** Printed verbatim as a JSON report by the probe tool, hence snake_case. */
 export interface StaticCapabilities {
   executable_resolved: string | null;
   runtime_version: string | null;
@@ -108,7 +120,7 @@ const REQUIRED_FLAGS = [
 ];
 
 /** Static checks: nothing here contacts a model. */
-export function probeStaticCapabilities(config: RuntimeConfig): StaticCapabilities {
+export const probeStaticCapabilities = (config: RuntimeConfig): StaticCapabilities => {
   const errors: string[] = [];
   const which = spawnSync("sh", ["-c", `command -v ${JSON.stringify(config.executable)}`], {
     encoding: "utf8",
@@ -118,11 +130,11 @@ export function probeStaticCapabilities(config: RuntimeConfig): StaticCapabiliti
   let version: string | null = null;
   const flags: Record<string, boolean> = {};
   if (resolved) {
-    const v = spawnSync(resolved, ["--version"], { encoding: "utf8", timeout: 20_000 });
-    version = v.status === 0 ? v.stdout.trim() : null;
+    const versionProbe = spawnSync(resolved, ["--version"], { encoding: "utf8", timeout: 20_000 });
+    version = versionProbe.status === 0 ? versionProbe.stdout.trim() : null;
     if (!version)
       errors.push(
-        `"${resolved} --version" failed: ${v.stderr?.trim() || v.error?.message || "unknown"}`,
+        `"${resolved} --version" failed: ${versionProbe.stderr?.trim() || versionProbe.error?.message || "unknown"}`,
       );
     const help =
       spawnSync(resolved, ["--help"], { encoding: "utf8", timeout: 20_000 }).stdout ?? "";
@@ -152,7 +164,7 @@ export function probeStaticCapabilities(config: RuntimeConfig): StaticCapabiliti
     adapter_version: ADAPTER_VERSION,
     errors,
   };
-}
+};
 
 /**
  * Claude Code adapter. One turn = one runtime process. The bridge is shared across turns and only
@@ -192,14 +204,13 @@ export class ClaudeCodeAdapter {
         detached: true,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
       return {
         pid: undefined,
         result: Promise.resolve({
           status: "failed",
           result: null,
           exit: null,
-          error: `failed to spawn runtime: ${message}`,
+          error: `failed to spawn runtime: ${errorMessage(error)}`,
           streamLogPath,
           hookEvidencePath: launch.files.hookEvidence,
           launch: launch.description,
@@ -233,42 +244,46 @@ export class ClaudeCodeAdapter {
     child.stdin?.on("error", () => undefined);
     child.stdin?.end(options.text);
 
-    const handleMessage = (message: RuntimeMessage) => {
-      switch (message.type) {
-        case "system":
-          if (message.subtype === "init") {
-            init = message as InitMessage;
-            emit({ type: "runtime_init", init, at: now() });
-          }
-          return;
-        case "stream_event": {
-          const ev = message.event;
+    const handleMessage = (message: RuntimeMessage): void =>
+      match(message)
+        .with({ type: "system" }, (systemMessage) => {
+          if (systemMessage.subtype !== "init") return;
+          // The union parsed InitMessageSchema first, so a system/init message that reached here satisfies it.
+          const parsedInit = InitMessageSchema.safeParse(systemMessage);
+          if (!parsedInit.success) return;
+          init = parsedInit.data;
+          emit({ type: "runtime_init", init, at: now() });
+        })
+        .with({ type: "stream_event" }, ({ event }) => {
           if (
-            ev.type === "content_block_delta" &&
-            ev.delta?.type === "text_delta" &&
-            ev.delta.text
+            event.type === "content_block_delta" &&
+            event.delta?.type === "text_delta" &&
+            event.delta.text
           ) {
-            emit({ type: "text_delta", text: ev.delta.text, at: now() });
+            emit({ type: "text_delta", text: event.delta.text, at: now() });
           } else if (
-            ev.type === "content_block_start" &&
-            ev.content_block?.type === "tool_use" &&
-            ev.content_block.id &&
-            ev.content_block.name
+            event.type === "content_block_start" &&
+            event.content_block?.type === "tool_use" &&
+            event.content_block.id &&
+            event.content_block.name
           ) {
             emit({
               type: "tool_proposed",
-              runtime_call_id: ev.content_block.id,
-              tool_identity: ev.content_block.name,
-              arguments: ev.content_block.input ?? {},
+              runtimeCallId: event.content_block.id,
+              toolIdentity: event.content_block.name,
+              arguments: event.content_block.input ?? {},
               complete: false,
               at: now(),
             });
           }
-          return;
-        }
-        case "assistant": {
-          emit({ type: "assistant_message", message: redactValue(message.message), at: now() });
-          for (const block of message.message.content) {
+        })
+        .with({ type: "assistant" }, (assistantMessage) => {
+          emit({
+            type: "assistant_message",
+            message: redactValue(assistantMessage.message),
+            at: now(),
+          });
+          for (const block of assistantMessage.message.content) {
             if (
               block.type === "tool_use" &&
               block.id &&
@@ -278,42 +293,37 @@ export class ClaudeCodeAdapter {
               proposedComplete.add(block.id);
               emit({
                 type: "tool_proposed",
-                runtime_call_id: block.id,
-                tool_identity: block.name,
+                runtimeCallId: block.id,
+                toolIdentity: block.name,
                 arguments: block.input ?? {},
                 complete: true,
                 at: now(),
               });
             }
           }
-          return;
-        }
-        case "user": {
-          const content = message.message.content;
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              if (block.type === "tool_result" && block.tool_use_id) {
-                emit({
-                  type: "tool_result",
-                  runtime_call_id: block.tool_use_id,
-                  is_error: block.is_error === true,
-                  content: redactValue(block.content ?? null),
-                  raw: redactValue(message.tool_use_result ?? null),
-                  at: now(),
-                });
-              }
+        })
+        .with({ type: "user" }, (userMessage) => {
+          const content = userMessage.message.content;
+          if (!Array.isArray(content)) return;
+          for (const block of content) {
+            if (block.type === "tool_result" && block.tool_use_id) {
+              emit({
+                type: "tool_result",
+                runtimeCallId: block.tool_use_id,
+                isError: block.is_error === true,
+                content: redactValue(block.content ?? null),
+                raw: redactValue(userMessage.tool_use_result ?? null),
+                at: now(),
+              });
             }
           }
-          return;
-        }
-        case "result":
-          result = message as ResultMessage;
+        })
+        .with({ type: "result" }, (resultMessage) => {
+          result = resultMessage;
           emit({ type: "turn_result", result, at: now() });
-          return;
-        default:
-          return;
-      }
-    };
+        })
+        .with({ type: "other" }, () => undefined)
+        .exhaustive();
 
     const splitter = new LineSplitter();
     const consume = (lines: string[]) => {
@@ -329,7 +339,7 @@ export class ClaudeCodeAdapter {
         } catch (error) {
           emit({
             type: "runtime_stderr",
-            text: `[mia] could not retain transcript line: ${error instanceof Error ? error.message : String(error)}`,
+            text: `[mia] could not retain transcript line: ${errorMessage(error)}`,
             at: now(),
           });
         }
@@ -350,29 +360,18 @@ export class ClaudeCodeAdapter {
       emit({ type: "runtime_stderr", text: redactString(chunk), at: now() }),
     );
 
-    let settleExit: (exit: { code: number | null; signal: NodeJS.Signals | null }) => void = () =>
-      undefined;
-    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-      (resolve) => {
-        settleExit = resolve;
-        child.once("close", (code, signal) => {
-          consume(splitter.flush());
-          resolve({ code, signal });
-        });
-        child.once("error", () => resolve({ code: null, signal: null }));
-      },
-    );
+    const exitSettled = Promise.withResolvers<RuntimeExit>();
+    child.once("close", (code, signal) => {
+      consume(splitter.flush());
+      exitSettled.resolve({ code, signal });
+    });
+    child.once("error", () => exitSettled.resolve({ code: null, signal: null }));
+    const exited = exitSettled.promise;
 
-    let settle: () => void = () => undefined;
-    const interruptSettled = {
-      promise: new Promise<void>((r) => {
-        settle = r;
-      }),
-      resolve: () => settle(),
-    };
+    /** Settles (with no value) once a pending interrupt() has recorded its outcome. */
+    const interruptSettled = Promise.withResolvers<undefined>();
     const done: Promise<TurnResult> = exited.then(async (exit) => {
-      if (interrupted)
-        await Promise.race([interruptSettled.promise, new Promise((r) => setTimeout(r, 6_000))]);
+      if (interrupted) await Promise.race([interruptSettled.promise, sleep(INTERRUPT_SETTLE_MS)]);
       this.bridge.setHandler(null);
       emit({ type: "runtime_exit", code: exit.code, signal: exit.signal, at: now() });
       let status: TurnResult["status"];
@@ -421,15 +420,15 @@ export class ClaudeCodeAdapter {
       }
       const outcome = await Promise.race([
         exited.then(() => "exited" as const),
-        new Promise<"timeout">((r) => setTimeout(() => r("timeout"), EXIT_WAIT_MS)),
+        sleep(EXIT_WAIT_MS, "timeout" as const),
       ]);
       runtimeCancellation = outcome === "exited" ? "forced_kill" : "unknown";
       if (outcome === "timeout") {
         // Do not let a stuck process hold the task in "interrupting" forever: finish the turn and report uncertainty.
         child.unref();
-        settleExit({ code: null, signal: null });
+        exitSettled.resolve({ code: null, signal: null });
       }
-      interruptSettled.resolve();
+      interruptSettled.resolve(undefined);
       return runtimeCancellation;
     };
 
@@ -437,10 +436,13 @@ export class ClaudeCodeAdapter {
   }
 }
 
-export function readHookEvidence(path: string): Array<Record<string, unknown>> {
+/** One line of the hook evidence file written by hook-capture.mjs: a JSON object of runtime-reported fields. */
+const HookEvidenceRecordSchema = z.record(z.string(), z.unknown());
+
+export const readHookEvidence = (path: string): Record<string, unknown>[] => {
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8")
     .split("\n")
-    .filter((l) => l.trim())
-    .map((l) => JSON.parse(l) as Record<string, unknown>);
-}
+    .filter((line) => line.trim())
+    .map((line) => HookEvidenceRecordSchema.parse(JSON.parse(line)));
+};

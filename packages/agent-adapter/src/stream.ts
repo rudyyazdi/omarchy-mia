@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { errorMessage } from "@mia/protocol";
 
 /**
  * Loose schemas for the Claude Code stream-json output. Only the fields Mia relies on are typed;
@@ -116,7 +117,7 @@ export type ResultMessage = z.infer<typeof ResultMessageSchema>;
 export type ParsedLine =
   { ok: true; message: RuntimeMessage; raw: string } | { ok: false; raw: string; error: string };
 
-export function parseStreamLine(line: string): ParsedLine | null {
+export const parseStreamLine = (line: string): ParsedLine | null => {
   const trimmed = line.trim();
   if (trimmed.length === 0) return null;
   let json: unknown;
@@ -126,7 +127,7 @@ export function parseStreamLine(line: string): ParsedLine | null {
     return {
       ok: false,
       raw: trimmed,
-      error: `invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      error: `invalid JSON: ${errorMessage(error)}`,
     };
   }
   const parsed = KnownMessageSchema.safeParse(json);
@@ -144,7 +145,7 @@ export function parseStreamLine(line: string): ParsedLine | null {
     raw: trimmed,
     error: `malformed runtime message: ${parsed.error.message.slice(0, 300)}`,
   };
-}
+};
 
 /** Incremental newline-delimited JSON splitter. */
 export class LineSplitter {

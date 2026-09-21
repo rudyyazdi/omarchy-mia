@@ -14,33 +14,37 @@ export const REDACTED = "[REDACTED]";
 /** Extra literal strings to redact (e.g. the local client secret) registered at runtime. */
 const registeredSecrets = new Set<string>();
 
-export function registerSecret(secret: string): void {
+export const registerSecret = (secret: string): void => {
   if (secret.length >= 8) registeredSecrets.add(secret);
-}
+};
 
-export function redactString(text: string): string {
+export const redactString = (text: string): string => {
   let out = text;
   for (const secret of registeredSecrets) out = out.split(secret).join(REDACTED);
-  for (const re of SENSITIVE_VALUE) out = out.replace(re, REDACTED);
+  for (const pattern of SENSITIVE_VALUE) out = out.replace(pattern, REDACTED);
   return out;
-}
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const walk = (value: unknown, key: string | undefined): unknown => {
+  if (key !== undefined && SENSITIVE_KEY.test(key)) return REDACTED;
+  if (typeof value === "string") return redactString(value);
+  if (Array.isArray(value)) return value.map((item) => walk(item, undefined));
+  if (isRecord(value)) {
+    const out: Record<string, unknown> = {};
+    for (const [entryKey, entryValue] of Object.entries(value))
+      out[entryKey] = walk(entryValue, entryKey);
+    return out;
+  }
+  return value;
+};
 
 /**
  * Recursively redact a JSON-like value. Keys that look sensitive are replaced whole;
  * strings are scanned for secret-shaped values. Returns a new value; input is not mutated.
  */
-export function redactValue<T>(value: T): T {
-  return walk(value, undefined) as T;
-}
-
-function walk(value: unknown, key: string | undefined): unknown {
-  if (key !== undefined && SENSITIVE_KEY.test(key)) return REDACTED;
-  if (typeof value === "string") return redactString(value);
-  if (Array.isArray(value)) return value.map((v) => walk(v, undefined));
-  if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = walk(v, k);
-    return out;
-  }
-  return value;
-}
+export const redactValue = <T>(value: T): T =>
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- walk() preserves the JSON shape of its input but that cannot be expressed in its type; callers rely on the same-type return.
+  walk(value, undefined) as T;

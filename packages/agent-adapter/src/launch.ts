@@ -1,6 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 import { BRIDGE_SERVER_NAME, BRIDGE_TOOL_IDENTITY } from "./bridge.ts";
 import type { RuntimeConfig } from "./config.ts";
 
@@ -24,10 +23,7 @@ export interface LaunchPlan {
   };
 }
 
-export const HOOK_SCRIPT_PATH = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  "hook-capture.mjs",
-);
+export const HOOK_SCRIPT_PATH = join(import.meta.dirname, "hook-capture.mjs");
 
 /** Timeout for a held permission prompt or long tool call: 24h, so a human decision is never timed out by the runtime. */
 export const MCP_TOOL_TIMEOUT_MS = 24 * 60 * 60 * 1000;
@@ -47,7 +43,7 @@ export interface LaunchInput {
  * Build the exact runtime invocation. Mia decides everything explicitly: model, effort, tool surface,
  * MCP wiring, permission rules and the approval tool. The prompt text goes on stdin, never argv.
  */
-export function prepareLaunch(input: LaunchInput): LaunchPlan {
+export const prepareLaunch = (input: LaunchInput): LaunchPlan => {
   const { config, runtimeDir, bridgeUrl, sessionId, resume } = input;
   mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
   mkdirSync(config.workingDirectory, { recursive: true, mode: 0o700 });
@@ -64,6 +60,7 @@ export function prepareLaunch(input: LaunchInput): LaunchPlan {
   const askRules = Object.entries(config.toolPolicy)
     .filter(([, policy]) => policy !== "deny")
     .map(([identity]) => identity);
+  const allowRules: string[] = [];
   const hookEvidence = join(
     runtimeDir,
     `turn-${String(input.turnIndex).padStart(3, "0")}.hooks.jsonl`,
@@ -75,7 +72,7 @@ export function prepareLaunch(input: LaunchInput): LaunchPlan {
       // (ask wins over any inherited allow) so the bridge sees every call and the action gate applies.
       deny: denyRules,
       ask: askRules,
-      allow: [] as string[],
+      allow: allowRules,
     },
     hooks: {
       PreToolUse: [
@@ -131,7 +128,8 @@ export function prepareLaunch(input: LaunchInput): LaunchPlan {
       join(runtimeDir, "runtime-debug.log"),
     );
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+  for (const [name, value] of Object.entries(process.env))
+    if (value !== undefined) env[name] = value;
   Object.assign(env, config.env);
   env.MCP_TOOL_TIMEOUT = String(MCP_TOOL_TIMEOUT_MS);
   // Claude Code 2.1.278 adds a separate idle timeout: a call with "no response or progress" for 300s is aborted. A held
@@ -159,4 +157,4 @@ export function prepareLaunch(input: LaunchInput): LaunchPlan {
       mcp_config: mcpConfig,
     },
   };
-}
+};

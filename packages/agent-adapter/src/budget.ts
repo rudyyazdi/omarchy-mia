@@ -22,7 +22,7 @@ export class LiveCallBudget {
     if (!existsSync(this.file)) return 0;
     return readFileSync(this.file, "utf8")
       .split("\n")
-      .filter((l) => l.trim()).length;
+      .filter((line) => line.trim()).length;
   }
 
   /** Reserve one call or throw. */

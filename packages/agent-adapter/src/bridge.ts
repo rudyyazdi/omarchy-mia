@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { McpServer, startMcpHttpServer, type McpHttpServerHandle } from "@mia/mcp-http";
+import { errorMessage } from "@mia/protocol";
 
 export const BRIDGE_SERVER_NAME = "mia_approval";
 export const BRIDGE_TOOL_NAME = "request";
@@ -15,13 +16,14 @@ export const PermissionRequestPayloadSchema = z
   })
   .passthrough();
 
+/** In-memory view of a permission request; the runtime's snake_case wire payload is mapped here once. */
 export interface PermissionRequest {
-  tool_name: string;
+  toolName: string;
   input: unknown;
   /** Runtime call identity; undefined if the runtime did not supply one (then the call must be rejected). */
-  tool_use_id: string | undefined;
+  toolUseId: string | undefined;
   raw: unknown;
-  received_at: string;
+  receivedAt: string;
   /** Aborts if the runtime abandons the prompt (turn aborted or connection closed) before a decision. */
   abandoned: AbortSignal;
 }
@@ -78,7 +80,7 @@ export class ApprovalBridge {
           ],
         }));
         server.server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
-          const received_at = new Date().toISOString();
+          const receivedAt = new Date().toISOString();
           if (req.params.name !== BRIDGE_TOOL_NAME) {
             return {
               isError: true,
@@ -107,18 +109,18 @@ export class ApprovalBridge {
             });
           try {
             const decision = await handler({
-              tool_name: parsed.data.tool_name,
+              toolName: parsed.data.tool_name,
               input: parsed.data.input ?? {},
-              tool_use_id: parsed.data.tool_use_id,
+              toolUseId: parsed.data.tool_use_id,
               raw: req.params.arguments,
-              received_at,
+              receivedAt,
               abandoned: AbortSignal.any([extra.signal, ctx.connectionClosed]),
             });
             return respond(decision);
           } catch (error) {
             return respond({
               behavior: "deny",
-              message: `Mia could not evaluate this call: ${error instanceof Error ? error.message : String(error)}`,
+              message: `Mia could not evaluate this call: ${errorMessage(error)}`,
             });
           }
         });
