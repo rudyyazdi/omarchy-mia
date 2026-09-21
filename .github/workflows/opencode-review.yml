@@ -6,7 +6,9 @@ on:
 
 jobs:
   review-brevity:
-    if: github.event.pull_request.draft == false
+    if: >
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 25
     concurrency:
@@ -14,7 +16,6 @@ jobs:
       cancel-in-progress: true
     permissions:
       contents: read
-      pull-requests: write
       issues: write
     steps:
       - uses: actions/checkout@v6
@@ -84,8 +85,41 @@ jobs:
             change is minimal and justified and there is nothing to triage, return
             {"reviewer":"brevity","summary":"Minimal and justified.","findings":[],"thread_actions":[]}.
 
+  post-brevity:
+    needs: review-brevity
+    if: >
+      always() &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: post-brevity-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Write PR diff for the reviewer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "pr.diff" >> .git/info/exclude
+          gh pr diff ${{ github.event.pull_request.number }} > pr.diff
+      - name: Dump open review threads
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_NAME: brevity
+          PRIOR_THREADS: prior-threads.json
+        run: |
+          echo "prior-threads.json" >> .git/info/exclude
+          python3 .github/scripts/post-review.py dump-threads
       - name: Post inline review
-        if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RESOLVE_TOKEN: ${{ secrets.OPENCODE_REVIEW_TOKEN }}
@@ -96,7 +130,9 @@ jobs:
         run: python3 .github/scripts/post-review.py post
 
   review-safety:
-    if: github.event.pull_request.draft == false
+    if: >
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 25
     concurrency:
@@ -104,7 +140,6 @@ jobs:
       cancel-in-progress: true
     permissions:
       contents: read
-      pull-requests: write
       issues: write
     steps:
       - uses: actions/checkout@v6
@@ -170,8 +205,41 @@ jobs:
             triage, return
             {"reviewer":"safety","summary":"No material issues.","findings":[],"thread_actions":[]}.
 
+  post-safety:
+    needs: review-safety
+    if: >
+      always() &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: post-safety-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Write PR diff for the reviewer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "pr.diff" >> .git/info/exclude
+          gh pr diff ${{ github.event.pull_request.number }} > pr.diff
+      - name: Dump open review threads
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_NAME: safety
+          PRIOR_THREADS: prior-threads.json
+        run: |
+          echo "prior-threads.json" >> .git/info/exclude
+          python3 .github/scripts/post-review.py dump-threads
       - name: Post inline review
-        if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RESOLVE_TOKEN: ${{ secrets.OPENCODE_REVIEW_TOKEN }}

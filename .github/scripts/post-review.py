@@ -7,9 +7,8 @@ The action can only post one top-level issue comment, so the reviewer prompts
 return a JSON object and this script reproduces it as a real pull-request review
 (one thread per changed line) plus a summary for findings that cannot be
 anchored to the diff. Previous runs' review summaries and top-level action
-comments are cleaned up only after the new review is posted. Inline threads
-with human replies are kept; bot-only stale threads without a triage action
-are removed as before.
+comments are cleaned up only after the new review is posted. Open threads
+are kept for triage, including bot-only ones.
 
 Usage:
   post-review.py dump-threads
@@ -195,10 +194,17 @@ def parse_diff(text):
     in_hunk = False
     for line in text.splitlines():
         if line.startswith("diff --git "):
-            match = re.match(r"diff --git a/(.*) b/(.*)$", line)
-            path = match.group(2) if match else None
+            path = None
             line_no = 0
             in_hunk = False
+        elif line.startswith("+++ "):
+            rest = line[4:].split("\t", 1)[0]
+            if rest.startswith("b/"):
+                path = rest[2:]
+            elif rest == "/dev/null":
+                path = None
+            else:
+                path = rest
         elif line.startswith("@@"):
             match = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", line)
             if match:
