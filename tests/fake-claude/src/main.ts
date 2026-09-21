@@ -2,77 +2,121 @@
  * Fake Claude Code executable for offline end-to-end tests of the real adapter: honours the launch flags
  * Mia passes, speaks stream-json on stdout, asks the approval bridge for permission over MCP exactly like the
  * runtime does, and calls fixture tools. The prompt text selects the behaviour: READ, CHANGE, SLOW.
+ *
+ * Everything it writes to stdout imitates the real runtime's wire format, so those payloads stay snake_case.
  */
 import { readFileSync } from "node:fs";
+import { Command } from "commander";
+import { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-const args = process.argv.slice(2);
-const flag = (name: string) => {
-  const i = args.indexOf(name);
-  return i >= 0 ? args[i + 1] : undefined;
-};
-const sessionId = flag("--session-id") ?? flag("--resume") ?? "fake-session";
-const mcpConfig = JSON.parse(readFileSync(flag("--mcp-config")!, "utf8")) as {
-  mcpServers: Record<string, { url: string }>;
-};
-const permissionTool = flag("--permission-prompt-tool") ?? "";
-const [, bridgeServer, bridgeTool] = /^mcp__(.+?)__(.+)$/.exec(permissionTool) ?? [];
-const model = flag("--model") ?? "fake";
+// The flags the real runtime accepts (see packages/agent-adapter/src/launch.ts); anything else is tolerated
+// and ignored so the fake keeps working when the adapter adds a flag.
+const program = new Command()
+  .name("fake-claude")
+  .allowUnknownOption()
+  .allowExcessArguments()
+  .option("-p")
+  .option("--output-format <format>")
+  .option("--verbose")
+  .option("--include-partial-messages")
+  .option("--model <model>", "model to report in the init message", "fake")
+  .option("--effort <effort>")
+  .option("--strict-mcp-config")
+  .requiredOption("--mcp-config <path>", "MCP server configuration written by the adapter")
+  .option("--settings <path>")
+  .option("--permission-mode <mode>")
+  .option("--permission-prompt-tool <identity>", "bridge tool to ask for permission", "")
+  .option("--tools <list>")
+  .option("--append-system-prompt-file <path>")
+  .option("--session-id <id>")
+  .option("--resume <id>")
+  .option("--debug <category>")
+  .option("--debug-file <path>");
+program.parse();
+const flags = program.opts<{
+  model: string;
+  mcpConfig: string;
+  permissionPromptTool: string;
+  sessionId?: string;
+  resume?: string;
+}>();
+
+const McpConfigSchema = z.object({
+  mcpServers: z.record(z.string(), z.looseObject({ url: z.string() })),
+});
+const PermissionResponseSchema = z.object({ behavior: z.string(), message: z.string().optional() });
+
+const sessionId = flags.sessionId ?? flags.resume ?? "fake-session";
+const mcpConfig = McpConfigSchema.parse(JSON.parse(readFileSync(flags.mcpConfig, "utf8")));
+const [, bridgeServer, bridgeTool] = /^mcp__(.+?)__(.+)$/.exec(flags.permissionPromptTool) ?? [];
+const model = flags.model;
 let prompt = "";
 process.stdin.setEncoding("utf8");
 for await (const chunk of process.stdin) prompt += chunk;
 
 const emit = (obj: unknown) => process.stdout.write(JSON.stringify(obj) + "\n");
-const now = () => new Date().toISOString();
 emit({
   type: "system",
   subtype: "init",
   session_id: sessionId,
   model,
   tools: Object.keys(mcpConfig.mcpServers)
-    .filter((s) => s !== bridgeServer)
-    .map((s) => `mcp__${s}__read`),
+    .filter((server) => server !== bridgeServer)
+    .map((server) => `mcp__${server}__read`),
   mcp_servers: Object.keys(mcpConfig.mcpServers).map((name) => ({ name, status: "connected" })),
   permissionMode: "default",
   claude_code_version: "fake-0.1",
   cwd: process.cwd(),
 });
 
-async function mcpClient(server: string): Promise<Client> {
-  const c = new Client({ name: "fake-claude", version: "0" });
-  await c.connect(new StreamableHTTPClientTransport(new URL(mcpConfig.mcpServers[server]!.url)));
-  return c;
-}
+const mcpClient = async (server: string): Promise<Client> => {
+  const entry = mcpConfig.mcpServers[server];
+  if (!entry) throw new Error(`mcp server ${server} is not in --mcp-config`);
+  const client = new Client({ name: "fake-claude", version: "0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(entry.url)));
+  return client;
+};
 
-async function askPermission(
+/** The first text block of a tool result, or undefined when the tool answered with none. */
+const firstText = (result: Awaited<ReturnType<Client["callTool"]>>): string | undefined => {
+  const [first] = Array.isArray(result.content) ? result.content : [];
+  return first?.type === "text" ? first.text : undefined;
+};
+
+const askPermission = async (
   toolName: string,
   input: unknown,
   toolUseId: string,
-): Promise<{ behavior: string; message?: string }> {
+): Promise<{ behavior: string; message?: string }> => {
   if (!bridgeServer || !bridgeTool)
     return { behavior: "deny", message: "no permission tool configured" };
-  const c = await mcpClient(bridgeServer);
+  const client = await mcpClient(bridgeServer);
   try {
-    const r = await c.callTool({
+    const result = await client.callTool({
       name: bridgeTool,
       arguments: { tool_name: toolName, input, tool_use_id: toolUseId },
     });
-    return JSON.parse((r.content as Array<{ text: string }>)[0]!.text) as {
-      behavior: string;
-      message?: string;
-    };
+    const text = firstText(result);
+    if (text === undefined) throw new Error("permission tool returned no text");
+    return PermissionResponseSchema.parse(JSON.parse(text));
   } finally {
-    await c.close();
+    await client.close();
   }
-}
+};
 
-async function useTool(
-  server: string,
-  tool: string,
-  input: Record<string, unknown>,
-  toolUseId: string,
-): Promise<void> {
+const useTool = async ({
+  server,
+  tool,
+  input,
+  toolUseId,
+}: {
+  server: string;
+  tool: string;
+  input: Record<string, unknown>;
+  toolUseId: string;
+}): Promise<void> => {
   const identity = `mcp__${server}__${tool}`;
   emit({
     type: "stream_event",
@@ -110,9 +154,9 @@ async function useTool(
     });
     return;
   }
-  const c = await mcpClient(server);
+  const client = await mcpClient(server);
   try {
-    const r = await c.callTool({ name: tool, arguments: input });
+    const result = await client.callTool({ name: tool, arguments: input });
     emit({
       type: "user",
       message: {
@@ -121,17 +165,17 @@ async function useTool(
           {
             type: "tool_result",
             tool_use_id: toolUseId,
-            content: (r.content as Array<{ text: string }>)[0]?.text ?? "",
-            is_error: r.isError === true,
+            content: firstText(result) ?? "",
+            is_error: result.isError === true,
           },
         ],
       },
       session_id: sessionId,
     });
   } finally {
-    await c.close();
+    await client.close();
   }
-}
+};
 
 const say = (text: string) =>
   emit({
@@ -144,21 +188,31 @@ const start = Date.now();
 say("Fake runtime: ");
 if (/READ/.test(prompt)) {
   say("reading.");
-  await useTool("d1", "read", {}, "toolu_fake_read_1");
+  await useTool({ server: "d1", tool: "read", input: {}, toolUseId: "toolu_fake_read_1" });
 }
 if (/CHANGE/.test(prompt)) {
   say("changing.");
-  await useTool("d1", "change", { delta: 1 }, "toolu_fake_change_1");
+  await useTool({
+    server: "d1",
+    tool: "change",
+    input: { delta: 1 },
+    toolUseId: "toolu_fake_change_1",
+  });
 }
 if (/SLOW/.test(prompt)) {
   say("slow.");
-  await useTool(
-    "d1",
-    "slow",
-    { mode: /UNCANCELLABLE/.test(prompt) ? "uncancellable" : "cancellable" },
-    "toolu_fake_slow_1",
-  );
-  await useTool("d1", "change", { delta: 1 }, "toolu_fake_change_after_slow");
+  await useTool({
+    server: "d1",
+    tool: "slow",
+    input: { mode: /UNCANCELLABLE/.test(prompt) ? "uncancellable" : "cancellable" },
+    toolUseId: "toolu_fake_slow_1",
+  });
+  await useTool({
+    server: "d1",
+    tool: "change",
+    input: { delta: 1 },
+    toolUseId: "toolu_fake_change_after_slow",
+  });
 }
 if (/CRASH/.test(prompt)) process.exit(3);
 emit({

@@ -22,6 +22,11 @@ export interface MiaClientOptions {
 
 export type AckPayload = ServerEventOf<"ack">["payload"];
 
+const isEventOf =
+  <T extends ServerEventType>(type: T) =>
+  (event: ServerEvent): event is ServerEventOf<T> =>
+    event.type === type;
+
 /**
  * Programmatic Mia client used by the terminal UI, the acceptance harness and the promptfoo provider.
  * Every command gets a unique message_id; resends reuse it (the server deduplicates).
@@ -31,7 +36,7 @@ export class MiaClient extends EventEmitter {
   private socket: WebSocket | null = null;
   private pendingAcks = new Map<string, (ack: AckPayload) => void>();
   readonly recentInteractionIds: string[] = [];
-  readonly recentErrors: Array<{ at: string; message: string }> = [];
+  readonly recentErrors: { at: string; message: string }[] = [];
   connectionState: ClientDiagnostics["connection_state"] = "disconnected";
   conversationId: string | null = null;
   readonly events: ServerEvent[] = [];
@@ -80,22 +85,24 @@ export class MiaClient extends EventEmitter {
       this.pushError(`server sent an unrecognised event: ${event.error.message.slice(0, 200)}`);
       return;
     }
-    const e = event.data;
-    this.events.push(e);
-    this.recentInteractionIds.push(e.message_id);
+    const serverEvent = event.data;
+    this.events.push(serverEvent);
+    this.recentInteractionIds.push(serverEvent.message_id);
     if (this.recentInteractionIds.length > 50) this.recentInteractionIds.shift();
-    if (e.type === "ack") {
-      const waiter = this.pendingAcks.get(e.payload.command_id);
+    if (serverEvent.type === "ack") {
+      const waiter = this.pendingAcks.get(serverEvent.payload.command_id);
       if (waiter) {
-        this.pendingAcks.delete(e.payload.command_id);
-        waiter(e.payload);
+        this.pendingAcks.delete(serverEvent.payload.command_id);
+        waiter(serverEvent.payload);
       }
     }
-    if (e.type === "conversation_started") this.conversationId = e.payload.conversation_id;
-    if (e.type === "error") this.pushError(`${e.payload.code}: ${e.payload.message}`);
-    this.emit("event", e);
+    if (serverEvent.type === "conversation_started")
+      this.conversationId = serverEvent.payload.conversation_id;
+    if (serverEvent.type === "error")
+      this.pushError(`${serverEvent.payload.code}: ${serverEvent.payload.message}`);
+    this.emit("event", serverEvent);
     // "error" is reserved by EventEmitter; server error events are re-emitted as "server_error".
-    this.emit(e.type === "error" ? "server_error" : e.type, e);
+    this.emit(serverEvent.type === "error" ? "server_error" : serverEvent.type, serverEvent);
   }
 
   private pushError(message: string): void {
@@ -155,7 +162,8 @@ export class MiaClient extends EventEmitter {
     const ack = await this.send("start_conversation", {});
     if (ack.disposition === "rejected")
       throw new Error(`start_conversation rejected: ${ack.error?.code}: ${ack.error?.message}`);
-    const id = (ack.result?.conversation_id as string | undefined) ?? this.conversationId;
+    const fromResult = ack.result?.conversation_id;
+    const id = typeof fromResult === "string" ? fromResult : this.conversationId;
     if (!id) throw new Error("server did not return a conversation id");
     this.conversationId = id;
     return id;
@@ -166,12 +174,17 @@ export class MiaClient extends EventEmitter {
     return this.send("submit_text", { conversation_id: this.conversationId, text }, messageId);
   }
 
-  decide(
-    taskId: string,
-    approvalId: string,
-    decision: Decision,
-    messageId?: string,
-  ): Promise<AckPayload> {
+  decide({
+    taskId,
+    approvalId,
+    decision,
+    messageId,
+  }: {
+    taskId: string;
+    approvalId: string;
+    decision: Decision;
+    messageId?: string;
+  }): Promise<AckPayload> {
     if (!this.conversationId) throw new Error("no conversation");
     return this.send(
       "approval_decision",
@@ -207,12 +220,13 @@ export class MiaClient extends EventEmitter {
   /** Wait for the next event of a type that satisfies the predicate. */
   waitFor<T extends ServerEventType>(
     type: T,
-    predicate: (e: ServerEventOf<T>) => boolean = () => true,
+    predicate: (event: ServerEventOf<T>) => boolean = () => true,
     timeoutMs = 120_000,
   ): Promise<ServerEventOf<T>> {
+    const isWanted = isEventOf(type);
     const existing = this.events.find(
-      (e) => e.type === type && predicate(e as ServerEventOf<T>),
-    ) as ServerEventOf<T> | undefined;
+      (event): event is ServerEventOf<T> => isWanted(event) && predicate(event),
+    );
     if (existing) return Promise.resolve(existing);
     const channel = type === "error" ? "server_error" : type;
     return new Promise((resolve, reject) => {
@@ -220,11 +234,11 @@ export class MiaClient extends EventEmitter {
         this.off(channel, handler);
         reject(new Error(`timed out waiting for ${type}`));
       }, timeoutMs);
-      const handler = (e: ServerEvent) => {
-        if (predicate(e as ServerEventOf<T>)) {
+      const handler = (event: ServerEvent) => {
+        if (isWanted(event) && predicate(event)) {
           clearTimeout(timer);
           this.off(channel, handler);
-          resolve(e as ServerEventOf<T>);
+          resolve(event);
         }
       };
       this.on(channel, handler);

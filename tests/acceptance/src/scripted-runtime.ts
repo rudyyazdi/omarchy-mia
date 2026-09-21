@@ -18,19 +18,19 @@ import { join } from "node:path";
  * the action gate can be exercised after closure.
  */
 export class ScriptedTurn {
-  private resolveResult!: (r: TurnResult) => void;
+  private readonly resolveResult: (result: TurnResult) => void;
   readonly result: Promise<TurnResult>;
   readonly pendingAbandons: AbortController[] = [];
-  readonly decisions: Array<{ request: PermissionRequest; decision: PermissionDecision }> = [];
+  readonly decisions: { request: PermissionRequest; decision: PermissionDecision }[] = [];
   interrupted = false;
   survivesInterrupt = false;
   private ended = false;
   private turnCounter = 0;
 
   constructor(readonly options: TurnOptions) {
-    this.result = new Promise<TurnResult>((r) => {
-      this.resolveResult = r;
-    });
+    const { promise, resolve } = Promise.withResolvers<TurnResult>();
+    this.result = promise;
+    this.resolveResult = resolve;
     mkdirSync(options.runtimeDir, { recursive: true });
   }
 
@@ -61,8 +61,8 @@ export class ScriptedTurn {
   propose(runtimeCallId: string, toolIdentity: string, args: unknown): void {
     this.emit({
       type: "tool_proposed",
-      runtime_call_id: runtimeCallId,
-      tool_identity: toolIdentity,
+      runtimeCallId,
+      toolIdentity,
       arguments: args,
       complete: true,
       at: new Date().toISOString(),
@@ -77,24 +77,25 @@ export class ScriptedTurn {
   ): Promise<PermissionDecision> {
     const abandon = new AbortController();
     this.pendingAbandons.push(abandon);
-    const req: PermissionRequest = {
-      tool_name: toolIdentity,
+    const request: PermissionRequest = {
+      toolName: toolIdentity,
       input: args,
-      tool_use_id: runtimeCallId,
+      toolUseId: runtimeCallId,
+      // The raw payload imitates the runtime's wire format, which is snake_case.
       raw: { tool_name: toolIdentity, input: args, tool_use_id: runtimeCallId },
-      received_at: new Date().toISOString(),
+      receivedAt: new Date().toISOString(),
       abandoned: abandon.signal,
     };
-    const decision = await this.options.permissionHandler(req);
-    this.decisions.push({ request: req, decision });
+    const decision = await this.options.permissionHandler(request);
+    this.decisions.push({ request, decision });
     return decision;
   }
 
   toolResult(runtimeCallId: string, content: unknown, isError = false): void {
     this.emit({
       type: "tool_result",
-      runtime_call_id: runtimeCallId,
-      is_error: isError,
+      runtimeCallId,
+      isError,
       content,
       raw: null,
       at: new Date().toISOString(),
@@ -112,6 +113,11 @@ export class ScriptedTurn {
       streamLogPath,
       JSON.stringify({ type: "scripted", turn: ++this.turnCounter }) + "\n",
     );
+    const exit = this.interrupted
+      ? { code: null, signal: "SIGKILL" as const }
+      : { code: status === "completed" ? 0 : 1, signal: null };
+    let runtimeCancellation: RuntimeCancellation = "not_needed";
+    if (this.interrupted) runtimeCancellation = this.survivesInterrupt ? "unknown" : "forced_kill";
     const result: TurnResult = {
       status: this.interrupted && !this.survivesInterrupt ? "killed" : status,
       result:
@@ -124,10 +130,7 @@ export class ScriptedTurn {
               usage: { input_tokens: 1, output_tokens: 1 },
             }
           : null,
-      exit: {
-        code: this.interrupted ? null : status === "completed" ? 0 : 1,
-        signal: this.interrupted ? "SIGKILL" : null,
-      },
+      exit,
       error,
       streamLogPath,
       hookEvidencePath: join(this.options.runtimeDir, "hook-evidence.jsonl"),
@@ -144,16 +147,12 @@ export class ScriptedTurn {
       },
       init: null,
       interrupted: this.interrupted,
-      runtimeCancellation: this.interrupted
-        ? this.survivesInterrupt
-          ? "unknown"
-          : "forced_kill"
-        : "not_needed",
+      runtimeCancellation,
     };
     this.emit({
       type: "runtime_exit",
-      code: result.exit!.code,
-      signal: result.exit!.signal,
+      code: exit.code,
+      signal: exit.signal,
       at: new Date().toISOString(),
     });
     this.resolveResult(result);
@@ -167,7 +166,7 @@ export class ScriptedTurn {
         this.interrupted = true;
         if (this.survivesInterrupt) return "unknown";
         // SIGKILL: connections drop, held prompts are abandoned, the process is gone.
-        for (const a of this.pendingAbandons) a.abort();
+        for (const abandon of this.pendingAbandons) abandon.abort();
         this.end("failed", "killed");
         return "forced_kill";
       },
@@ -177,19 +176,21 @@ export class ScriptedTurn {
 
 export class ScriptedRuntime implements TurnRunner {
   readonly turns: ScriptedTurn[] = [];
-  private waiters: Array<(t: ScriptedTurn) => void> = [];
+  private waiters: ((turn: ScriptedTurn) => void)[] = [];
 
   submitTurn(options: TurnOptions): TurnHandle {
     const turn = new ScriptedTurn(options);
     this.turns.push(turn);
     const waiters = this.waiters;
     this.waiters = [];
-    for (const w of waiters) w(turn);
+    for (const waiter of waiters) waiter(turn);
     return turn.handle();
   }
 
   /** Resolve with the next turn submitted by the engine. */
   nextTurn(): Promise<ScriptedTurn> {
-    return new Promise((r) => this.waiters.push(r));
+    const { promise, resolve } = Promise.withResolvers<ScriptedTurn>();
+    this.waiters.push(resolve);
+    return promise;
   }
 }

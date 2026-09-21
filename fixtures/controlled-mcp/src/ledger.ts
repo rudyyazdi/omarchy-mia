@@ -1,15 +1,33 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { z } from "zod";
 
-export type LedgerKind =
-  "entered" | "committed" | "cancelled" | "returned" | "rejected" | "released";
+export const LedgerKindSchema = z.enum([
+  "entered",
+  "committed",
+  "cancelled",
+  "returned",
+  "rejected",
+  "released",
+]);
+export type LedgerKind = z.infer<typeof LedgerKindSchema>;
 
-export interface LedgerEntry {
-  seq: number;
-  at: string;
+/** One JSONL line of the ledger; also the shape the harness API serves back to tests. */
+export const LedgerEntrySchema = z.object({
+  seq: z.number(),
+  at: z.string(),
+  kind: LedgerKindSchema,
+  tool: z.string(),
+  call_id: z.string(),
+  args: z.unknown().optional(),
+  detail: z.string().optional(),
+});
+export type LedgerEntry = z.infer<typeof LedgerEntrySchema>;
+
+export interface LedgerAppend {
   kind: LedgerKind;
   tool: string;
-  call_id: string;
+  callId: string;
   args: unknown;
   detail?: string;
 }
@@ -29,13 +47,7 @@ export class Ledger {
     this.seq = this.entries().length;
   }
 
-  append(
-    kind: LedgerKind,
-    tool: string,
-    callId: string,
-    args: unknown,
-    detail?: string,
-  ): LedgerEntry {
+  append({ kind, tool, callId, args, detail }: LedgerAppend): LedgerEntry {
     const entry: LedgerEntry = {
       seq: ++this.seq,
       at: new Date().toISOString(),
@@ -53,8 +65,8 @@ export class Ledger {
     const text = readFileSync(this.ledgerPath, "utf8");
     return text
       .split("\n")
-      .filter((l) => l.trim().length > 0)
-      .map((l) => JSON.parse(l) as LedgerEntry);
+      .filter((line) => line.trim().length > 0)
+      .map((line) => LedgerEntrySchema.parse(JSON.parse(line)));
   }
 
   counter(): number {
@@ -75,7 +87,7 @@ export class Ledger {
 
   commits(tool?: string): LedgerEntry[] {
     return this.entries().filter(
-      (e) => e.kind === "committed" && (tool === undefined || e.tool === tool),
+      (entry) => entry.kind === "committed" && (tool === undefined || entry.tool === tool),
     );
   }
 }

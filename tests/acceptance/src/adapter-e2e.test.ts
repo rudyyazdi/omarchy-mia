@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ApprovalBridge,
@@ -31,19 +32,19 @@ afterAll(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function adapter() {
+const adapter = () => {
   const profile = testProfile(dir, {
     executable: FAKE,
     mcpServers: { d1: { type: "http", url: fixture.mcpUrl } },
   });
   return new ClaudeCodeAdapter(profile.runtime, bridge);
-}
+};
 
-async function run(
+const run = async (
   text: string,
-  decide: (req: PermissionRequest) => PermissionDecision,
+  decide: (request: PermissionRequest) => PermissionDecision,
   during?: (handle: ReturnType<ClaudeCodeAdapter["submitTurn"]>) => Promise<void>,
-) {
+) => {
   const events: AdapterEvent[] = [];
   const requests: PermissionRequest[] = [];
   const handle = adapter().submitTurn({
@@ -52,16 +53,16 @@ async function run(
     firstTurn: true,
     runtimeDir: join(dir, "runtime", Math.random().toString(36).slice(2)),
     turnIndex: 1,
-    permissionHandler: async (req) => {
-      requests.push(req);
-      return decide(req);
+    permissionHandler: async (request) => {
+      requests.push(request);
+      return decide(request);
     },
-    onEvent: (e) => events.push(e),
+    onEvent: (event) => events.push(event),
   });
   if (during) await during(handle);
   const result = await handle.result;
   return { result, events, requests };
-}
+};
 
 describe("real adapter against a fake runtime process", () => {
   it("parses the stream, routes permission through the bridge with tool_use_id, and records results", async () => {
@@ -71,7 +72,7 @@ describe("real adapter against a fake runtime process", () => {
     }));
     expect(result.status).toBe("completed");
     expect(result.init?.model).toBe("scripted-model");
-    expect(events.map((e) => e.type)).toEqual(
+    expect(events.map((event) => event.type)).toEqual(
       expect.arrayContaining([
         "runtime_started",
         "runtime_init",
@@ -82,7 +83,7 @@ describe("real adapter against a fake runtime process", () => {
         "runtime_exit",
       ]),
     );
-    expect(requests.map((r) => [r.tool_name, r.tool_use_id])).toEqual([
+    expect(requests.map((request) => [request.toolName, request.toolUseId])).toEqual([
       ["mcp__d1__read", "toolu_fake_read_1"],
       ["mcp__d1__change", "toolu_fake_change_1"],
     ]);
@@ -97,8 +98,8 @@ describe("real adapter against a fake runtime process", () => {
     const { result, events } = await run("CHANGE", () => ({ behavior: "deny", message: "no" }));
     expect(result.status).toBe("completed");
     expect((await harness.state()).counter).toBe(0);
-    const toolResult = events.find((e) => e.type === "tool_result");
-    expect(toolResult && toolResult.type === "tool_result" && toolResult.is_error).toBe(true);
+    const toolResult = events.find((event) => event.type === "tool_result");
+    expect(toolResult && toolResult.type === "tool_result" && toolResult.isError).toBe(true);
   });
 
   it("SIGKILL interruption stops the process, abandons held prompts, and the fixture cancels a cancellable action", async () => {
@@ -106,18 +107,18 @@ describe("real adapter against a fake runtime process", () => {
     const abandoned: string[] = [];
     const { result, requests } = await run(
       "SLOW",
-      (req) => {
-        req.abandoned.addEventListener("abort", () => abandoned.push(req.tool_name));
+      (request) => {
+        request.abandoned.addEventListener("abort", () => abandoned.push(request.toolName));
         return { behavior: "allow" };
       },
       async (handle) => {
         await harness.waitEntered(20_000);
         const cancellation = await handle.interrupt();
         expect(cancellation).toBe("forced_kill");
-        for (let i = 0; i < 100; i++) {
-          const s = await harness.state();
-          if (s.ledger.some((l) => l.kind === "cancelled")) break;
-          await new Promise((r) => setTimeout(r, 20));
+        for (let attempt = 0; attempt < 100; attempt++) {
+          const state = await harness.state();
+          if (state.ledger.some((entry) => entry.kind === "cancelled")) break;
+          await sleep(20);
         }
       },
     );
@@ -125,10 +126,12 @@ describe("real adapter against a fake runtime process", () => {
     expect(result.runtimeCancellation).toBe("forced_kill");
     expect(result.exit?.signal).toBe("SIGKILL");
     const state = await harness.state();
-    expect(state.ledger.filter((l) => l.kind === "entered" && l.tool === "slow")).toHaveLength(1);
-    expect(state.ledger.some((l) => l.kind === "cancelled")).toBe(true);
+    expect(
+      state.ledger.filter((entry) => entry.kind === "entered" && entry.tool === "slow"),
+    ).toHaveLength(1);
+    expect(state.ledger.some((entry) => entry.kind === "cancelled")).toBe(true);
     expect(state.counter).toBe(0);
-    expect(requests.map((r) => r.tool_name)).toEqual(["mcp__d1__slow"]);
+    expect(requests.map((request) => request.toolName)).toEqual(["mcp__d1__slow"]);
   });
 
   it("reports a runtime crash as a failed turn with no result message", async () => {

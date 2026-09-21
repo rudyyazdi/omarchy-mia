@@ -1,11 +1,18 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ConfigurationError, validateRuntimeConfig } from "@mia/agent-adapter";
 import { ObjectStore } from "@mia/records";
 import type { MiaClient } from "@mia/text-client";
 import { ScriptedRuntime, type ScriptedTurn } from "./scripted-runtime.ts";
-import { startTestServer, testProfile, tick, type TestServer } from "./harness.ts";
+import {
+  must,
+  mustString,
+  startTestServer,
+  testProfile,
+  tick,
+  type TestServer,
+} from "./harness.ts";
 
 let runtime: ScriptedRuntime;
 let ts: TestServer;
@@ -22,25 +29,25 @@ afterEach(async () => {
   await ts.close();
 });
 
-async function submit(
+const submit = async (
   text: string,
   messageId?: string,
-): Promise<{ turn: ScriptedTurn; taskId: string }> {
+): Promise<{ turn: ScriptedTurn; taskId: string }> => {
   const next = runtime.nextTurn();
   const ack = await client.submitText(text, messageId);
   expect(ack.disposition).toBe("accepted");
   const turn = await next;
-  return { turn, taskId: ack.result!.task_id as string };
-}
+  return { turn, taskId: mustString(ack.result?.task_id, "ack task_id") };
+};
 
-function rows<T = Record<string, unknown>>(sql: string, ...params: Array<string | number>): T[] {
+const rows = <T = Record<string, unknown>>(sql: string, ...params: (string | number)[]): T[] => {
   const cat = ts.catalog();
   try {
     return cat.all<T>(sql, ...params);
   } finally {
     cat.close();
   }
-}
+};
 
 describe("streaming and commands", () => {
   it("streams deltas in order before completion and deduplicates command ids", async () => {
@@ -51,14 +58,16 @@ describe("streaming and commands", () => {
     turn.end();
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("completed");
-    const deltas = client.events
-      .filter((e) => e.type === "text_delta")
-      .map((e) => (e.payload as { text: string }).text);
+    const deltas = client.events.flatMap((event) =>
+      event.type === "text_delta" ? [event.payload.text] : [],
+    );
     expect(deltas).toEqual(["Hel", "lo"]);
-    const idx = (t: string) => client.events.findIndex((e) => e.type === t);
+    const idx = (type: string) => client.events.findIndex((event) => event.type === type);
     expect(idx("text_delta")).toBeLessThan(idx("task_finished"));
-    const seqs = client.events.filter((e) => e.sequence !== null).map((e) => e.sequence as number);
-    expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
+    const seqs = client.events.flatMap((event) =>
+      event.sequence === null ? [] : [event.sequence],
+    );
+    expect([...seqs].sort((left, right) => left - right)).toEqual(seqs);
     // resend with the same message id: duplicate disposition, no new task
     const dup = await client.submitText("hello", "cmd-1");
     expect(dup.disposition).toBe("duplicate");
@@ -69,12 +78,12 @@ describe("streaming and commands", () => {
     expect(conflict.error?.code).toBe("duplicate_command_conflict");
     expect(rows("SELECT id FROM tasks")).toHaveLength(1);
     expect(
-      rows<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId)[0]!.status,
+      must(rows<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId)[0]).status,
     ).toBe("completed");
   });
 
   it("rejects unsupported protocol versions, invalid JSON, oversized text and busy submissions", async () => {
-    const rejected = client.waitFor("ack", (e) => e.payload.disposition === "rejected");
+    const rejected = client.waitFor("ack", (event) => event.payload.disposition === "rejected");
     client.sendRaw(
       JSON.stringify({
         protocol_version: 99,
@@ -87,7 +96,7 @@ describe("streaming and commands", () => {
     const ack = await rejected;
     expect(ack.payload.error?.code).toBe("unsupported_protocol_version");
     expect(ack.payload.error?.message).toContain("protocol_version 1");
-    const bad = client.waitFor("ack", (e) => e.payload.command_id === "unknown");
+    const bad = client.waitFor("ack", (event) => event.payload.command_id === "unknown");
     client.sendRaw("{not json");
     expect((await bad).payload.error?.code).toBe("invalid_message");
     const big = await client.submitText("x".repeat(40_000));
@@ -99,7 +108,7 @@ describe("streaming and commands", () => {
     expect(busy.error?.code).toBe("busy");
     const other = await ts.connect("client-B");
     const otherBusy = await other.send("submit_text", {
-      conversation_id: client.conversationId!,
+      conversation_id: must(client.conversationId, "conversation id"),
       text: "hi",
     });
     expect(otherBusy.error?.code).toBe("busy");
@@ -120,18 +129,28 @@ describe("approval path", () => {
     expect(requested.payload.binding_revision).toBe(1);
     await tick();
     expect(turn.decisions).toHaveLength(0); // still held
-    expect(rows<{ status: string }>("SELECT status FROM approvals")[0]!.status).toBe("pending");
-    const ack = await client.decide(taskId, requested.payload.approval_id, "approve");
+    expect(must(rows<{ status: string }>("SELECT status FROM approvals")[0]).status).toBe(
+      "pending",
+    );
+    const ack = await client.decide({
+      taskId: taskId,
+      approvalId: requested.payload.approval_id,
+      decision: "approve",
+    });
     expect(ack.disposition).toBe("accepted");
     expect(ack.result?.released).toBe(true);
     expect((await decision).behavior).toBe("allow");
     // decision persisted before release: approval_resolved precedes tool_dispatched in the event log
     const types = rows<{ type: string }>("SELECT type FROM events ORDER BY sequence").map(
-      (r) => r.type,
+      (row) => row.type,
     );
     expect(types.indexOf("approval_resolved")).toBeLessThan(types.indexOf("tool_dispatched"));
     // a second decision on the same approval cannot reuse it
-    const reuse = await client.decide(taskId, requested.payload.approval_id, "approve");
+    const reuse = await client.decide({
+      taskId: taskId,
+      approvalId: requested.payload.approval_id,
+      decision: "approve",
+    });
     expect(reuse.disposition).toBe("rejected");
     expect(reuse.error?.code).toBe("invalid_state");
     turn.toolResult("toolu_1", JSON.stringify({ counter: 1 }));
@@ -140,10 +159,14 @@ describe("approval path", () => {
     const second = turn.request("mcp__d1__change", { delta: 1 }, "toolu_2");
     const requested2 = await client.waitFor(
       "approval_requested",
-      (e) => e.payload.runtime_call_id === "toolu_2",
+      (event) => event.payload.runtime_call_id === "toolu_2",
     );
     expect(requested2.payload.approval_id).not.toBe(requested.payload.approval_id);
-    await client.decide(taskId, requested2.payload.approval_id, "reject");
+    await client.decide({
+      taskId: taskId,
+      approvalId: requested2.payload.approval_id,
+      decision: "reject",
+    });
     const d2 = await second;
     expect(d2.behavior).toBe("deny");
     turn.toolResult("toolu_2", "denied", true);
@@ -168,26 +191,34 @@ describe("approval path", () => {
     const second = turn.request("mcp__d1__change", { delta: 2 }, "toolu_1");
     const invalidated = await client.waitFor(
       "approval_resolved",
-      (e) => e.payload.approval_id === requested1.payload.approval_id,
+      (event) => event.payload.approval_id === requested1.payload.approval_id,
     );
     expect(invalidated.payload.status).toBe("invalidated");
     expect((await first).behavior).toBe("deny");
     const requested2 = await client.waitFor(
       "approval_requested",
-      (e) => e.payload.binding_revision === 2,
+      (event) => event.payload.binding_revision === 2,
     );
     expect(requested2.payload.redacted_arguments).toEqual({ delta: 2 });
     // the old approval id cannot authorise the new binding
-    const stale = await client.decide(taskId, requested1.payload.approval_id, "approve");
+    const stale = await client.decide({
+      taskId: taskId,
+      approvalId: requested1.payload.approval_id,
+      decision: "approve",
+    });
     expect(stale.error?.code).toBe("invalid_state");
-    await client.decide(taskId, requested2.payload.approval_id, "approve");
+    await client.decide({
+      taskId: taskId,
+      approvalId: requested2.payload.approval_id,
+      decision: "approve",
+    });
     expect((await second).behavior).toBe("allow");
     turn.end();
     await client.waitFor("task_finished");
     const revisions = rows<{ binding_revision: number; status: string }>(
       "SELECT binding_revision, status FROM tool_calls WHERE runtime_call_id = 'toolu_1' ORDER BY binding_revision",
     );
-    expect(revisions.map((r) => r.status)).toEqual(["invalidated", "unknown"]);
+    expect(revisions.map((row) => row.status)).toEqual(["invalidated", "unknown"]);
   });
 
   it("rejects decisions with wrong task, wrong client, or foreign ids", async () => {
@@ -196,12 +227,21 @@ describe("approval path", () => {
     const pending = turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
     const requested = await client.waitFor("approval_requested");
     expect(
-      (await client.decide("task_wrong", requested.payload.approval_id, "approve")).error?.code,
+      (
+        await client.decide({
+          taskId: "task_wrong",
+          approvalId: requested.payload.approval_id,
+          decision: "approve",
+        })
+      ).error?.code,
     ).toBe("not_found");
-    expect((await client.decide(taskId, "appr_foreign", "approve")).error?.code).toBe("not_found");
+    expect(
+      (await client.decide({ taskId: taskId, approvalId: "appr_foreign", decision: "approve" }))
+        .error?.code,
+    ).toBe("not_found");
     const other = await ts.connect("client-B");
     const foreign = await other.send("approval_decision", {
-      conversation_id: client.conversationId!,
+      conversation_id: must(client.conversationId, "conversation id"),
       task_id: taskId,
       approval_id: requested.payload.approval_id,
       decision: "approve",
@@ -209,7 +249,11 @@ describe("approval path", () => {
     expect(foreign.error?.code).toBe("busy");
     await tick();
     expect(turn.decisions).toHaveLength(0);
-    await client.decide(taskId, requested.payload.approval_id, "reject");
+    await client.decide({
+      taskId: taskId,
+      approvalId: requested.payload.approval_id,
+      decision: "reject",
+    });
     expect((await pending).behavior).toBe("deny");
     turn.end();
     await client.waitFor("task_finished");
@@ -226,9 +270,9 @@ describe("approval path", () => {
     expect(noId.behavior).toBe("deny");
     expect(rows("SELECT id FROM approvals")).toHaveLength(0);
     await tick();
-    const errors = client.events
-      .filter((e) => e.type === "error")
-      .map((e) => (e.payload as { code: string }).code);
+    const errors = client.events.flatMap((event) =>
+      event.type === "error" ? [event.payload.code] : [],
+    );
     expect(errors).toContain("configuration_error");
     expect(errors).toContain("runtime_failure");
     turn.end();
@@ -236,7 +280,9 @@ describe("approval path", () => {
     const statuses = rows<{ tool_identity: string; status: string }>(
       "SELECT tool_identity, status FROM tool_calls",
     );
-    expect(statuses.find((s) => s.tool_identity === "mcp__d1__forbidden")?.status).toBe("denied");
+    expect(statuses.find((row) => row.tool_identity === "mcp__d1__forbidden")?.status).toBe(
+      "denied",
+    );
   });
 
   it("keeps the call held when the decision cannot be persisted", async () => {
@@ -247,20 +293,30 @@ describe("approval path", () => {
     const catalog = ts.server.catalog;
     const original = catalog.transaction.bind(catalog);
     let failed = false;
-    catalog.transaction = ((fn: () => unknown) => {
+    catalog.transaction = <T>(fn: () => T): T => {
       if (!failed) {
         failed = true;
         throw new Error("simulated disk failure");
       }
       return original(fn);
-    }) as typeof catalog.transaction;
-    const ack = await client.decide(taskId, requested.payload.approval_id, "approve");
+    };
+    const ack = await client.decide({
+      taskId: taskId,
+      approvalId: requested.payload.approval_id,
+      decision: "approve",
+    });
     expect(ack.disposition).toBe("rejected");
     expect(ack.error?.code).toBe("record_failure");
     await tick();
     expect(turn.decisions).toHaveLength(0);
-    expect(rows<{ status: string }>("SELECT status FROM approvals")[0]!.status).toBe("pending");
-    const retry = await client.decide(taskId, requested.payload.approval_id, "approve");
+    expect(must(rows<{ status: string }>("SELECT status FROM approvals")[0]).status).toBe(
+      "pending",
+    );
+    const retry = await client.decide({
+      taskId: taskId,
+      approvalId: requested.payload.approval_id,
+      decision: "approve",
+    });
     expect(retry.disposition).toBe("accepted");
     expect((await pending).behavior).toBe("allow");
     turn.end();
@@ -276,12 +332,18 @@ describe("approval path", () => {
     await tick();
     await tick();
     expect(turn.decisions).toHaveLength(0);
-    expect(rows<{ status: string }>("SELECT status FROM approvals")[0]!.status).toBe("pending");
+    expect(must(rows<{ status: string }>("SELECT status FROM approvals")[0]).status).toBe(
+      "pending",
+    );
     expect(rows("SELECT id FROM events WHERE type = 'client_disconnected'")).toHaveLength(1);
     // the same client reconnecting can still decide
     const again = await ts.connect("client-A");
     again.conversationId = client.conversationId;
-    const ack = await again.decide(taskId, requested.payload.approval_id, "reject");
+    const ack = await again.decide({
+      taskId: taskId,
+      approvalId: requested.payload.approval_id,
+      decision: "reject",
+    });
     expect(ack.disposition).toBe("accepted");
     expect((await pending).behavior).toBe("deny");
     turn.end();
@@ -299,7 +361,11 @@ describe("interruption path", () => {
     expect(ack.disposition).toBe("accepted");
     const decision = await pending;
     expect(decision.behavior).toBe("deny");
-    const late = await client.decide(taskId, requested.payload.approval_id, "approve");
+    const late = await client.decide({
+      taskId: taskId,
+      approvalId: requested.payload.approval_id,
+      decision: "approve",
+    });
     expect(late.error?.code).toBe("invalid_state");
     const outcome = await client.waitFor("interruption_outcome");
     expect(outcome.payload.task_status).toBe("interrupted");
@@ -315,7 +381,11 @@ describe("interruption path", () => {
     turn.init();
     const pending = turn.request("mcp__d1__slow", { mode: "uncancellable" }, "toolu_1");
     const requested = await client.waitFor("approval_requested");
-    await client.decide(taskId, requested.payload.approval_id, "approve");
+    await client.decide({
+      taskId: taskId,
+      approvalId: requested.payload.approval_id,
+      decision: "approve",
+    });
     expect((await pending).behavior).toBe("allow");
     await client.interrupt(taskId);
     const outcome = await client.waitFor("interruption_outcome");
@@ -331,9 +401,11 @@ describe("interruption path", () => {
     const recorded = rows<{ payload: string }>(
       "SELECT payload FROM events WHERE type = 'task_submitted' ORDER BY sequence",
     );
-    expect(JSON.parse(recorded[1]!.payload).text).toBe("what happened?");
+    expect(JSON.parse(must(recorded[1], "second task_submitted event").payload).text).toBe(
+      "what happened?",
+    );
     next.end();
-    await client.waitFor("task_finished", (e) => e.payload.task_id !== taskId);
+    await client.waitFor("task_finished", (event) => event.payload.task_id !== taskId);
   });
 
   it("blocks a policy-allowed action proposed after the gate closed", async () => {
@@ -354,22 +426,28 @@ describe("interruption path", () => {
     turn.init();
     const slow = turn.request("mcp__d1__slow", { mode: "cancellable" }, "toolu_1");
     const requested = await client.waitFor("approval_requested");
-    await client.decide(taskId, requested.payload.approval_id, "approve");
+    await client.decide({
+      taskId: taskId,
+      approvalId: requested.payload.approval_id,
+      decision: "approve",
+    });
     expect((await slow).behavior).toBe("allow");
     await client.interrupt(taskId);
     const change = await turn.request("mcp__d1__change", { delta: 1 }, "toolu_2");
     expect(change.behavior).toBe("deny");
     expect(
-      rows<{ status: string }>(
-        "SELECT status FROM tool_calls WHERE runtime_call_id = 'toolu_2'",
-      )[0]!.status,
+      must(
+        rows<{ status: string }>(
+          "SELECT status FROM tool_calls WHERE runtime_call_id = 'toolu_2'",
+        )[0],
+      ).status,
     ).toBe("blocked_gate");
     turn.end("failed", "killed late");
     const outcome = await client.waitFor("interruption_outcome");
     expect(outcome.payload.runtime_cancellation).toBe("unknown");
-    expect(outcome.payload.actions.find((a) => a.tool_identity === "mcp__d1__change")?.status).toBe(
-      "blocked_gate",
-    );
+    expect(
+      outcome.payload.actions.find((action) => action.tool_identity === "mcp__d1__change")?.status,
+    ).toBe("blocked_gate");
   });
 
   it("reports unknown when a released call never returns a result", async () => {
@@ -381,7 +459,9 @@ describe("interruption path", () => {
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("outcome_unknown");
     expect(finished.payload.error).toContain("runtime crashed");
-    expect(rows<{ status: string }>("SELECT status FROM tool_calls")[0]!.status).toBe("unknown");
+    expect(must(rows<{ status: string }>("SELECT status FROM tool_calls")[0]).status).toBe(
+      "unknown",
+    );
     // The configured policy is unchanged by the unknown outcome: the model, not the harness, judges whether a repeat is
     // safe, and it is told what is unknown through the Mia note on its next turn.
     const { turn: next, taskId } = await submit("read again");
@@ -390,7 +470,7 @@ describe("interruption path", () => {
     const again = await next.request("mcp__d1__read", {}, "toolu_2");
     expect(again.behavior).toBe("allow");
     next.end();
-    await client.waitFor("task_finished", (e) => e.payload.task_id === taskId);
+    await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
   });
 });
 
@@ -409,7 +489,7 @@ describe("configuration and provenance", () => {
   });
 
   it("registers declared tool outputs inside the output directory and marks others external-only", async () => {
-    const outDir = ts.profile.runtime.outputDirectories[0]!;
+    const outDir = must(ts.profile.runtime.outputDirectories[0], "output directory");
     mkdirSync(outDir, { recursive: true });
     const file = join(outDir, "result.txt");
     writeFileSync(file, "D1");
@@ -421,7 +501,11 @@ describe("configuration and provenance", () => {
       "toolu_1",
     );
     const requested = await client.waitFor("approval_requested");
-    await client.decide(taskId, requested.payload.approval_id, "approve");
+    await client.decide({
+      taskId: taskId,
+      approvalId: requested.payload.approval_id,
+      decision: "approve",
+    });
     await decision;
     turn.toolResult(
       "toolu_1",
@@ -440,15 +524,20 @@ describe("configuration and provenance", () => {
     }>(
       "SELECT logical_name, capture_status, object_digest FROM artifacts WHERE kind = 'tool_output'",
     );
-    const retained = artifacts.find((a) => a.logical_name === "result.txt");
-    expect(retained?.capture_status).toBe("retained");
-    writeFileSync(file, "tampered");
-    expect(new ObjectStore(ts.server.catalog.paths).read(retained!.object_digest!).toString()).toBe(
-      "D1",
+    const retained = must(
+      artifacts.find((artifact) => artifact.logical_name === "result.txt"),
+      "retained artifact",
     );
+    expect(retained.capture_status).toBe("retained");
+    writeFileSync(file, "tampered");
+    expect(
+      new ObjectStore(ts.server.catalog.paths)
+        .read(must(retained.object_digest, "object digest"))
+        .toString(),
+    ).toBe("D1");
     expect(existsSync(file)).toBe(true);
     // the unmatched tool_use id (toolu_x) is recorded, not collected
     expect(rows("SELECT id FROM events WHERE type = 'tool_result_unmatched'")).toHaveLength(1);
-    expect(artifacts.find((a) => a.logical_name === "hostname")).toBeUndefined();
+    expect(artifacts.find((artifact) => artifact.logical_name === "hostname")).toBeUndefined();
   });
 });

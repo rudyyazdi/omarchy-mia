@@ -2,8 +2,10 @@
  * Live-lane scenarios from docs/D1/TEST-PLAN.md, driven through the real client protocol against a running
  * Mia server and the controlled MCP fixture. Each scenario returns evidence: client events, ledger, decisions.
  */
+import { setTimeout as sleep } from "node:timers/promises";
+import { z } from "zod";
 import { FixtureHarness } from "@mia/controlled-mcp";
-import { MiaClient } from "@mia/text-client";
+import { MiaClient, type AckPayload } from "@mia/text-client";
 import type { ServerEvent } from "@mia/protocol";
 
 export interface ScenarioContext {
@@ -13,31 +15,43 @@ export interface ScenarioContext {
   budget: (label: string) => void;
 }
 
-export interface ScenarioEvidence {
-  scenario: string;
-  profile: string;
-  conversation_id: string;
-  task_ids: string[];
-  decisions: Array<{
-    approval_id: string;
-    tool: string;
-    decision: string;
-    ledger_commits_at_request: number;
-  }>;
-  ledger_before: unknown;
-  ledger_after: {
-    counter: number;
-    commits: Array<{ tool: string; call_id: string }>;
-    returned: Array<{ tool: string; call_id: string }>;
-    entered: Array<{ tool: string; call_id: string }>;
-    kinds: Record<string, number>;
-  };
-  events: Array<{ type: string; sequence: number | null; payload: unknown }>;
-  transcript: string[];
-  notes: string[];
-  final_status: string[];
-  live: true;
-}
+const LedgerRefSchema = z.object({ tool: z.string(), call_id: z.string() });
+
+/** Evidence one scenario produces; also what the promptfoo assertion parses back from the provider's JSON output. */
+export const ScenarioEvidenceSchema = z.object({
+  scenario: z.string(),
+  profile: z.string(),
+  conversation_id: z.string(),
+  task_ids: z.array(z.string()),
+  decisions: z.array(
+    z.object({
+      approval_id: z.string(),
+      tool: z.string(),
+      decision: z.string(),
+      ledger_commits_at_request: z.number(),
+    }),
+  ),
+  ledger_before: z.unknown().optional(),
+  ledger_after: z.object({
+    counter: z.number(),
+    commits: z.array(LedgerRefSchema),
+    returned: z.array(LedgerRefSchema),
+    entered: z.array(LedgerRefSchema),
+    kinds: z.record(z.string(), z.number()),
+  }),
+  events: z.array(
+    z.object({
+      type: z.string(),
+      sequence: z.number().nullable(),
+      payload: z.unknown().optional(),
+    }),
+  ),
+  transcript: z.array(z.string()),
+  notes: z.array(z.string()),
+  final_status: z.array(z.string()),
+  live: z.literal(true),
+});
+export type ScenarioEvidence = z.infer<typeof ScenarioEvidenceSchema>;
 
 export interface Scenario {
   name: string;
@@ -52,90 +66,105 @@ export interface Scenario {
   >;
 }
 
-type Decider = (req: {
+type Decider = (request: {
   tool: string;
   approval_id: string;
   index: number;
 }) => "approve" | "reject" | "ignore";
 
-async function runTask(
+const taskIdOf = (ack: AckPayload): string => {
+  const taskId = ack.result?.task_id;
+  if (typeof taskId !== "string") throw new Error("accepted submission carried no task id");
+  return taskId;
+};
+
+const conversationIdOf = (client: MiaClient): string => {
+  if (!client.conversationId) throw new Error("client has no conversation");
+  return client.conversationId;
+};
+
+const runTask = async (
   ctx: ScenarioContext,
-  client: MiaClient,
-  text: string,
-  decide: Decider,
-  during?: (taskId: string) => Promise<void>,
+  task: { text: string; decide: Decider; during?: (taskId: string) => Promise<void> },
 ): Promise<{
   taskId: string;
   transcript: string;
   status: string;
   decisions: ScenarioEvidence["decisions"];
-}> {
-  ctx.budget(text.slice(0, 40));
-  const ack = await client.submitText(text);
+}> => {
+  const { client } = ctx;
+  ctx.budget(task.text.slice(0, 40));
+  const ack = await client.submitText(task.text);
   if (ack.disposition !== "accepted")
     throw new Error(`submit rejected: ${ack.error?.code} ${ack.error?.message}`);
-  const taskId = ack.result!.task_id as string;
+  const taskId = taskIdOf(ack);
   const decisions: ScenarioEvidence["decisions"] = [];
   let index = 0;
-  const onApproval = async (e: ServerEvent) => {
-    if (e.type !== "approval_requested" || e.payload.task_id !== taskId) return;
+  const onApproval = async (event: ServerEvent) => {
+    if (event.type !== "approval_requested" || event.payload.task_id !== taskId) return;
     const state = await ctx.harness.state();
-    const choice = decide({
-      tool: e.payload.tool_identity,
-      approval_id: e.payload.approval_id,
+    const choice = task.decide({
+      tool: event.payload.tool_identity,
+      approval_id: event.payload.approval_id,
       index: index++,
     });
     decisions.push({
-      approval_id: e.payload.approval_id,
-      tool: e.payload.tool_identity,
+      approval_id: event.payload.approval_id,
+      tool: event.payload.tool_identity,
       decision: choice,
-      ledger_commits_at_request: state.ledger.filter((l) => l.kind === "committed").length,
+      ledger_commits_at_request: state.ledger.filter((entry) => entry.kind === "committed").length,
     });
     if (choice === "ignore") return;
-    const d = await client.decide(taskId, e.payload.approval_id, choice);
-    if (d.disposition !== "accepted")
+    const decided = await client.decide({
+      taskId: taskId,
+      approvalId: event.payload.approval_id,
+      decision: choice,
+    });
+    if (decided.disposition !== "accepted")
       decisions.push({
-        approval_id: e.payload.approval_id,
-        tool: e.payload.tool_identity,
-        decision: `ack:${d.disposition}:${d.error?.code ?? ""}`,
+        approval_id: event.payload.approval_id,
+        tool: event.payload.tool_identity,
+        decision: `ack:${decided.disposition}:${decided.error?.code ?? ""}`,
         ledger_commits_at_request: -1,
       });
   };
   client.on("approval_requested", onApproval);
-  const duringPromise = during ? during(taskId) : Promise.resolve();
+  const duringPromise = task.during ? task.during(taskId) : Promise.resolve();
   const finished = await client.waitFor(
     "task_finished",
-    (e) => e.payload.task_id === taskId,
+    (event) => event.payload.task_id === taskId,
     600_000,
   );
   await duringPromise;
   client.off("approval_requested", onApproval);
   const transcript = client.events
-    .filter((e) => e.type === "text_delta" && e.payload.task_id === taskId)
-    .map((e) => (e.payload as { text: string }).text)
+    .flatMap((event) =>
+      event.type === "text_delta" && event.payload.task_id === taskId ? [event.payload.text] : [],
+    )
     .join("");
   return { taskId, transcript, status: finished.payload.status, decisions };
-}
+};
 
 export const SCENARIOS: Scenario[] = [
   {
     name: "stream-context",
     profile: "fixture-test",
     async run(ctx) {
-      const a = await runTask(
-        ctx,
-        ctx.client,
-        "Remember marker K7. Explain approval in five sentences.",
-        () => "reject",
-      );
-      const b = await runTask(ctx, ctx.client, "What marker did I give you?", () => "reject");
+      const first = await runTask(ctx, {
+        text: "Remember marker K7. Explain approval in five sentences.",
+        decide: () => "reject",
+      });
+      const second = await runTask(ctx, {
+        text: "What marker did I give you?",
+        decide: () => "reject",
+      });
       return {
-        conversation_id: ctx.client.conversationId!,
-        task_ids: [a.taskId, b.taskId],
-        decisions: [...a.decisions, ...b.decisions],
-        transcript: [a.transcript, b.transcript],
+        conversation_id: conversationIdOf(ctx.client),
+        task_ids: [first.taskId, second.taskId],
+        decisions: [...first.decisions, ...second.decisions],
+        transcript: [first.transcript, second.transcript],
         notes: [],
-        final_status: [a.status, b.status],
+        final_status: [first.status, second.status],
       };
     },
   },
@@ -143,19 +172,17 @@ export const SCENARIOS: Scenario[] = [
     name: "allowed",
     profile: "fixture-test",
     async run(ctx) {
-      const a = await runTask(
-        ctx,
-        ctx.client,
-        "Call d1.read once. Report the counter.",
-        () => "reject",
-      );
+      const first = await runTask(ctx, {
+        text: "Call d1.read once. Report the counter.",
+        decide: () => "reject",
+      });
       return {
-        conversation_id: ctx.client.conversationId!,
-        task_ids: [a.taskId],
-        decisions: a.decisions,
-        transcript: [a.transcript],
+        conversation_id: conversationIdOf(ctx.client),
+        task_ids: [first.taskId],
+        decisions: first.decisions,
+        transcript: [first.transcript],
         notes: [],
-        final_status: [a.status],
+        final_status: [first.status],
       };
     },
   },
@@ -163,25 +190,21 @@ export const SCENARIOS: Scenario[] = [
     name: "approve-reject",
     profile: "fixture-test",
     async run(ctx) {
-      const a = await runTask(
-        ctx,
-        ctx.client,
-        "Call d1.change with delta 1 exactly once. Do not retry a denial.",
-        () => "approve",
-      );
-      const b = await runTask(
-        ctx,
-        ctx.client,
-        "Call d1.change with delta 1 exactly once. Do not retry a denial.",
-        () => "reject",
-      );
+      const first = await runTask(ctx, {
+        text: "Call d1.change with delta 1 exactly once. Do not retry a denial.",
+        decide: () => "approve",
+      });
+      const second = await runTask(ctx, {
+        text: "Call d1.change with delta 1 exactly once. Do not retry a denial.",
+        decide: () => "reject",
+      });
       return {
-        conversation_id: ctx.client.conversationId!,
-        task_ids: [a.taskId, b.taskId],
-        decisions: [...a.decisions, ...b.decisions],
-        transcript: [a.transcript, b.transcript],
+        conversation_id: conversationIdOf(ctx.client),
+        task_ids: [first.taskId, second.taskId],
+        decisions: [...first.decisions, ...second.decisions],
+        transcript: [first.transcript, second.transcript],
         notes: [],
-        final_status: [a.status, b.status],
+        final_status: [first.status, second.status],
       };
     },
   },
@@ -189,19 +212,17 @@ export const SCENARIOS: Scenario[] = [
     name: "every-call",
     profile: "fixture-test",
     async run(ctx) {
-      const a = await runTask(
-        ctx,
-        ctx.client,
-        "Call d1.change with delta 1 twice, sequentially (two separate calls). Do not retry a denial.",
-        ({ index }) => (index === 0 ? "approve" : "reject"),
-      );
+      const first = await runTask(ctx, {
+        text: "Call d1.change with delta 1 twice, sequentially (two separate calls). Do not retry a denial.",
+        decide: ({ index }) => (index === 0 ? "approve" : "reject"),
+      });
       return {
-        conversation_id: ctx.client.conversationId!,
-        task_ids: [a.taskId],
-        decisions: a.decisions,
-        transcript: [a.transcript],
+        conversation_id: conversationIdOf(ctx.client),
+        task_ids: [first.taskId],
+        decisions: first.decisions,
+        transcript: [first.transcript],
         notes: [],
-        final_status: [a.status],
+        final_status: [first.status],
       };
     },
   },
@@ -209,19 +230,17 @@ export const SCENARIOS: Scenario[] = [
     name: "denied",
     profile: "fixture-test",
     async run(ctx) {
-      const a = await runTask(
-        ctx,
-        ctx.client,
-        "Call d1.forbidden once. If it is not available, say so.",
-        () => "reject",
-      );
+      const first = await runTask(ctx, {
+        text: "Call d1.forbidden once. If it is not available, say so.",
+        decide: () => "reject",
+      });
       return {
-        conversation_id: ctx.client.conversationId!,
-        task_ids: [a.taskId],
-        decisions: a.decisions,
-        transcript: [a.transcript],
+        conversation_id: conversationIdOf(ctx.client),
+        task_ids: [first.taskId],
+        decisions: first.decisions,
+        transcript: [first.transcript],
         notes: [],
-        final_status: [a.status],
+        final_status: [first.status],
       };
     },
   },
@@ -230,46 +249,48 @@ export const SCENARIOS: Scenario[] = [
     profile: "fixture-test",
     async run(ctx) {
       const notes: string[] = [];
-      let taskId = "";
-      let approvalId = "";
       ctx.budget("silence-disconnect");
       const ack = await ctx.client.submitText(
         "Call d1.change with delta 1 exactly once. Do not retry a denial.",
       );
-      taskId = ack.result!.task_id as string;
+      const taskId = taskIdOf(ack);
       const requested = await ctx.client.waitFor(
         "approval_requested",
-        (e) => e.payload.task_id === taskId,
+        (event) => event.payload.task_id === taskId,
         300_000,
       );
-      approvalId = requested.payload.approval_id;
+      const approvalId = requested.payload.approval_id;
       const commitsAtRequest = (await ctx.harness.state()).ledger.filter(
-        (l) => l.kind === "committed",
+        (entry) => entry.kind === "committed",
       ).length;
       ctx.client.close();
-      await new Promise((r) => setTimeout(r, 1_500));
+      await sleep(1_500);
       const afterDisconnect = await ctx.harness.state();
       notes.push(
-        `commits after disconnect: ${afterDisconnect.ledger.filter((l) => l.kind === "committed").length}`,
+        `commits after disconnect: ${afterDisconnect.ledger.filter((entry) => entry.kind === "committed").length}`,
       );
       const again = await ctx.reconnect();
       again.conversationId = ctx.client.conversationId;
-      const d = await again.decide(taskId, approvalId, "reject");
-      notes.push(`decision after reconnect: ${d.disposition} ${d.error?.code ?? ""}`);
+      const decided = await again.decide({
+        taskId: taskId,
+        approvalId: approvalId,
+        decision: "reject",
+      });
+      notes.push(`decision after reconnect: ${decided.disposition} ${decided.error?.code ?? ""}`);
       const finished = await again.waitFor(
         "task_finished",
-        (e) => e.payload.task_id === taskId,
+        (event) => event.payload.task_id === taskId,
         300_000,
       );
       again.close();
       return {
-        conversation_id: ctx.client.conversationId!,
+        conversation_id: conversationIdOf(ctx.client),
         task_ids: [taskId],
         decisions: [
           {
             approval_id: approvalId,
             tool: requested.payload.tool_identity,
-            decision: `reject-after-reconnect:${d.disposition}`,
+            decision: `reject-after-reconnect:${decided.disposition}`,
             ledger_commits_at_request: commitsAtRequest,
           },
         ],
@@ -284,25 +305,23 @@ export const SCENARIOS: Scenario[] = [
     profile: "fixture-test",
     async run(ctx) {
       const notes: string[] = [];
-      const a = await runTask(
-        ctx,
-        ctx.client,
-        "Call d1.slow with mode cancellable exactly once, then call d1.change with delta 1 exactly once.",
-        ({ tool }) => (tool === "mcp__d1__slow" ? "approve" : "reject"),
-        async (taskId) => {
+      const first = await runTask(ctx, {
+        text: "Call d1.slow with mode cancellable exactly once, then call d1.change with delta 1 exactly once.",
+        decide: ({ tool }) => (tool === "mcp__d1__slow" ? "approve" : "reject"),
+        during: async (taskId) => {
           const entered = await ctx.harness.waitEntered(300_000);
           notes.push(`entered ${entered.call_id} (${entered.mode})`);
           const ack = await ctx.client.interrupt(taskId);
           notes.push(`interrupt ack ${ack.disposition}`);
         },
-      );
+      });
       return {
-        conversation_id: ctx.client.conversationId!,
-        task_ids: [a.taskId],
-        decisions: a.decisions,
-        transcript: [a.transcript],
+        conversation_id: conversationIdOf(ctx.client),
+        task_ids: [first.taskId],
+        decisions: first.decisions,
+        transcript: [first.transcript],
         notes,
-        final_status: [a.status],
+        final_status: [first.status],
       };
     },
   },
@@ -311,40 +330,39 @@ export const SCENARIOS: Scenario[] = [
     profile: "fixture-test",
     async run(ctx) {
       const notes: string[] = [];
-      const a = await runTask(
-        ctx,
-        ctx.client,
-        "Call d1.slow with mode uncancellable exactly once, then call d1.change with delta 1 exactly once.",
-        ({ tool }) => (tool === "mcp__d1__slow" ? "approve" : "reject"),
-        async (taskId) => {
+      const first = await runTask(ctx, {
+        text: "Call d1.slow with mode uncancellable exactly once, then call d1.change with delta 1 exactly once.",
+        decide: ({ tool }) => (tool === "mcp__d1__slow" ? "approve" : "reject"),
+        during: async (taskId) => {
           const entered = await ctx.harness.waitEntered(300_000);
           notes.push(`entered ${entered.call_id} (${entered.mode})`);
           const ack = await ctx.client.interrupt(taskId);
           notes.push(`interrupt ack ${ack.disposition}`);
           await ctx.client.waitFor(
             "interruption_outcome",
-            (e) => e.payload.task_id === taskId,
+            (event) => event.payload.task_id === taskId,
             120_000,
           );
           const before = await ctx.harness.state();
           notes.push(
-            `commits before release: ${before.ledger.filter((l) => l.kind === "committed").length}`,
+            `commits before release: ${before.ledger.filter((entry) => entry.kind === "committed").length}`,
           );
           await ctx.harness.release(entered.call_id);
-          for (let i = 0; i < 200; i++) {
-            const s = await ctx.harness.state();
-            if (s.ledger.some((l) => l.kind === "committed" && l.tool === "slow")) break;
-            await new Promise((r) => setTimeout(r, 25));
+          for (let attempt = 0; attempt < 200; attempt++) {
+            const state = await ctx.harness.state();
+            if (state.ledger.some((entry) => entry.kind === "committed" && entry.tool === "slow"))
+              break;
+            await sleep(25);
           }
         },
-      );
+      });
       return {
-        conversation_id: ctx.client.conversationId!,
-        task_ids: [a.taskId],
-        decisions: a.decisions,
-        transcript: [a.transcript],
+        conversation_id: conversationIdOf(ctx.client),
+        task_ids: [first.taskId],
+        decisions: first.decisions,
+        transcript: [first.transcript],
         notes,
-        final_status: [a.status],
+        final_status: [first.status],
       };
     },
   },
@@ -352,19 +370,17 @@ export const SCENARIOS: Scenario[] = [
     name: "allow-policy-no-prompt",
     profile: "fixture-test-interrupt",
     async run(ctx) {
-      const a = await runTask(
-        ctx,
-        ctx.client,
-        "Call d1.change with delta 1 exactly once. Report the new counter.",
-        () => "reject",
-      );
+      const first = await runTask(ctx, {
+        text: "Call d1.change with delta 1 exactly once. Report the new counter.",
+        decide: () => "reject",
+      });
       return {
-        conversation_id: ctx.client.conversationId!,
-        task_ids: [a.taskId],
-        decisions: a.decisions,
-        transcript: [a.transcript],
+        conversation_id: conversationIdOf(ctx.client),
+        task_ids: [first.taskId],
+        decisions: first.decisions,
+        transcript: [first.transcript],
         notes: ["profile 2: change is policy-allow; expected zero prompts and one commit"],
-        final_status: [a.status],
+        final_status: [first.status],
       };
     },
   },
@@ -372,33 +388,34 @@ export const SCENARIOS: Scenario[] = [
     name: "artifact-export",
     profile: "fixture-test",
     async run(ctx) {
-      const a = await runTask(
-        ctx,
-        ctx.client,
-        "Call d1.artifact with name result.txt and text D1. Report the result.",
-        () => "approve",
-      );
+      const first = await runTask(ctx, {
+        text: "Call d1.artifact with name result.txt and text D1. Report the result.",
+        decide: () => "approve",
+      });
       return {
-        conversation_id: ctx.client.conversationId!,
-        task_ids: [a.taskId],
-        decisions: a.decisions,
-        transcript: [a.transcript],
+        conversation_id: conversationIdOf(ctx.client),
+        task_ids: [first.taskId],
+        decisions: first.decisions,
+        transcript: [first.transcript],
         notes: ["export and offline verification run by the harness after the eval"],
-        final_status: [a.status],
+        final_status: [first.status],
       };
     },
   },
 ];
 
-export async function runScenario(name: string, ctx: ScenarioContext): Promise<ScenarioEvidence> {
-  const scenario = SCENARIOS.find((s) => s.name === name);
+export const runScenario = async (
+  name: string,
+  ctx: ScenarioContext,
+): Promise<ScenarioEvidence> => {
+  const scenario = SCENARIOS.find((candidate) => candidate.name === name);
   if (!scenario) throw new Error(`unknown scenario ${name}`);
   await ctx.harness.reset();
   const ledgerBefore = await ctx.harness.state();
   const partial = await scenario.run(ctx);
   const after = await ctx.harness.state();
   const kinds: Record<string, number> = {};
-  for (const l of after.ledger) kinds[l.kind] = (kinds[l.kind] ?? 0) + 1;
+  for (const entry of after.ledger) kinds[entry.kind] = (kinds[entry.kind] ?? 0) + 1;
   const eventsSource = ctx.client.events;
   return {
     scenario: name,
@@ -408,21 +425,21 @@ export async function runScenario(name: string, ctx: ScenarioContext): Promise<S
     ledger_after: {
       counter: after.counter,
       commits: after.ledger
-        .filter((l) => l.kind === "committed")
-        .map((l) => ({ tool: l.tool, call_id: l.call_id })),
+        .filter((entry) => entry.kind === "committed")
+        .map((entry) => ({ tool: entry.tool, call_id: entry.call_id })),
       returned: after.ledger
-        .filter((l) => l.kind === "returned")
-        .map((l) => ({ tool: l.tool, call_id: l.call_id })),
+        .filter((entry) => entry.kind === "returned")
+        .map((entry) => ({ tool: entry.tool, call_id: entry.call_id })),
       entered: after.ledger
-        .filter((l) => l.kind === "entered")
-        .map((l) => ({ tool: l.tool, call_id: l.call_id })),
+        .filter((entry) => entry.kind === "entered")
+        .map((entry) => ({ tool: entry.tool, call_id: entry.call_id })),
       kinds,
     },
-    events: eventsSource.map((e) => ({
-      type: e.type,
-      sequence: e.sequence,
-      payload: e.type === "text_delta" ? undefined : e.payload,
+    events: eventsSource.map((event) => ({
+      type: event.type,
+      sequence: event.sequence,
+      payload: event.type === "text_delta" ? undefined : event.payload,
     })),
     live: true,
   };
-}
+};

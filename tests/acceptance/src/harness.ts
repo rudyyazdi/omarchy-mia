@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { startServer, type MiaServer, type Profile, type TurnRunner } from "@mia/server";
 import { MiaClient } from "@mia/text-client";
 import { Catalog } from "@mia/records";
@@ -16,11 +17,23 @@ export interface TestServer {
 
 export const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 
-export function testProfile(
+/** Narrow an optional value the test has already established must exist; throws with a readable message otherwise. */
+export const must = <T>(value: T | null | undefined, what = "value"): T => {
+  if (value === null || value === undefined) throw new Error(`expected ${what} to be present`);
+  return value;
+};
+
+/** Narrow an unknown value (typically a field of an ack result) to a string. */
+export const mustString = (value: unknown, what = "value"): string => {
+  if (typeof value !== "string") throw new Error(`expected ${what} to be a string`);
+  return value;
+};
+
+export const testProfile = (
   dir: string,
   overrides: Partial<Profile["runtime"]> = {},
   extra: Partial<Profile> = {},
-): Profile {
+): Profile => {
   const promptFile = join(dir, "agent-prompt.md");
   writeFileSync(promptFile, "# test agent prompt v-test\nBe brief.\n");
   return {
@@ -52,16 +65,16 @@ export function testProfile(
     notes: [],
     ...extra,
   };
-}
+};
 
-export async function startTestServer(
+export const startTestServer = async (
   adapter: TurnRunner,
   overrides: Partial<Profile["runtime"]> = {},
-): Promise<TestServer> {
+): Promise<TestServer> => {
   const dir = mkdtempSync(join(tmpdir(), "mia-acceptance-"));
   const profile = testProfile(dir, overrides);
   const logs: string[] = [];
-  const server = await startServer({ profile, adapter, log: (m) => logs.push(m) });
+  const server = await startServer({ profile, adapter, log: (message) => logs.push(message) });
   const clients: MiaClient[] = [];
   return {
     server,
@@ -80,12 +93,12 @@ export async function startTestServer(
     },
     catalog: () => new Catalog(profile.stateDirectory, { readonly: true }),
     close: async () => {
-      for (const c of clients) c.close();
-      await Promise.race([server.engine.waitForIdle(), new Promise((r) => setTimeout(r, 3_000))]);
+      for (const client of clients) client.close();
+      await Promise.race([server.engine.waitForIdle(), sleep(3_000)]);
       await server.close();
       rmSync(dir, { recursive: true, force: true });
     },
   };
-}
+};
 
-export const tick = () => new Promise((r) => setTimeout(r, 20));
+export const tick = () => sleep(20);

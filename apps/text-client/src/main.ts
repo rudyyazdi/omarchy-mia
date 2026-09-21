@@ -1,37 +1,50 @@
 import { clearLine, createInterface, cursorTo, type Interface } from "node:readline";
-import { parseArgs } from "node:util";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { Command } from "commander";
+import { match, P } from "ts-pattern";
+import { z } from "zod";
+import { errorMessage, type EventPayload, type ServerEventOf } from "@mia/protocol";
 import { MiaClient } from "./client.ts";
 
-const { values } = parseArgs({
-  options: {
-    url: { type: "string" },
-    "secret-file": { type: "string" },
-    config: { type: "string" },
-  },
+const USAGE =
+  "usage: mia-client --config <profile.json> | --url ws://127.0.0.1:PORT --secret-file <path>";
+
+const program = new Command()
+  .name("mia-client")
+  .usage("--config <profile.json> | --url ws://127.0.0.1:PORT --secret-file <path>")
+  .option("--url <ws-url>", "server WebSocket URL")
+  .option("--secret-file <path>", "file holding the client secret the server created")
+  .option("--config <profile.json>", "server profile to read the connection from")
+  .exitOverride((error) => {
+    if (error.exitCode === 0) process.exit(0);
+    console.error(USAGE);
+    process.exit(2);
+  })
+  .configureOutput({ writeErr: () => undefined });
+program.parse();
+const values = program.opts<{ url?: string; secretFile?: string; config?: string }>();
+
+const ProfileConnectionSchema = z.object({
+  server: z.object({ host: z.string(), port: z.number(), secretFile: z.string() }),
 });
 
-function resolveConnection(): { url: string; secretFile: string } {
+const resolveConnection = (): { url: string; secretFile: string } => {
   if (values.config) {
-    const profile = JSON.parse(readFileSync(values.config, "utf8")) as {
-      server: { host: string; port: number; secretFile: string };
-    };
+    const profile = ProfileConnectionSchema.parse(JSON.parse(readFileSync(values.config, "utf8")));
     const base = resolve(values.config, "..");
     return {
       url: `ws://${profile.server.host}:${profile.server.port}`,
       secretFile: resolve(base, profile.server.secretFile),
     };
   }
-  if (!values.url || !values["secret-file"]) {
-    console.error(
-      "usage: mia-client --config <profile.json> | --url ws://127.0.0.1:PORT --secret-file <path>",
-    );
+  if (!values.url || !values.secretFile) {
+    console.error(USAGE);
     process.exit(2);
   }
-  return { url: values.url, secretFile: values["secret-file"] };
-}
+  return { url: values.url, secretFile: values.secretFile };
+};
 
 const { url, secretFile } = resolveConnection();
 if (!existsSync(secretFile)) {
@@ -60,82 +73,83 @@ const clearPromptLine = () => {
   }
 };
 const redrawPrompt = () => rl?.prompt(true);
-const out = (line: string) => {
-  endStream();
-  clearPromptLine();
-  process.stdout.write(line + "\n");
-  redrawPrompt();
-};
 const endStream = () => {
   if (!streaming) return;
   process.stdout.write("\n");
   streaming = false;
   redrawPrompt();
 };
+const out = (line: string) => {
+  endStream();
+  clearPromptLine();
+  process.stdout.write(line + "\n");
+  redrawPrompt();
+};
 
 let currentTask: string | null = null;
-const pendingApprovals = new Map<
-  string,
-  { task_id: string; tool_identity: string; intended_action: string; redacted_arguments: unknown }
->();
+const pendingApprovals = new Map<string, EventPayload<"approval_requested">>();
 
-client.on("text_delta", (e) => {
+client.on("text_delta", (event: ServerEventOf<"text_delta">) => {
   if (!streaming) {
     clearPromptLine();
     streaming = true;
   }
-  process.stdout.write(e.payload.text);
+  process.stdout.write(event.payload.text);
 });
-client.on("task_started", (e) => {
-  currentTask = e.payload.task_id;
-  out(`▶ task ${e.payload.task_id} started (epoch ${e.payload.execution_epoch})`);
+client.on("task_started", (event: ServerEventOf<"task_started">) => {
+  currentTask = event.payload.task_id;
+  out(`▶ task ${event.payload.task_id} started (epoch ${event.payload.execution_epoch})`);
 });
-client.on("approval_requested", (e) => {
-  pendingApprovals.set(e.payload.approval_id, e.payload);
+client.on("approval_requested", (event: ServerEventOf<"approval_requested">) => {
+  pendingApprovals.set(event.payload.approval_id, event.payload);
   out(
     [
-      `┌─ APPROVAL REQUIRED  ${e.payload.approval_id}`,
-      `│ tool:      ${e.payload.tool_identity}`,
-      `│ action:    ${e.payload.intended_action}`,
-      `│ arguments: ${JSON.stringify(e.payload.redacted_arguments)}`,
-      `│ binding:   call ${e.payload.runtime_call_id} rev ${e.payload.binding_revision} epoch ${e.payload.execution_epoch} digest ${e.payload.argument_digest.slice(0, 12)}…`,
-      `└─ type  /approve ${e.payload.approval_id}   or   /reject ${e.payload.approval_id}`,
+      `┌─ APPROVAL REQUIRED  ${event.payload.approval_id}`,
+      `│ tool:      ${event.payload.tool_identity}`,
+      `│ action:    ${event.payload.intended_action}`,
+      `│ arguments: ${JSON.stringify(event.payload.redacted_arguments)}`,
+      `│ binding:   call ${event.payload.runtime_call_id} rev ${event.payload.binding_revision} epoch ${event.payload.execution_epoch} digest ${event.payload.argument_digest.slice(0, 12)}…`,
+      `└─ type  /approve ${event.payload.approval_id}   or   /reject ${event.payload.approval_id}`,
     ].join("\n"),
   );
 });
-client.on("approval_resolved", (e) => {
-  pendingApprovals.delete(e.payload.approval_id);
+client.on("approval_resolved", (event: ServerEventOf<"approval_resolved">) => {
+  pendingApprovals.delete(event.payload.approval_id);
   out(
-    `✓ approval ${e.payload.approval_id}: ${e.payload.status}${e.payload.reason ? ` (${e.payload.reason})` : ""}`,
+    `✓ approval ${event.payload.approval_id}: ${event.payload.status}${event.payload.reason ? ` (${event.payload.reason})` : ""}`,
   );
 });
-client.on("tool_call", (e) => {
+client.on("tool_call", (event: ServerEventOf<"tool_call">) => {
   // Arguments are shown once, when the call is first proposed, so a policy-allowed dispatch is never opaque.
   const args =
-    e.payload.status === "proposed" && e.payload.redacted_arguments !== undefined
-      ? ` ${JSON.stringify(e.payload.redacted_arguments)}`
+    event.payload.status === "proposed" && event.payload.redacted_arguments !== undefined
+      ? ` ${JSON.stringify(event.payload.redacted_arguments)}`
       : "";
   out(
-    `  · ${e.payload.tool_identity} → ${e.payload.status}${args}${e.payload.detail ? ` (${e.payload.detail})` : ""}`,
+    `  · ${event.payload.tool_identity} → ${event.payload.status}${args}${event.payload.detail ? ` (${event.payload.detail})` : ""}`,
   );
 });
 client.on("interruption_requested", () => out("⏹ interruption requested; action gate closed"));
-client.on("interruption_outcome", (e) => {
+client.on("interruption_outcome", (event: ServerEventOf<"interruption_outcome">) => {
   const lines = [
-    `⏹ interruption outcome: task ${e.payload.task_status}; runtime ${e.payload.runtime_cancellation}`,
+    `⏹ interruption outcome: task ${event.payload.task_status}; runtime ${event.payload.runtime_cancellation}`,
   ];
-  for (const a of e.payload.actions)
-    lines.push(`    ${a.tool_identity}: ${a.status}${a.detail ? ` — ${a.detail}` : ""}`);
+  for (const action of event.payload.actions)
+    lines.push(
+      `    ${action.tool_identity}: ${action.status}${action.detail ? ` — ${action.detail}` : ""}`,
+    );
   out(lines.join("\n"));
 });
-client.on("task_finished", (e) => {
+client.on("task_finished", (event: ServerEventOf<"task_finished">) => {
   currentTask = null;
   out(
-    `■ task ${e.payload.task_id} ${e.payload.status}${e.payload.error ? `: ${e.payload.error}` : ""}`,
+    `■ task ${event.payload.task_id} ${event.payload.status}${event.payload.error ? `: ${event.payload.error}` : ""}`,
   );
 });
-client.on("server_error", (e) => out(`✗ error ${e.payload.code}: ${e.payload.message}`));
-client.on("client_error", (m: string) => out(`✗ client: ${m}`));
+client.on("server_error", (event: ServerEventOf<"error">) =>
+  out(`✗ error ${event.payload.code}: ${event.payload.message}`),
+);
+client.on("client_error", (message: string) => out(`✗ client: ${message}`));
 client.on("disconnected", () => {
   out("connection closed");
   process.exit(0);
@@ -148,6 +162,43 @@ out(`connected to ${url}; conversation ${conversationId}`);
 out("type text to submit a task; /approve <id>, /reject <id>, /interrupt, /diag, /quit");
 const heartbeat = setInterval(() => void client.heartbeat().catch(() => undefined), 15_000);
 
+const submitTask = async (text: string) => {
+  const ack = await client.submitText(text);
+  if (ack.disposition !== "accepted")
+    out(`submit ${ack.disposition}${ack.error ? `: ${ack.error.code}: ${ack.error.message}` : ""}`);
+};
+
+const quit = () => {
+  clearInterval(heartbeat);
+  client.close();
+};
+
+const interruptTask = async (rest: string[]) => {
+  if (rest.length > 0) out(`/interrupt takes no argument (ignored: ${rest.join(" ")})`);
+  if (!currentTask) {
+    out("no running task");
+    return;
+  }
+  const ack = await client.interrupt(currentTask);
+  out(`interrupt ${ack.disposition}${ack.error ? `: ${ack.error.message}` : ""}`);
+};
+
+const decideApproval = async (decision: "approve" | "reject", rest: string[]) => {
+  const id = rest[0];
+  const pending = id ? pendingApprovals.get(id) : undefined;
+  if (!id || !pending) {
+    out(`unknown approval id; pending: ${[...pendingApprovals.keys()].join(", ") || "none"}`);
+    return;
+  }
+  const ack = await client.decide({ taskId: pending.task_id, approvalId: id, decision: decision });
+  out(`decision ${ack.disposition}${ack.error ? `: ${ack.error.code}: ${ack.error.message}` : ""}`);
+};
+
+const showDiagnostics = async () => {
+  out(JSON.stringify(client.diagnostics(), null, 2));
+  await client.sendDiagnostics();
+};
+
 rl = createInterface({ input: process.stdin, output: process.stdout, prompt: "mia> " });
 rl.prompt();
 rl.on("line", async (line) => {
@@ -155,59 +206,22 @@ rl.on("line", async (line) => {
   try {
     if (text === "") return;
     const [cmd = "", ...rest] = text.startsWith("/") ? text.split(/\s+/) : [];
-    switch (cmd) {
-      case "":
-        {
-          const ack = await client.submitText(text);
-          if (ack.disposition !== "accepted")
-            out(
-              `submit ${ack.disposition}${ack.error ? `: ${ack.error.code}: ${ack.error.message}` : ""}`,
-            );
-        }
-        break;
-      case "/quit":
-        clearInterval(heartbeat);
-        client.close();
-        break;
-      case "/interrupt": {
-        if (rest.length > 0) out(`/interrupt takes no argument (ignored: ${rest.join(" ")})`);
-        if (!currentTask) out("no running task");
-        else {
-          const ack = await client.interrupt(currentTask);
-          out(`interrupt ${ack.disposition}${ack.error ? `: ${ack.error.message}` : ""}`);
-        }
-        break;
-      }
-      case "/approve":
-      case "/reject": {
-        const id = rest[0];
-        const pending = id ? pendingApprovals.get(id) : undefined;
-        if (!id || !pending)
-          out(`unknown approval id; pending: ${[...pendingApprovals.keys()].join(", ") || "none"}`);
-        else {
-          const ack = await client.decide(
-            pending.task_id,
-            id,
-            cmd === "/approve" ? "approve" : "reject",
-          );
-          out(
-            `decision ${ack.disposition}${ack.error ? `: ${ack.error.code}: ${ack.error.message}` : ""}`,
-          );
-        }
-        break;
-      }
-      case "/diag":
-        out(JSON.stringify(client.diagnostics(), null, 2));
-        await client.sendDiagnostics();
-        break;
-      default:
+    await match(cmd)
+      .with("", () => submitTask(text))
+      .with("/quit", () => quit())
+      .with("/interrupt", () => interruptTask(rest))
+      .with("/approve", () => decideApproval("approve", rest))
+      .with("/reject", () => decideApproval("reject", rest))
+      .with("/diag", () => showDiagnostics())
+      .with(P.string, () => {
         // A mistyped command must not become a task for the agent.
         out(
           `unknown command ${cmd}; commands: /approve <id>, /reject <id>, /interrupt, /diag, /quit`,
         );
-    }
+      })
+      .exhaustive();
   } catch (error) {
-    out(`✗ ${error instanceof Error ? error.message : String(error)}`);
+    out(`✗ ${errorMessage(error)}`);
   } finally {
     rl?.prompt();
   }

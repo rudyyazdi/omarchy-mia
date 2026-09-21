@@ -5,6 +5,7 @@
 import { resolve } from "node:path";
 import { LiveCallBudget } from "@mia/agent-adapter";
 import { FixtureHarness } from "@mia/controlled-mcp";
+import { errorMessage } from "@mia/protocol";
 import { MiaClient } from "@mia/text-client";
 import { runScenario, SCENARIOS, type ScenarioContext } from "./scenarios.ts";
 
@@ -32,7 +33,7 @@ export default class MiaScenarioProvider {
     context?: { vars?: Record<string, unknown> },
   ): Promise<{ output: string; error?: string; format?: string }> {
     const scenarioName = String(context?.vars?.scenario ?? "");
-    const scenario = SCENARIOS.find((s) => s.name === scenarioName);
+    const scenario = SCENARIOS.find((candidate) => candidate.name === scenarioName);
     if (!scenario) return { output: "", error: `unknown scenario ${scenarioName}` };
     const urlVar = scenario.profile === "fixture-test" ? "MIA_URL_1" : "MIA_URL_2";
     const secretVar =
@@ -50,14 +51,14 @@ export default class MiaScenarioProvider {
     );
     const clientId = `pf_${scenarioName}_${Date.now().toString(36)}`;
     const connect = async () => {
-      const c = new MiaClient({
+      const connected = new MiaClient({
         url,
         secret: MiaClient.readSecret(secretFile),
         clientId,
         build: { name: "promptfoo-provider", version: "0.1.0", commit: null, dirty: null },
       });
-      await c.connect();
-      return c;
+      await connected.connect();
+      return connected;
     };
     const client = await connect();
     const extra: MiaClient[] = [];
@@ -68,9 +69,9 @@ export default class MiaScenarioProvider {
         client,
         harness: new FixtureHarness(harnessUrl),
         reconnect: async () => {
-          const c = await connect();
-          extra.push(c);
-          return c;
+          const reconnected = await connect();
+          extra.push(reconnected);
+          return reconnected;
         },
         budget: (label) => budget.take(`live:${scenarioName}:${label}`, scenario.profile),
       };
@@ -84,14 +85,14 @@ export default class MiaScenarioProvider {
         output: JSON.stringify({
           scenario: scenarioName,
           conversation_id: client.conversationId,
-          error: error instanceof Error ? error.message : String(error),
-          events: client.events.map((e) => ({ type: e.type, payload: e.payload })),
+          error: errorMessage(error),
+          events: client.events.map((event) => ({ type: event.type, payload: event.payload })),
         }),
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       };
     } finally {
       client.close();
-      for (const c of extra) c.close();
+      for (const extraClient of extra) extraClient.close();
     }
   }
 }
