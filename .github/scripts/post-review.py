@@ -267,20 +267,23 @@ def fetch_review_threads():
     """
     data = graphql(query, {"owner": _owner, "repo": _repo, "pr": int(PR)})
     if not data:
-        return None
+        return None, False
     connection = (
         data.get("repository", {})
         .get("pullRequest", {})
         .get("reviewThreads", {})
         or {}
     )
+    complete = True
     if connection.get("pageInfo", {}).get("hasNextPage"):
         print("warn: reviewThreads truncated at 100; later threads may be missed")
+        complete = False
     nodes = connection.get("nodes") or []
     for thread in nodes:
         if (thread.get("comments") or {}).get("pageInfo", {}).get("hasNextPage"):
             print(f"warn: comments truncated at 100 on thread {thread.get('id')}")
-    return nodes
+            complete = False
+    return nodes, complete
 
 
 def ours(thread):
@@ -317,7 +320,7 @@ def serialize_thread(thread):
 
 
 def dump_threads():
-    threads = fetch_review_threads()
+    threads, _complete = fetch_review_threads()
     if threads is None:
         print("warn: could not load review threads; writing empty prior-threads.json")
         open_threads = []
@@ -446,45 +449,63 @@ def apply_thread_actions(actions, prior):
     return touched
 
 
-def open_locations(prior):
-    locs = set()
+def finding_text(body):
+    text = normalize_body(body)
+    return re.sub(r"^\*\*(?:high|medium|low)\*\*\s*[—-]\s*", "", text, flags=re.I)
+
+
+def finding_already_open(path, line, body, prior, resolving):
+    want = finding_text(body)
+    if not want:
+        return False
     for thread in prior:
-        path = thread.get("path")
-        line = thread.get("line")
-        if path and line is not None:
-            locs.add((path, int(line)))
-    return locs
+        if thread.get("thread_id") in resolving:
+            continue
+        if thread.get("path") != path:
+            continue
+        try:
+            thread_line = int(thread.get("line"))
+        except (TypeError, ValueError):
+            continue
+        if thread_line != line:
+            continue
+        for comment in thread.get("comments") or []:
+            existing = finding_text(comment.get("body"))
+            if existing and (want == existing or want in existing or existing in want):
+                return True
+    return False
 
 
 def cleanup_old(new_review_id, preserve_comment_ids):
     comments = paged(f"/repos/{REPO}/pulls/{PR}/comments")
     if comments is None:
         return
-    threads = fetch_review_threads() or []
-    # Conversations and resolved threads are kept on purpose so triage history
-    # and human replies survive cleanup on later pushes.
+    threads, complete = fetch_review_threads()
     keep_comment_ids = set(preserve_comment_ids)
-    for thread in threads:
-        if not ours(thread):
-            continue
-        if has_human_reply(thread) or thread.get("isResolved"):
-            for comment in thread.get("comments", {}).get("nodes") or []:
-                if comment.get("databaseId") is not None:
-                    keep_comment_ids.add(comment["databaseId"])
+    if not complete or threads is None:
+        print("warn: skipping inline comment cleanup; thread inventory incomplete")
+    else:
+        for thread in threads:
+            if not ours(thread):
+                continue
+            if has_human_reply(thread) or thread.get("isResolved"):
+                for comment in thread.get("comments", {}).get("nodes") or []:
+                    if comment.get("databaseId") is not None:
+                        keep_comment_ids.add(comment["databaseId"])
 
-    for comment in comments:
-        if not is_bot(comment):
-            continue
-        if MARKER not in (comment.get("body") or ""):
-            continue
-        if comment.get("pull_request_review_id") == new_review_id:
-            continue
-        if comment["id"] in keep_comment_ids:
-            continue
-        if comment.get("in_reply_to_id") and comment["in_reply_to_id"] in keep_comment_ids:
-            continue
-        status, _ = req("DELETE", f"/repos/{REPO}/pulls/comments/{comment['id']}")
-        print(f"removed old review comment {comment['id']}: {status}")
+        for comment in comments:
+            if not is_bot(comment):
+                continue
+            if MARKER not in (comment.get("body") or ""):
+                continue
+            if comment.get("pull_request_review_id") == new_review_id:
+                continue
+            if comment["id"] in keep_comment_ids:
+                continue
+            if comment.get("in_reply_to_id") and comment["in_reply_to_id"] in keep_comment_ids:
+                continue
+            status, _ = req("DELETE", f"/repos/{REPO}/pulls/comments/{comment['id']}")
+            print(f"removed old review comment {comment['id']}: {status}")
 
     reviews = paged(f"/repos/{REPO}/pulls/{PR}/reviews")
     if reviews is None:
@@ -543,7 +564,11 @@ def post():
         print("warn: could not determine diff lines; leaving action comment in place")
         return 1
 
-    existing = open_locations(prior)
+    resolving = {
+        action.get("thread_id")
+        for action in actions
+        if isinstance(action, dict) and (action.get("action") or "").lower().strip() == "resolve"
+    }
     comments = []
     fallback = []
     for finding in findings:
@@ -558,7 +583,7 @@ def post():
             line = None
         if not body:
             continue
-        if path and line is not None and (path, line) in existing:
+        if path and line is not None and finding_already_open(path, line, body, prior, resolving):
             print(f"skip duplicate finding {path}:{line} — open thread already covers it")
             continue
         if path and line is not None and line in anchorable.get(path, set()):
