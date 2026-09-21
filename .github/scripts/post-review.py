@@ -245,12 +245,12 @@ def valid_lines():
 
 
 def fetch_review_threads():
-    query = """
-    query($owner:String!,$repo:String!,$pr:Int!){
+    threads_query = """
+    query($owner:String!,$repo:String!,$pr:Int!,$cursor:String){
       repository(owner:$owner,name:$repo){
         pullRequest(number:$pr){
-          reviewThreads(first:100){
-            pageInfo{ hasNextPage }
+          reviewThreads(first:100, after:$cursor){
+            pageInfo{ hasNextPage endCursor }
             nodes{
               id
               isResolved
@@ -258,7 +258,7 @@ def fetch_review_threads():
               path
               line
               comments(first:100){
-                pageInfo{ hasNextPage }
+                pageInfo{ hasNextPage endCursor }
                 nodes{
                   databaseId
                   author{login}
@@ -272,25 +272,58 @@ def fetch_review_threads():
       }
     }
     """
-    data = graphql(query, {"owner": _owner, "repo": _repo, "pr": int(PR)})
-    if not data:
-        return None, False
-    connection = (
-        data.get("repository", {})
-        .get("pullRequest", {})
-        .get("reviewThreads", {})
-        or {}
-    )
-    complete = True
-    if connection.get("pageInfo", {}).get("hasNextPage"):
-        print("warn: reviewThreads truncated at 100; later threads may be missed")
-        complete = False
-    nodes = connection.get("nodes") or []
-    for thread in nodes:
-        if (thread.get("comments") or {}).get("pageInfo", {}).get("hasNextPage"):
-            print(f"warn: comments truncated at 100 on thread {thread.get('id')}")
-            complete = False
-    return nodes, complete
+    comments_query = """
+    query($id:ID!,$cursor:String){
+      node(id:$id){
+        ... on PullRequestReviewThread {
+          comments(first:100, after:$cursor){
+            pageInfo{ hasNextPage endCursor }
+            nodes{
+              databaseId
+              author{login}
+              body
+              createdAt
+            }
+          }
+        }
+      }
+    }
+    """
+    nodes = []
+    cursor = None
+    while True:
+        data = graphql(
+            threads_query,
+            {"owner": _owner, "repo": _repo, "pr": int(PR), "cursor": cursor},
+        )
+        if not data:
+            return None, False
+        connection = (
+            data.get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads", {})
+            or {}
+        )
+        page = connection.get("nodes") or []
+        for thread in page:
+            comments = thread.get("comments") or {}
+            comment_nodes = list(comments.get("nodes") or [])
+            comment_cursor = (comments.get("pageInfo") or {}).get("endCursor")
+            while (comments.get("pageInfo") or {}).get("hasNextPage"):
+                extra = graphql(comments_query, {"id": thread["id"], "cursor": comment_cursor})
+                if not extra:
+                    return None, False
+                comments = (extra.get("node") or {}).get("comments") or {}
+                comment_nodes.extend(comments.get("nodes") or [])
+                comment_cursor = (comments.get("pageInfo") or {}).get("endCursor")
+            thread["comments"] = {"pageInfo": {"hasNextPage": False}, "nodes": comment_nodes}
+        nodes.extend(page)
+        page_info = connection.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            return nodes, True
+        cursor = page_info.get("endCursor")
+        if not cursor:
+            return None, False
 
 
 def ours(thread):
