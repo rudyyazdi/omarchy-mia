@@ -1,0 +1,242 @@
+{
+  "captured_at": "2026-09-17T14:01:19.773Z",
+  "runtime_version": "2.1.274 (Claude Code)",
+  "adapter_version": "0.1.0",
+  "model": "claude-sonnet-5",
+  "init": {
+    "type": "system",
+    "session_id": "17dcd203-24e0-453c-bf2b-ad7cf8793ff1",
+    "uuid": "b9660725-44a6-4cf3-a8ac-9e6ed5f30e45",
+    "subtype": "init",
+    "model": "claude-sonnet-5",
+    "tools": [
+      "mcp__d1__artifact",
+      "mcp__d1__change",
+      "mcp__d1__read",
+      "mcp__d1__slow"
+    ],
+    "mcp_servers": [
+      {
+        "name": "d1",
+        "status": "connected",
+        "source": "dynamic"
+      },
+      {
+        "name": "mia_approval",
+        "status": "connected",
+        "source": "dynamic"
+      }
+    ],
+    "permissionMode": "default",
+    "claude_code_version": "2.1.274",
+    "cwd": "$HOME/personal/mia/.mia-state/probe/2026-09-17T14-01-13-110Z/work",
+    "apiKeySource": "[REDACTED]",
+    "slash_commands": "<81 entries omitted: environment-specific>",
+    "terminal_slash_commands": "<3 entries omitted: environment-specific>",
+    "output_style": "default",
+    "agents": "<5 entries omitted: environment-specific>",
+    "skills": "<47 entries omitted: environment-specific>",
+    "plugins": [
+      {
+        "name": "figma",
+        "path": "$HOME/.claude/plugins/synced/78a2fec4-c8b5-4cf1-8a2d-d43269ef44c0_5fa0e157-4f25-44be-a2c6-34e59d3b5ac3/figma",
+        "source": "figma@synced",
+        "version": "2.2.111"
+      }
+    ],
+    "capabilities": [
+      "interrupt_receipt_v1",
+      "interrupt_cancel_queued_v1",
+      "msg_lifecycle_v1"
+    ],
+    "analytics_disabled": false,
+    "product_feedback_disabled": false,
+    "messaging_socket_path": "/run/user/1000/cc-socks/2194673.sock",
+    "fast_mode_state": "off",
+    "fast_mode_disabled_reason": "sdk_opt_in_required"
+  },
+  "tool_proposed": {
+    "type": "tool_proposed",
+    "runtime_call_id": "toolu_01AmzsgoESx9Etj7kP2LnP8M",
+    "tool_identity": "mcp__d1__slow",
+    "arguments": {},
+    "complete": false,
+    "at": "2026-09-17T14:01:16.222Z"
+  },
+  "permission_request_payload": {
+    "tool_name": "mcp__d1__slow",
+    "input": {
+      "mode": "cancellable"
+    },
+    "tool_use_id": "toolu_01AmzsgoESx9Etj7kP2LnP8M"
+  },
+  "permission_response_examples": [
+    {
+      "behavior": "allow"
+    },
+    {
+      "behavior": "deny",
+      "message": "The user rejected this call."
+    }
+  ],
+  "tool_result": null,
+  "turn_result": {
+    "type": "result",
+    "session_id": "17dcd203-24e0-453c-bf2b-ad7cf8793ff1",
+    "uuid": "3e682786-2aad-48a5-aca0-9d70b5de8ff7",
+    "subtype": "success",
+    "is_error": false,
+    "duration_ms": 2140,
+    "duration_api_ms": 1989,
+    "num_turns": 1,
+    "result": "I have no record of any tool calls in a previous turn \u2014 this is the start of my visible actions in this conversation, and I haven't called any tools yet.",
+    "total_cost_usd": 0.0071871999999999995,
+    "usage": {
+      "input_tokens": "[REDACTED]",
+      "cache_creation_input_tokens": "[REDACTED]",
+      "cache_read_input_tokens": "[REDACTED]",
+      "output_tokens": "[REDACTED]",
+      "output_tokens_details": "[REDACTED]",
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": "[REDACTED]",
+        "ephemeral_5m_input_tokens": "[REDACTED]"
+      },
+      "inference_geo": "global",
+      "iterations": [
+        {
+          "input_tokens": "[REDACTED]",
+          "output_tokens": "[REDACTED]",
+          "cache_read_input_tokens": "[REDACTED]",
+          "cache_creation_input_tokens": "[REDACTED]",
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": "[REDACTED]",
+            "ephemeral_1h_input_tokens": "[REDACTED]"
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-sonnet-5": {
+        "inputTokens": "[REDACTED]",
+        "outputTokens": "[REDACTED]",
+        "cacheReadInputTokens": "[REDACTED]",
+        "cacheCreationInputTokens": "[REDACTED]",
+        "webSearchRequests": 0,
+        "costUSD": 0.0071871999999999995,
+        "contextWindow": 1000000,
+        "maxOutputTokens": "[REDACTED]",
+        "thinkingTokens": "[REDACTED]",
+        "canonicalModel": "claude-sonnet-5",
+        "provider": "firstParty",
+        "costBasis": "list"
+      }
+    },
+    "permission_denials": [],
+    "stop_reason": "end_turn",
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "fast_mode_disabled_reason": "sdk_opt_in_required",
+    "subagent_stats": {
+      "spawned": 0,
+      "requested": {
+        "background": 0,
+        "foreground": 0,
+        "unset": 0
+      },
+      "started_in_background": 0,
+      "max_depth": 0,
+      "spawned_by_subagents": 0,
+      "completed": 0,
+      "failed": 0,
+      "killed": {
+        "parent": 0,
+        "user": 0,
+        "system": 0
+      },
+      "refused": {
+        "depth_limit": 0,
+        "concurrency_limit": 0,
+        "budget": 0
+      },
+      "by_type": {}
+    },
+    "api_error_status": null,
+    "ttft_ms": 2108,
+    "ttft_stream_ms": 1382,
+    "time_to_request_ms": 150,
+    "first_content_frame_ms": 1382,
+    "queued_turn_count": 0,
+    "result_index": 0
+  },
+  "hook_evidence": [
+    {
+      "received_at": "2026-09-17T14:01:16.348Z",
+      "hook_event_name": "PreToolUse",
+      "session_id": "17dcd203-24e0-453c-bf2b-ad7cf8793ff1",
+      "tool_name": "mcp__d1__slow",
+      "tool_use_id": "toolu_01AmzsgoESx9Etj7kP2LnP8M",
+      "effort": {
+        "level": "medium"
+      },
+      "env_claude_effort": "medium"
+    }
+  ],
+  "launch_description": {
+    "model": "claude-sonnet-5",
+    "effort": "medium",
+    "session_id": "17dcd203-24e0-453c-bf2b-ad7cf8793ff1",
+    "resume": false,
+    "builtin_tools": [],
+    "mcp_servers": [
+      "d1",
+      "mia_approval"
+    ],
+    "permission_prompt_tool": "mcp__mia_approval__request",
+    "settings": {
+      "permissions": {
+        "deny": [
+          "mcp__d1__forbidden"
+        ],
+        "ask": [
+          "mcp__d1__read",
+          "mcp__d1__change",
+          "mcp__d1__slow",
+          "mcp__d1__artifact"
+        ],
+        "allow": []
+      },
+      "hooks": {
+        "PreToolUse": [
+          {
+            "matcher": "",
+            "hooks": [
+              {
+                "type": "command",
+                "command": "\"$HOME/.local/share/mise/installs/node/26.8.1/bin/node\" \"$HOME/personal/mia/packages/agent-adapter/src/hook-capture.mjs\" \"$HOME/personal/mia/.mia-state/probe/2026-09-17T14-01-13-110Z/runtime/17dcd203-24e0-453c-bf2b-ad7cf8793ff1/hook-evidence.jsonl\""
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "mcp_config": {
+      "mcpServers": {
+        "d1": {
+          "type": "http",
+          "url": "http://127.0.0.1:34439/mcp"
+        },
+        "mia_approval": {
+          "type": "http",
+          "url": "http://127.0.0.1:40825/mcp"
+        }
+      }
+    }
+  }
+}

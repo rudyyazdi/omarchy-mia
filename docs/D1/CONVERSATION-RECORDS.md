@@ -1,6 +1,6 @@
 # Conversation debugging, records, and artifact retrieval
 
-Status: proposed design, not implemented. Companion to [D1](PLAN.md) and the [delivery requirements](../PLAN.md). Implement the D1 foundation now; later rows below describe storage compatibility, not authorization to implement later deliverables.
+Status: D1 foundation implemented in `packages/records` and `apps/debug-cli` (`mia debug …`). Companion to [D1](PLAN.md) and the [delivery requirements](../PLAN.md). Implement the D1 foundation now; later rows below describe storage compatibility, not authorization to implement later deliverables.
 
 ## What a whole-conversation view means
 

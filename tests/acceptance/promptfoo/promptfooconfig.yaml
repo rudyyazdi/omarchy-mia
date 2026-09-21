@@ -1,0 +1,35 @@
+# Live lane: agent-prompt versions compared on fixture-ledger evidence. Run via `npm run live` (tests/acceptance/promptfoo/run.ts),
+# which starts the fixture and both server profiles and exports the environment the provider needs.
+description: Mia D1 live acceptance scenarios (claude-sonnet-5 test lane)
+prompts:
+  - "{{scenario}}"
+providers:
+  - id: file://provider.ts
+    label: mia-live
+defaultTest:
+  assert:
+    - type: javascript
+      value: file://assert.ts
+tests:
+  - description: stream-context
+    vars: { scenario: stream-context }
+  - description: allowed
+    vars: { scenario: allowed }
+  - description: approve-reject
+    vars: { scenario: approve-reject }
+  - description: every-call
+    vars: { scenario: every-call }
+  - description: denied
+    vars: { scenario: denied }
+  - description: silence-disconnect
+    vars: { scenario: silence-disconnect }
+  - description: cancellable
+    vars: { scenario: cancellable }
+  - description: uncancellable
+    vars: { scenario: uncancellable }
+  - description: allow-policy-no-prompt
+    vars: { scenario: allow-policy-no-prompt }
+  - description: artifact-export
+    vars: { scenario: artifact-export }
+evaluateOptions:
+  maxConcurrency: 1

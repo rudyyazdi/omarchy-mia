@@ -1,0 +1,29 @@
+{
+  "profile": "production-opus",
+  "stateDirectory": "${XDG_STATE_HOME}/mia",
+  "server": { "host": "127.0.0.1", "port": 48730, "secretFile": "${XDG_STATE_HOME}/mia/client-secret" },
+  "runtime": {
+    "kind": "claude-code",
+    "executable": "claude",
+    "model": "claude-opus-5",
+    "effort": "medium",
+    "workingDirectory": "${XDG_STATE_HOME}/mia/work",
+    "builtinTools": [],
+    "mcpServers": {
+      "example": { "type": "http", "url": "http://127.0.0.1:9000/mcp" }
+    },
+    "toolPolicy": {
+      "mcp__example__lookup": "allow",
+      "mcp__example__act": "ask"
+    },
+    "agentPromptFile": "../../prompts/agent-v1.md",
+    "outputDirectories": ["${XDG_STATE_HOME}/mia/work/outputs"],
+    "env": {},
+    "extraSettings": {}
+  },
+  "architectureDocument": "../../docs/D1/PLAN.md",
+  "notes": [
+    "UNVERIFIED: claude-opus-5 was not exercised in the D1 capability record (Sonnet was used for testing). Run `npm run probe -- --model claude-opus-5` before relying on it.",
+    "Replace the example MCP server with your own; list every tool explicitly in toolPolicy."
+  ]
+}

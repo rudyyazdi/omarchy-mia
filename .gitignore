@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.log
+.env
+.env.*
+# private state, recordings, exports: never in Git
+.mia-state/
+.mia-work/
+exports/
+# local configuration (use examples/config/*.json as templates)
+config/*.local.json
+# promptfoo outputs
+tests/acceptance/promptfoo/output/
+.promptfoo/

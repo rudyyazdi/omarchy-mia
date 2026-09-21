@@ -1,0 +1,27 @@
+{
+  "profile": "fixture-test",
+  "stateDirectory": "../../.mia-state/fixture-test",
+  "server": { "host": "127.0.0.1", "port": 48731, "secretFile": "../../.mia-state/fixture-test/client-secret" },
+  "runtime": {
+    "kind": "claude-code",
+    "executable": "claude",
+    "model": "claude-sonnet-5",
+    "effort": "medium",
+    "workingDirectory": "../../.mia-work/fixture-test",
+    "builtinTools": [],
+    "mcpServers": { "d1": { "type": "http", "url": "${MIA_FIXTURE_MCP_URL}" } },
+    "toolPolicy": {
+      "mcp__d1__read": "allow",
+      "mcp__d1__change": "ask",
+      "mcp__d1__slow": "ask",
+      "mcp__d1__artifact": "ask",
+      "mcp__d1__forbidden": "deny"
+    },
+    "agentPromptFile": "../../prompts/agent-v1.md",
+    "outputDirectories": ["${MIA_FIXTURE_DIR}/artifacts"],
+    "env": {},
+    "extraSettings": {}
+  },
+  "architectureDocument": "../../docs/D1/PLAN.md",
+  "notes": ["Test profile: Sonnet was chosen by the maintainer for harness testing. Every tool is routed through the approval bridge; only deny becomes a runtime rule."]
+}
