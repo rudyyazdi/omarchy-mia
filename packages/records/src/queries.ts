@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { parseJson, type Catalog } from "./catalog.ts";
 import {
   emptySnapshotTables,
@@ -235,13 +236,17 @@ export interface TaskView {
 
 const ERROR_EVENT_TYPES = new Set(["error", "runtime_stderr", "malformed_event"]);
 
+/** Shapes of stored payloads this view reads back. */
+const TextDeltaPayload = z.object({ text: z.string() });
+const JsonObject = z.record(z.string(), z.unknown());
+
 export const taskViews = (snapshot: ConversationSnapshot): TaskView[] => {
   const { tables } = snapshot;
   return tables.tasks.map((task) => {
     const events = tables.events.filter((event) => event.task_id === task.id);
     const text = events
       .filter((event) => event.type === "text_delta")
-      .map((event) => parseJson<{ text: string }>(event.payload).text)
+      .map((event) => TextDeltaPayload.parse(parseJson(event.payload)).text)
       .join("");
     const interruption = events.find((event) => event.type === "interruption_outcome");
     return {
@@ -260,7 +265,7 @@ export const taskViews = (snapshot: ConversationSnapshot): TaskView[] => {
           approvals: tables.approvals.filter((approval) => approval.tool_call_id === call.id),
         })),
       events,
-      interruption: interruption ? parseJson<Record<string, unknown>>(interruption.payload) : null,
+      interruption: interruption ? JsonObject.parse(parseJson(interruption.payload)) : null,
       errors: events.filter((event) => ERROR_EVENT_TYPES.has(event.type)),
     };
   });

@@ -107,6 +107,11 @@ interface EventOpts {
   causedBy?: string | null;
 }
 
+/** A client-facing event as a correlated type/payload pair, so the envelope needs no assertion. */
+type OutgoingEvent = {
+  [T in ServerEventType]: { type: T; payload: EventPayload<T> };
+}[ServerEventType];
+
 interface NewCallInput {
   runtimeCallId: string;
   toolIdentity: string;
@@ -270,35 +275,23 @@ export class Engine {
     }
   }
 
-  private deliver<T extends ServerEventType>(event: {
-    type: T;
-    id: string;
-    sequence: number | null;
-    payload: EventPayload<T>;
-  }): void {
+  private deliver(event: OutgoingEvent, envelope: { id: string; sequence: number | null }): void {
     const connectionId = this.activeConnectionId;
     if (!connectionId) return;
-    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- TypeScript cannot correlate the generic `type`/`payload` pair with one member of the ServerEvent union; EventPayload<T> guarantees the pairing.
-    const envelope = {
+    this.send(connectionId, {
       protocol_version: PROTOCOL_VERSION,
-      message_id: event.id,
-      type: event.type,
+      message_id: envelope.id,
       conversation_id: this.conversation?.id ?? null,
-      sequence: event.sequence,
+      sequence: envelope.sequence,
       server_time: nowIso(),
-      payload: event.payload,
-    } as ServerEvent;
-    this.send(connectionId, envelope);
+      ...event,
+    });
   }
 
   /** Persist an event (inside tx) and queue its delivery with the persisted id and sequence. */
-  private emit<T extends ServerEventType>(
-    type: T,
-    payload: EventPayload<T>,
-    opts: EventOpts = {},
-  ): { id: string; sequence: number } {
-    const ev = this.record(type, payload, opts);
-    this.afterCommit.push(() => this.deliver({ type, id: ev.id, sequence: ev.sequence, payload }));
+  private emit(event: OutgoingEvent, opts: EventOpts = {}): { id: string; sequence: number } {
+    const ev = this.record(event.type, event.payload, opts);
+    this.afterCommit.push(() => this.deliver(event, { id: ev.id, sequence: ev.sequence }));
     return ev;
   }
 
@@ -323,21 +316,22 @@ export class Engine {
 
   /** Unpersisted status notification (tool call progress); the durable evidence is the underlying events. */
   private notifyToolCall(task: TaskState, call: ToolCallState, detail?: string): void {
-    this.deliver({
-      type: "tool_call",
-      id: newId("evt"),
-      sequence: null,
-      payload: {
-        conversation_id: this.activeConversation.id,
-        task_id: task.id,
-        tool_call_id: call.id,
-        runtime_call_id: call.runtimeCallId,
-        tool_identity: call.toolIdentity,
-        status: call.status,
-        ...(detail ? { detail } : {}),
-        redacted_arguments: call.redactedArguments,
+    this.deliver(
+      {
+        type: "tool_call",
+        payload: {
+          conversation_id: this.activeConversation.id,
+          task_id: task.id,
+          tool_call_id: call.id,
+          runtime_call_id: call.runtimeCallId,
+          tool_identity: call.toolIdentity,
+          status: call.status,
+          ...(detail ? { detail } : {}),
+          redacted_arguments: call.redactedArguments,
+        },
       },
-    });
+      { id: newId("evt"), sequence: null },
+    );
   }
 
   // ---------------------------------------------------------------- commands
@@ -399,10 +393,13 @@ export class Engine {
         this.activeConnectionId = ctx.connectionId;
         this.activeClientId = ctx.clientId;
         this.record("provenance_recorded", provenance);
-        this.emit("conversation_started", {
-          conversation_id: conv.id,
-          started_at: conv.startedAt,
-          provenance_set_id: provenance.provenance_set_id,
+        this.emit({
+          type: "conversation_started",
+          payload: {
+            conversation_id: conv.id,
+            started_at: conv.startedAt,
+            provenance_set_id: provenance.provenance_set_id,
+          },
         });
         return {
           ok: true,
@@ -467,13 +464,15 @@ export class Engine {
           opts,
         );
         this.emit(
-          "task_started",
           {
-            conversation_id: conversation.id,
-            task_id: taskId,
-            execution_id: executionId,
-            execution_epoch: epoch,
-            text: payload.text,
+            type: "task_started",
+            payload: {
+              conversation_id: conversation.id,
+              task_id: taskId,
+              execution_id: executionId,
+              execution_epoch: epoch,
+              text: payload.text,
+            },
           },
           opts,
         );
@@ -580,13 +579,15 @@ export class Engine {
       this.tx(() => {
         const { writer } = this.deps;
         const decided = this.emit(
-          "approval_resolved",
           {
-            conversation_id: conversation.id,
-            task_id: task.id,
-            approval_id: approvalId,
-            tool_call_id: call.id,
-            status: approve ? "approved" : "rejected",
+            type: "approval_resolved",
+            payload: {
+              conversation_id: conversation.id,
+              task_id: task.id,
+              approval_id: approvalId,
+              tool_call_id: call.id,
+              status: approve ? "approved" : "rejected",
+            },
           },
           opts,
         );
@@ -664,8 +665,10 @@ export class Engine {
       // Atomically: close the gate, advance the epoch, invalidate pending approvals, record the order. Memory changes after commit.
       this.tx(() => {
         const requested = this.emit(
-          "interruption_requested",
-          { conversation_id: conversation.id, task_id: task.id, execution_epoch: epoch },
+          {
+            type: "interruption_requested",
+            payload: { conversation_id: conversation.id, task_id: task.id, execution_epoch: epoch },
+          },
           opts,
         );
         for (const [approvalId, call] of pending) {
@@ -679,14 +682,16 @@ export class Engine {
             detail: "pending approval invalidated by interruption",
           });
           this.emit(
-            "approval_resolved",
             {
-              conversation_id: conversation.id,
-              task_id: task.id,
-              approval_id: approvalId,
-              tool_call_id: call.id,
-              status: "invalidated",
-              reason: "interrupted",
+              type: "approval_resolved",
+              payload: {
+                conversation_id: conversation.id,
+                task_id: task.id,
+                approval_id: approvalId,
+                tool_call_id: call.id,
+                status: "invalidated",
+                reason: "interrupted",
+              },
             },
             { ...opts, causedBy: requested.id },
           );
@@ -849,12 +854,14 @@ export class Engine {
           })
           .with({ type: "text_delta" }, (delta) => {
             this.emit(
-              "text_delta",
               {
-                conversation_id: conversation.id,
-                task_id: task.id,
-                execution_id: task.executionId,
-                text: delta.text,
+                type: "text_delta",
+                payload: {
+                  conversation_id: conversation.id,
+                  task_id: task.id,
+                  execution_id: task.executionId,
+                  text: delta.text,
+                },
               },
               opts,
             );
@@ -950,12 +957,14 @@ export class Engine {
           })
           .with({ type: "malformed_event" }, (malformed) => {
             this.emit(
-              "error",
               {
-                code: "runtime_failure",
-                message: `malformed runtime event: ${malformed.error}`,
-                conversation_id: conversation.id,
-                task_id: task.id,
+                type: "error",
+                payload: {
+                  code: "runtime_failure",
+                  message: `malformed runtime event: ${malformed.error}`,
+                  conversation_id: conversation.id,
+                  task_id: task.id,
+                },
               },
               opts,
             );
@@ -1017,14 +1026,16 @@ export class Engine {
       });
       task.pendingApprovals.delete(last.approvalId);
       this.emit(
-        "approval_resolved",
         {
-          conversation_id: conversation.id,
-          task_id: task.id,
-          approval_id: last.approvalId,
-          tool_call_id: last.id,
-          status: "invalidated",
-          reason: "arguments changed",
+          type: "approval_resolved",
+          payload: {
+            conversation_id: conversation.id,
+            task_id: task.id,
+            approval_id: last.approvalId,
+            tool_call_id: last.id,
+            status: "invalidated",
+            reason: "arguments changed",
+          },
         },
         opts,
       );
@@ -1056,12 +1067,14 @@ export class Engine {
     if (!runtimeCallId) {
       this.tx(() =>
         this.emit(
-          "error",
           {
-            code: "runtime_failure",
-            message: `permission request for ${req.toolName} carried no runtime call id; rejected`,
-            conversation_id: conversation.id,
-            task_id: task.id,
+            type: "error",
+            payload: {
+              code: "runtime_failure",
+              message: `permission request for ${req.toolName} carried no runtime call id; rejected`,
+              conversation_id: conversation.id,
+              task_id: task.id,
+            },
           },
           opts,
         ),
@@ -1140,12 +1153,14 @@ export class Engine {
           };
           if (policy === "unlisted") {
             this.emit(
-              "error",
               {
-                code: "configuration_error",
-                message: `tool ${bound.toolIdentity} is not listed in toolPolicy; call denied`,
-                conversation_id: conversation.id,
-                task_id: task.id,
+                type: "error",
+                payload: {
+                  code: "configuration_error",
+                  message: `tool ${bound.toolIdentity} is not listed in toolPolicy; call denied`,
+                  conversation_id: conversation.id,
+                  task_id: task.id,
+                },
               },
               opts,
             );
@@ -1203,20 +1218,22 @@ export class Engine {
             requestingEventId: null,
           });
           const requested = this.emit(
-            "approval_requested",
             {
-              conversation_id: conversation.id,
-              task_id: task.id,
-              approval_id: approvalId,
-              tool_call_id: bound.id,
-              runtime_call_id: bound.runtimeCallId,
-              binding_revision: bound.revision,
-              execution_epoch: task.epoch,
-              tool_identity: bound.toolIdentity,
-              intended_action: describeAction(bound.toolIdentity, bound.redactedArguments),
-              redacted_arguments: bound.redactedArguments,
-              argument_digest: bound.digest,
-              explainable: true,
+              type: "approval_requested",
+              payload: {
+                conversation_id: conversation.id,
+                task_id: task.id,
+                approval_id: approvalId,
+                tool_call_id: bound.id,
+                runtime_call_id: bound.runtimeCallId,
+                binding_revision: bound.revision,
+                execution_epoch: task.epoch,
+                tool_identity: bound.toolIdentity,
+                intended_action: describeAction(bound.toolIdentity, bound.redactedArguments),
+                redacted_arguments: bound.redactedArguments,
+                argument_digest: bound.digest,
+                explainable: true,
+              },
             },
             opts,
           );
@@ -1267,14 +1284,16 @@ export class Engine {
             detail: "runtime abandoned the held call",
           });
           this.emit(
-            "approval_resolved",
             {
-              conversation_id: this.activeConversation.id,
-              task_id: task.id,
-              approval_id: approvalId,
-              tool_call_id: call.id,
-              status: "expired",
-              reason: "runtime abandoned the prompt",
+              type: "approval_resolved",
+              payload: {
+                conversation_id: this.activeConversation.id,
+                task_id: task.id,
+                approval_id: approvalId,
+                tool_call_id: call.id,
+                status: "expired",
+                reason: "runtime abandoned the prompt",
+              },
             },
             { taskId: task.id, executionId: task.executionId },
           );
@@ -1363,36 +1382,42 @@ export class Engine {
         });
         if (task.interrupted)
           this.emit(
-            "interruption_outcome",
             {
-              conversation_id: conversation.id,
-              task_id: task.id,
-              task_status: status,
-              actions,
-              runtime_cancellation: result.runtimeCancellation,
+              type: "interruption_outcome",
+              payload: {
+                conversation_id: conversation.id,
+                task_id: task.id,
+                task_status: status,
+                actions,
+                runtime_cancellation: result.runtimeCancellation,
+              },
             },
             opts,
           );
         writer.updateTask(task.id, { status, finishedAt: nowIso() });
         this.emit(
-          "task_finished",
           {
-            conversation_id: conversation.id,
-            task_id: task.id,
-            status,
-            ...(error ? { error } : {}),
-            usage: result.result?.usage ?? undefined,
+            type: "task_finished",
+            payload: {
+              conversation_id: conversation.id,
+              task_id: task.id,
+              status,
+              ...(error ? { error } : {}),
+              usage: result.result?.usage ?? undefined,
+            },
           },
           opts,
         );
         if (error)
           this.emit(
-            "error",
             {
-              code: "runtime_failure",
-              message: error,
-              conversation_id: conversation.id,
-              task_id: task.id,
+              type: "error",
+              payload: {
+                code: "runtime_failure",
+                message: error,
+                conversation_id: conversation.id,
+                task_id: task.id,
+              },
             },
             opts,
           );

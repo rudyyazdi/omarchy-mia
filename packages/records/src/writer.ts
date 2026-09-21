@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { canonicalDigest, redactValue } from "@mia/protocol";
+import { canonicalDigest, redactString, redactValue } from "@mia/protocol";
 import { Catalog, newId, nowIso } from "./catalog.ts";
 import { ObjectStore } from "./objects.ts";
 import type { CaptureStatus, CommandRow, LinkRelation } from "./schema.ts";
@@ -311,7 +311,7 @@ export class RecordWriter {
       conversation_id: input.conversationId,
       status: "running",
       created_at: nowIso(),
-      text: redactValue(input.text),
+      text: redactString(input.text),
       client_id: input.clientId,
     });
     return id;

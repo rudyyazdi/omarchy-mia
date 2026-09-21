@@ -81,8 +81,9 @@ const mcpClient = async (server: string): Promise<Client> => {
 
 /** The first text block of a tool result, or undefined when the tool answered with none. */
 const firstText = (result: Awaited<ReturnType<Client["callTool"]>>): string | undefined => {
-  const [first] = Array.isArray(result.content) ? result.content : [];
-  return first?.type === "text" ? first.text : undefined;
+  const first: unknown = Array.isArray(result.content) ? result.content[0] : undefined;
+  if (typeof first !== "object" || first === null || !("text" in first)) return undefined;
+  return typeof first.text === "string" ? first.text : undefined;
 };
 
 const askPermission = async (

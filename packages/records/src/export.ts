@@ -218,7 +218,8 @@ export const verifyExport = (dir: string): VerificationResult => {
       checked_files: 0,
       checked_objects: 0,
     };
-  const manifest = parseJson<ExportManifest>(readFileSync(manifestPath, "utf8"));
+  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- the manifest was written by exportConversation in this package; verification below checks its contents against the files
+  const manifest = parseJson(readFileSync(manifestPath, "utf8")) as ExportManifest;
   let checkedFiles = 0;
   for (const [rel, expected] of Object.entries(manifest.files)) {
     const path = join(dir, rel);
@@ -239,16 +240,18 @@ export const verifyExport = (dir: string): VerificationResult => {
   // Rows are read back as the row types this package wrote; a line that is not JSON is reported.
   const readTable = <Table extends ExportTable>(table: Table): SnapshotTables[Table] => {
     const path = join(dir, tableFile(table));
-    const rows: SnapshotTables[Table] = [];
-    if (!existsSync(path)) return rows;
-    for (const line of readFileSync(path, "utf8").split("\n").filter(Boolean)) {
-      try {
-        rows.push(parseJson(line));
-      } catch {
-        problems.push(`unparsable record in ${table}`);
+    const rows: unknown[] = [];
+    if (existsSync(path)) {
+      for (const line of readFileSync(path, "utf8").split("\n").filter(Boolean)) {
+        try {
+          rows.push(parseJson(line));
+        } catch {
+          problems.push(`unparsable record in ${table}`);
+        }
       }
     }
-    return rows;
+    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- rows are read back from the JSONL this package wrote; the manifest digest verifies the bytes
+    return rows as SnapshotTables[Table];
   };
   const tables: SnapshotTables = {
     objects: readTable("objects"),

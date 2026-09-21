@@ -128,7 +128,7 @@ const rawRequestsOf = (step: StepRecord): { tool_name?: string; tool_use_id?: st
 /** Effort level per PreToolUse hook record: the hook's `effort` (object or string), else the env var it saw. */
 const HookEffort = z.looseObject({
   effort: z.union([z.looseObject({ level: z.string().optional() }), z.string()]).optional(),
-  env_claude_effort: z.string().optional(),
+  env_claude_effort: z.string().nullish(),
 });
 const effortsOf = (hooks: Record<string, unknown>[]): (string | undefined)[] =>
   hooks.map((hook) => {
@@ -136,7 +136,7 @@ const effortsOf = (hooks: Record<string, unknown>[]): (string | undefined)[] =>
     if (!parsed.success) return undefined;
     const { effort, env_claude_effort: envEffort } = parsed.data;
     const level = typeof effort === "object" ? effort.level : effort;
-    return level ?? envEffort;
+    return level ?? envEffort ?? undefined;
   });
 
 const staticReport = probeStaticCapabilities(baseConfig());

@@ -43,8 +43,7 @@ const walk = (value: unknown, key: string | undefined): unknown => {
 
 /**
  * Recursively redact a JSON-like value. Keys that look sensitive are replaced whole;
- * strings are scanned for secret-shaped values. Returns a new value; input is not mutated.
+ * strings are scanned for secret-shaped values. Returns a new value; input is not mutated. The shape is
+ * not preserved (a sensitive key replaces its whole subtree), so the result is unknown.
  */
-export const redactValue = <T>(value: T): T =>
-  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- walk() preserves the JSON shape of its input but that cannot be expressed in its type; callers rely on the same-type return.
-  walk(value, undefined) as T;
+export const redactValue = (value: unknown): unknown => walk(value, undefined);

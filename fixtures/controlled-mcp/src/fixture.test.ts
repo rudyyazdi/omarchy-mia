@@ -20,9 +20,16 @@ const client = async (): Promise<Client> => {
 
 /** The first text block of a tool result; the fixture always answers with one. */
 const firstText = (result: Awaited<ReturnType<Client["callTool"]>>): string => {
-  const [first] = Array.isArray(result.content) ? result.content : [];
-  if (!first || first.type !== "text") throw new Error("tool result carried no text block");
-  return first.text;
+  const first: unknown = Array.isArray(result.content) ? result.content[0] : undefined;
+  if (
+    typeof first === "object" &&
+    first !== null &&
+    "text" in first &&
+    typeof first.text === "string"
+  ) {
+    return first.text;
+  }
+  throw new Error("tool result carried no text block");
 };
 
 const ArtifactResult = z.object({ artifact: z.object({ sha256: z.string(), path: z.string() }) });

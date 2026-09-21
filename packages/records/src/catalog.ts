@@ -16,11 +16,8 @@ export const newId = (prefix: string): string => `${prefix}_${randomUUID().repla
 
 export const nowIso = (): string => new Date().toISOString();
 
-/**
- * Parse JSON that this package wrote itself (event payloads, usage, export files). The caller names
- * the shape it stored; the default is unknown for callers that only display the value.
- */
-export const parseJson = <T = unknown>(text: string): T => JSON.parse(text);
+/** Parse stored JSON. The result is unknown; callers that need a shape validate it. */
+export const parseJson = (text: string): unknown => JSON.parse(text);
 
 /** Resolve the private state directory: $XDG_STATE_HOME/mia or ~/.local/state/mia unless overridden. */
 export const defaultStateDir = (): string => {
