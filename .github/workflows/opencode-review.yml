@@ -1,0 +1,182 @@
+name: opencode-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+jobs:
+  review-brevity:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    concurrency:
+      group: review-brevity-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Write PR diff for the reviewer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "pr.diff" >> .git/info/exclude
+          gh pr diff ${{ github.event.pull_request.number }} > pr.diff
+      - name: Dump open review threads
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_NAME: brevity
+          PRIOR_THREADS: prior-threads.json
+        run: |
+          echo "prior-threads.json" >> .git/info/exclude
+          python3 .github/scripts/post-review.py dump-threads
+      - name: Review
+        uses: anomalyco/opencode/github@3104c1428ec91f809e5ab86631300de41eb6952e # v1.18.30
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          model: openrouter/deepseek/deepseek-v4.1-flash
+          use_github_token: true
+          prompt: |
+            You are the BREVITY reviewer for Mia, a TypeScript voice-assistant
+            slice (text client, persistent server, one agent adapter). Treat
+            Rudy as a time-poor executive. Judge only whether the change should
+            exist and whether it is the smallest way to solve the stated problem.
+
+            The unified diff this PR introduces is in the file `pr.diff` at the
+            repository root. Read it first, then the PR description and any
+            docs or comments in the diff.
+
+            Open threads from your earlier reviews on this PR are in
+            `prior-threads.json` (may be `[]`). On later pushes, triage those
+            first:
+            - If the latest diff addresses the finding, add a thread_action with
+              action "resolve" and a one-line body saying what fixed it.
+            - If someone replied on the thread, add action "reply" with a direct
+              answer. If their reply plus the new push also closes it, use
+              "resolve" with a short body instead.
+            - Do not re-emit a finding that already has an open thread covering
+              the same issue. Leave still-open, unanswered threads alone (omit
+              them from thread_actions).
+
+            A simplification must remove something the problem does not need —
+            a component, a behavior, a file, an API surface. Do NOT propose
+            DRY or style refactors that only make code shorter (merging
+            duplicated blocks, renames); deliberate duplication is not
+            over-engineering.
+
+            Do not fetch anything from the network or inspect any repository
+            other than this one. Do not look at the opencode action's source or
+            upstream docs. Base the review only on pr.diff, prior-threads.json,
+            the changed files, and the PR description.
+
+            Return EXACTLY ONE JSON object and nothing else: no markdown fences,
+            no prose before or after. Schema:
+            {"reviewer":"brevity","summary":"verdict, plus any finding that cannot sit on a changed line","findings":[{"path":"file path exactly as in pr.diff","line":0,"severity":"high|medium|low","body":"one to three sentences"}],"thread_actions":[{"thread_id":"id from prior-threads.json","action":"resolve|reply","body":"short text"}]}
+            Use the line number in the new file (the + side of the diff). If the
+            change is minimal and justified and there is nothing to triage, return
+            {"reviewer":"brevity","summary":"Minimal and justified.","findings":[],"thread_actions":[]}.
+
+      - name: Post inline review
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RESOLVE_TOKEN: ${{ secrets.OPENCODE_REVIEW_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_NAME: brevity
+          PR_DIFF: pr.diff
+          PRIOR_THREADS: prior-threads.json
+        run: python3 .github/scripts/post-review.py post
+
+  review-safety:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    concurrency:
+      group: review-safety-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Write PR diff for the reviewer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "pr.diff" >> .git/info/exclude
+          gh pr diff ${{ github.event.pull_request.number }} > pr.diff
+      - name: Dump open review threads
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_NAME: safety
+          PRIOR_THREADS: prior-threads.json
+        run: |
+          echo "prior-threads.json" >> .git/info/exclude
+          python3 .github/scripts/post-review.py dump-threads
+      - name: Review
+        uses: anomalyco/opencode/github@3104c1428ec91f809e5ab86631300de41eb6952e # v1.18.30
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          model: openrouter/deepseek/deepseek-v4.1-flash
+          use_github_token: true
+          prompt: |
+            You are the SAFETY and MAINTAINABILITY reviewer for Mia. Read the
+            unified diff in `pr.diff` at the repository root and the PR
+            description, then review for:
+            - correctness bugs and unhandled edge cases
+            - safety: secret/credential handling, permissions, destructive or
+              irreversible commands, injection, unsafe shell, tool-approval
+              bypass, logging of secrets
+            - maintainability: clarity, coupling, dead code, hidden side effects
+            - efficiency: needless work, repeated network or disk reads
+
+            Open threads from your earlier reviews on this PR are in
+            `prior-threads.json` (may be `[]`). On later pushes, triage those
+            first:
+            - If the latest diff addresses the finding, add a thread_action with
+              action "resolve" and a one-line body saying what fixed it.
+            - If someone replied on the thread, add action "reply" with a direct
+              answer. If their reply plus the new push also closes it, use
+              "resolve" with a short body instead.
+            - Do not re-emit a finding that already has an open thread covering
+              the same issue. Leave still-open, unanswered threads alone (omit
+              them from thread_actions).
+
+            Do not fetch anything from the network or inspect any repository
+            other than this one. Do not look at the opencode action's source or
+            upstream docs. Base the review only on pr.diff, prior-threads.json,
+            the changed files, and the PR description.
+
+            Return EXACTLY ONE JSON object and nothing else: no markdown fences,
+            no prose before or after. Schema:
+            {"reviewer":"safety","summary":"verdict, plus any finding that cannot sit on a changed line","findings":[{"path":"file path exactly as in pr.diff","line":0,"severity":"high|medium|low","body":"concrete issue and the minimal fix"}],"thread_actions":[{"thread_id":"id from prior-threads.json","action":"resolve|reply","body":"short text"}]}
+            Use the line number in the new file (the + side of the diff). Order
+            findings by severity. If there is nothing material and nothing to
+            triage, return
+            {"reviewer":"safety","summary":"No material issues.","findings":[],"thread_actions":[]}.
+
+      - name: Post inline review
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RESOLVE_TOKEN: ${{ secrets.OPENCODE_REVIEW_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_NAME: safety
+          PR_DIFF: pr.diff
+          PRIOR_THREADS: prior-threads.json
+        run: python3 .github/scripts/post-review.py post
