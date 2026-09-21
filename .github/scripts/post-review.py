@@ -223,7 +223,7 @@ def parse_diff(text):
 
 def valid_lines():
     if PR_DIFF and os.path.exists(PR_DIFF):
-        with open(PR_DIFF, encoding="utf-8") as handle:
+        with open(PR_DIFF, encoding="utf-8", errors="replace") as handle:
             return parse_diff(handle.read())
     status, text = req(
         "GET",
@@ -331,7 +331,7 @@ def load_prior_threads():
     if not os.path.exists(THREADS_FILE):
         return []
     try:
-        with open(THREADS_FILE, encoding="utf-8") as handle:
+        with open(THREADS_FILE, encoding="utf-8", errors="replace") as handle:
             data = json.load(handle)
     except (ValueError, OSError) as error:
         print(f"warn: could not parse {THREADS_FILE} ({error}); treating as no prior threads")
