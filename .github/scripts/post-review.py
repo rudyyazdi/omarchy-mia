@@ -296,11 +296,14 @@ def has_human_reply(thread):
 def serialize_thread(thread):
     comments = []
     for comment in thread.get("comments", {}).get("nodes") or []:
+        body = comment.get("body") or ""
+        if len(body) > 600:
+            body = body[:600] + "…"
         comments.append(
             {
                 "id": comment.get("databaseId"),
                 "author": (comment.get("author") or {}).get("login"),
-                "body": comment.get("body") or "",
+                "body": body,
                 "created_at": comment.get("createdAt"),
             }
         )

@@ -3,6 +3,11 @@
   "permission": {
     "external_directory": "deny",
     "doom_loop": "deny",
-    "question": "deny"
+    "question": "deny",
+    "bash": "deny",
+    "edit": "deny",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "task": "deny"
   }
 }
