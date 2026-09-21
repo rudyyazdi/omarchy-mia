@@ -14,22 +14,32 @@ export interface BuildInfo {
   source_root: string;
 }
 
-function git(args: string[], cwd: string): string | null {
-  const r = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 20_000 });
-  return r.status === 0 ? r.stdout : null;
-}
+const git = (args: string[], cwd: string): string | null => {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 20_000 });
+  return result.status === 0 ? result.stdout : null;
+};
 
-/** Identify the running source tree: commit, dirty flag and a retained snapshot of local changes. */
-export function collectBuildInfo(name: string, sourceRoot: string): BuildInfo {
-  const root = resolve(sourceRoot);
-  let version = "0.0.0";
+/** The `version` field of a package.json, when the file is readable and carries one. */
+const packageVersion = (packageJsonPath: string): string | undefined => {
   try {
-    version =
-      (JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")) as { version?: string })
-        .version ?? version;
+    const parsed: unknown = JSON.parse(readFileSync(packageJsonPath, "utf8"));
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      "version" in parsed &&
+      typeof parsed.version === "string"
+    )
+      return parsed.version;
   } catch {
     /* keep default */
   }
+  return undefined;
+};
+
+/** Identify the running source tree: commit, dirty flag and a retained snapshot of local changes. */
+export const collectBuildInfo = (name: string, sourceRoot: string): BuildInfo => {
+  const root = resolve(sourceRoot);
+  const version = packageVersion(resolve(root, "package.json")) ?? "0.0.0";
   const commit = git(["rev-parse", "HEAD"], root)?.trim() ?? null;
   if (!commit)
     return {
@@ -43,30 +53,30 @@ export function collectBuildInfo(name: string, sourceRoot: string): BuildInfo {
     };
   const status = git(["status", "--porcelain"], root) ?? "";
   const dirty = status.trim().length > 0;
-  let local_changes: string | null = null;
+  let localChanges: string | null = null;
   if (dirty) {
     const diff = git(["diff", "HEAD", "--", ".", ":(exclude)*.sqlite"], root) ?? "";
     // Untracked files are outside `git diff`; retain their names and content digests so the build digest is content-sensitive.
     const untracked = (git(["ls-files", "--others", "--exclude-standard"], root) ?? "")
       .split("\n")
       .filter(Boolean)
-      .map((f) => {
+      .map((file) => {
         try {
-          return `${sha256Hex(readFileSync(resolve(root, f)))}  ${f}`;
+          return `${sha256Hex(readFileSync(resolve(root, file)))}  ${file}`;
         } catch {
-          return `unreadable  ${f}`;
+          return `unreadable  ${file}`;
         }
       })
       .join("\n");
-    local_changes = `# git status --porcelain\n${status}\n# untracked files (sha256  path)\n${untracked}\n# git diff HEAD\n${diff}`;
+    localChanges = `# git status --porcelain\n${status}\n# untracked files (sha256  path)\n${untracked}\n# git diff HEAD\n${diff}`;
   }
   return {
     name,
     version,
     commit,
     dirty,
-    local_changes_digest: local_changes ? sha256Hex(local_changes) : null,
-    local_changes,
+    local_changes_digest: localChanges ? sha256Hex(localChanges) : null,
+    local_changes: localChanges,
     source_root: root,
   };
-}
+};

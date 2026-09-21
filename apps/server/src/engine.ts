@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
+import { match } from "ts-pattern";
+import { z } from "zod";
 import {
   readHookEvidence,
   type AdapterEvent,
@@ -13,6 +15,7 @@ import {
 import {
   PROTOCOL_VERSION,
   canonicalDigest,
+  errorMessage,
   redactValue,
   sha256Hex,
   type ClientDiagnostics,
@@ -42,6 +45,8 @@ export interface CommandContext {
 
 export type CommandResult =
   { ok: true; result?: Record<string, unknown> } | { ok: false; code: ErrorCode; message: string };
+
+const fail = (code: ErrorCode, message: string): CommandResult => ({ ok: false, code, message });
 
 interface ToolCallState {
   id: string;
@@ -95,6 +100,22 @@ export interface EngineDeps {
   log: (message: string) => void;
 }
 
+/** Linkage recorded with an event: the task and execution it belongs to and the event that caused it. */
+interface EventOpts {
+  taskId?: string | null;
+  executionId?: string | null;
+  causedBy?: string | null;
+}
+
+interface NewCallInput {
+  runtimeCallId: string;
+  toolIdentity: string;
+  digest: string;
+  args: unknown;
+  policy: string;
+  proposalEventId: string | null;
+}
+
 const RUNTIME_IDENTITY = "claude-code";
 const TERMINAL: ReadonlySet<ToolCallStatus> = new Set([
   "denied",
@@ -105,6 +126,107 @@ const TERMINAL: ReadonlySet<ToolCallStatus> = new Set([
   "cancelled",
   "unknown",
 ]);
+
+const detailFor = (status: ToolCallStatus): string | undefined =>
+  match(status)
+    .with("unknown", () => "released; no result observed; effect unknown")
+    .with("blocked_gate", () => "not released: action gate closed")
+    .with("invalidated", () => "never released: proposal or pending approval invalidated")
+    .otherwise(() => undefined);
+
+/** Final status of every call in the task: released-without-result is unknown; anything still held can never run. */
+const classifyActions = (task: TaskState): EventPayload<"interruption_outcome">["actions"] =>
+  task.calls
+    .values()
+    .flatMap((revisions) => revisions)
+    .map((call) => {
+      if (call.status === "dispatched") call.status = "unknown";
+      if (call.status === "awaiting_approval" || call.status === "proposed")
+        call.status = task.interrupted ? "blocked_gate" : "invalidated";
+      return {
+        tool_call_id: call.id,
+        tool_identity: call.toolIdentity,
+        status: call.status,
+        detail: detailFor(call.status),
+      };
+    })
+    .toArray();
+
+/** Task status is separate from action outcomes: an interrupted or completed task with an unknown action is outcome_unknown. */
+const classifyTask = (
+  task: TaskState,
+  result: TurnResult,
+  unknown: boolean,
+): { status: TaskStatus; error?: string } => {
+  if (task.interrupted) return { status: unknown ? "outcome_unknown" : "interrupted" };
+  if (result.status === "completed") return { status: unknown ? "outcome_unknown" : "completed" };
+  return {
+    status: unknown ? "outcome_unknown" : "failed",
+    error: result.error ?? "runtime failed",
+  };
+};
+
+/** Effective effort reported by one PreToolUse hook record: `effort.level`, a bare `effort`, else CLAUDE_EFFORT. */
+const effortLevelOf = (hook: Record<string, unknown>): unknown => {
+  const effort = hook.effort;
+  if (typeof effort === "object" && effort !== null)
+    return ("level" in effort ? effort.level : undefined) ?? hook.env_claude_effort;
+  return effort ?? hook.env_claude_effort;
+};
+
+/** Distinct effective-effort values reported by the PreToolUse hook. */
+const effortLevels = (hooks: Record<string, unknown>[]): string[] => {
+  const levels = hooks.map(effortLevelOf);
+  return [...new Set(levels.filter((level): level is string => typeof level === "string"))];
+};
+
+const executionStatusFor = (task: TaskState, result: TurnResult): string => {
+  if (result.status === "completed") return "completed";
+  return task.interrupted ? "killed" : "failed";
+};
+
+const describeAction = (toolIdentity: string, args: unknown): string => {
+  const parsed = /^mcp__(.+?)__(.+)$/.exec(toolIdentity);
+  const argText = JSON.stringify(args ?? {});
+  const server = parsed?.[1];
+  const tool = parsed?.[2];
+  if (server !== undefined && tool !== undefined)
+    return `Call tool "${tool}" on MCP server "${server}" with arguments ${argText}`;
+  return `Call ${toolIdentity} with arguments ${argText}`;
+};
+
+const DeclaredArtifactSchema = z.object({
+  path: z.string(),
+  sha256: z.string().optional(),
+  name: z.string().optional(),
+  mime_type: z.string().optional(),
+});
+const ArtifactDeclarationSchema = z.object({ artifact: DeclaredArtifactSchema });
+type DeclaredArtifact = z.infer<typeof DeclaredArtifactSchema>;
+
+/** Text blocks of a tool result: a bare string, or the `text` of every block that carries one. */
+const resultTexts = (content: unknown): string[] => {
+  if (typeof content === "string") return [content];
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((block: unknown) => {
+    const text = typeof block === "object" && block !== null && "text" in block ? block.text : null;
+    return typeof text === "string" ? [text] : [];
+  });
+};
+
+export const extractDeclaredArtifact = (content: unknown): DeclaredArtifact | null => {
+  for (const text of resultTexts(content)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      continue; // not JSON
+    }
+    const declaration = ArtifactDeclarationSchema.safeParse(parsed);
+    if (declaration.success) return declaration.data.artifact;
+  }
+  return null;
+};
 
 /**
  * Conversation/task coordinator plus approval and interruption controller. One conversation, one task,
@@ -122,9 +244,15 @@ export class Engine {
    * Work deferred until the current transaction commits: client event deliveries and runtime permission settlements
    * (approve/deny of a held call). Nothing observable leaves the engine before its record is durable.
    */
-  private afterCommit: Array<() => void> = [];
+  private afterCommit: (() => void)[] = [];
 
   constructor(private readonly deps: EngineDeps) {}
+
+  /** The conversation every guarded command and runtime callback operates on; callers check for one first. */
+  private get activeConversation(): ConversationState {
+    if (!this.conversation) throw new Error("engine has no active conversation");
+    return this.conversation;
+  }
 
   // ---------------------------------------------------------------- event plumbing
 
@@ -134,7 +262,7 @@ export class Engine {
       const result = this.deps.catalog.transaction(fn);
       const deferred = this.afterCommit;
       this.afterCommit = [];
-      for (const fn of deferred) fn();
+      for (const run of deferred) run();
       return result;
     } catch (error) {
       this.afterCommit = [];
@@ -142,33 +270,35 @@ export class Engine {
     }
   }
 
-  private deliver<T extends ServerEventType>(
-    type: T,
-    id: string,
-    sequence: number | null,
-    payload: EventPayload<T>,
-  ): void {
+  private deliver<T extends ServerEventType>(event: {
+    type: T;
+    id: string;
+    sequence: number | null;
+    payload: EventPayload<T>;
+  }): void {
     const connectionId = this.activeConnectionId;
     if (!connectionId) return;
-    this.send(connectionId, {
+    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- TypeScript cannot correlate the generic `type`/`payload` pair with one member of the ServerEvent union; EventPayload<T> guarantees the pairing.
+    const envelope = {
       protocol_version: PROTOCOL_VERSION,
-      message_id: id,
-      type,
+      message_id: event.id,
+      type: event.type,
       conversation_id: this.conversation?.id ?? null,
-      sequence,
+      sequence: event.sequence,
       server_time: nowIso(),
-      payload,
-    } as ServerEvent);
+      payload: event.payload,
+    } as ServerEvent;
+    this.send(connectionId, envelope);
   }
 
   /** Persist an event (inside tx) and queue its delivery with the persisted id and sequence. */
   private emit<T extends ServerEventType>(
     type: T,
     payload: EventPayload<T>,
-    opts: { taskId?: string | null; executionId?: string | null; causedBy?: string | null } = {},
+    opts: EventOpts = {},
   ): { id: string; sequence: number } {
     const ev = this.record(type, payload, opts);
-    this.afterCommit.push(() => this.deliver(type, ev.id, ev.sequence, payload));
+    this.afterCommit.push(() => this.deliver({ type, id: ev.id, sequence: ev.sequence, payload }));
     return ev;
   }
 
@@ -176,10 +306,10 @@ export class Engine {
   private record(
     type: string,
     payload: unknown,
-    opts: { taskId?: string | null; executionId?: string | null; causedBy?: string | null } = {},
+    opts: EventOpts = {},
   ): { id: string; sequence: number } {
     const appended = this.deps.writer.appendEvent({
-      conversationId: this.conversation!.id,
+      conversationId: this.activeConversation.id,
       type,
       payload,
       taskId: opts.taskId ?? null,
@@ -193,15 +323,20 @@ export class Engine {
 
   /** Unpersisted status notification (tool call progress); the durable evidence is the underlying events. */
   private notifyToolCall(task: TaskState, call: ToolCallState, detail?: string): void {
-    this.deliver("tool_call", newId("evt"), null, {
-      conversation_id: this.conversation!.id,
-      task_id: task.id,
-      tool_call_id: call.id,
-      runtime_call_id: call.runtimeCallId,
-      tool_identity: call.toolIdentity,
-      status: call.status,
-      ...(detail ? { detail } : {}),
-      redacted_arguments: call.redactedArguments,
+    this.deliver({
+      type: "tool_call",
+      id: newId("evt"),
+      sequence: null,
+      payload: {
+        conversation_id: this.activeConversation.id,
+        task_id: task.id,
+        tool_call_id: call.id,
+        runtime_call_id: call.runtimeCallId,
+        tool_identity: call.toolIdentity,
+        status: call.status,
+        ...(detail ? { detail } : {}),
+        redacted_arguments: call.redactedArguments,
+      },
     });
   }
 
@@ -209,17 +344,16 @@ export class Engine {
 
   startConversation(ctx: CommandContext): CommandResult {
     if (this.task)
-      return {
-        ok: false,
-        code: "busy",
-        message: "a task is running; interrupt it or wait before starting a new conversation",
-      };
+      return fail(
+        "busy",
+        "a task is running; interrupt it or wait before starting a new conversation",
+      );
     if (
       this.conversation &&
       this.activeConnectionId &&
       this.activeConnectionId !== ctx.connectionId
     ) {
-      return { ok: false, code: "busy", message: "another client owns the active conversation" };
+      return fail("busy", "another client owns the active conversation");
     }
     const { writer, profile } = this.deps;
     const previous = {
@@ -229,12 +363,12 @@ export class Engine {
     };
     try {
       return this.tx(() => {
-        const provenance = createConversationProvenance(
+        const provenance = createConversationProvenance({
           writer,
           profile,
-          ctx.clientBuild,
-          this.deps.sourceRoot,
-        );
+          clientBuild: ctx.clientBuild,
+          sourceRoot: this.deps.sourceRoot,
+        });
         const runtimeConversationId = randomUUID();
         const conv = writer.createConversation({
           provenanceSetId: provenance.provenance_set_id,
@@ -279,11 +413,7 @@ export class Engine {
       this.conversation = previous.conversation;
       this.activeConnectionId = previous.connection;
       this.activeClientId = previous.client;
-      return {
-        ok: false,
-        code: "record_failure",
-        message: `could not create conversation: ${error instanceof Error ? error.message : String(error)}`,
-      };
+      return fail("record_failure", `could not create conversation: ${errorMessage(error)}`);
     }
   }
 
@@ -293,18 +423,14 @@ export class Engine {
   ): CommandResult {
     const guard = this.guard(ctx, payload.conversation_id);
     if (guard) return guard;
-    const conversation = this.conversation!;
+    const conversation = this.activeConversation;
     if (this.task) {
       const pending = [...this.task.pendingApprovals.keys()];
       const hint =
         pending.length > 0
           ? `approve or reject ${pending.join(", ")}, or interrupt it`
           : "wait for it to finish or interrupt it";
-      return {
-        ok: false,
-        code: "busy",
-        message: `task ${this.task.id} is ${this.task.status}; ${hint}`,
-      };
+      return fail("busy", `task ${this.task.id} is ${this.task.status}; ${hint}`);
     }
     const { writer, profile } = this.deps;
     const epoch = conversation.epoch + 1;
@@ -354,16 +480,12 @@ export class Engine {
         return { taskId, executionId };
       });
     } catch (error) {
-      return {
-        ok: false,
-        code: "record_failure",
-        message: `could not record task: ${error instanceof Error ? error.message : String(error)}`,
-      };
+      return fail("record_failure", `could not record task: ${errorMessage(error)}`);
     }
     conversation.epoch = epoch;
     conversation.turnCount = turnIndex;
     conversation.pendingNote = null;
-    let resolveFinished: () => void = () => undefined;
+    const finished: PromiseWithResolvers<void> = Promise.withResolvers();
     const task: TaskState = {
       id: ids.taskId,
       executionId: ids.executionId,
@@ -377,9 +499,7 @@ export class Engine {
       abandoned: [],
       clientId: ctx.clientId,
       reportedModel: null,
-      finished: new Promise<void>((r) => {
-        resolveFinished = r;
-      }),
+      finished: finished.promise,
     };
     this.task = task;
     const handle = this.deps.adapter.submitTurn({
@@ -402,7 +522,7 @@ export class Engine {
       )
       .finally(() => {
         if (this.task === task) this.task = null;
-        resolveFinished();
+        finished.resolve();
       });
     return {
       ok: true,
@@ -423,23 +543,14 @@ export class Engine {
         payload.approval_id,
       );
       if (known && known.task_id === payload.task_id)
-        return {
-          ok: false,
-          code: "invalid_state",
-          message: `approval ${payload.approval_id} is ${known.status} and task ${payload.task_id} is no longer active; a decision cannot be reused`,
-        };
-      return {
-        ok: false,
-        code: "not_found",
-        message: `task ${payload.task_id} is not the active task`,
-      };
+        return fail(
+          "invalid_state",
+          `approval ${payload.approval_id} is ${known.status} and task ${payload.task_id} is no longer active; a decision cannot be reused`,
+        );
+      return fail("not_found", `task ${payload.task_id} is not the active task`);
     }
     if (ctx.clientId !== task.clientId)
-      return {
-        ok: false,
-        code: "unauthenticated",
-        message: "decision must come from the client that owns the task",
-      };
+      return fail("unauthenticated", "decision must come from the client that owns the task");
     const call = task.pendingApprovals.get(payload.approval_id);
     if (!call || call.status !== "awaiting_approval" || !call.approvalId) {
       const known = this.deps.catalog.get<{ status: string }>(
@@ -447,24 +558,24 @@ export class Engine {
         payload.approval_id,
       );
       if (known)
-        return {
-          ok: false,
-          code: "invalid_state",
-          message: `approval ${payload.approval_id} is ${known.status}, not pending; a decision cannot be reused`,
-        };
-      return {
-        ok: false,
-        code: "not_found",
-        message: `approval ${payload.approval_id} does not exist for this task`,
-      };
+        return fail(
+          "invalid_state",
+          `approval ${payload.approval_id} is ${known.status}, not pending; a decision cannot be reused`,
+        );
+      return fail("not_found", `approval ${payload.approval_id} does not exist for this task`);
     }
     const approvalId = call.approvalId;
     const approve = payload.decision === "approve";
-    const conversation = this.conversation!;
+    const conversation = this.activeConversation;
     const opts = { taskId: task.id, executionId: task.executionId };
     // Release only if the gate is still open in the current epoch; the decision is persisted before any release.
     const release = approve && task.gateOpen && task.epoch === conversation.epoch;
-    const nextStatus: ToolCallStatus = release ? "dispatched" : approve ? "blocked_gate" : "denied";
+    const outcome = ((): { status: ToolCallStatus; detail: string | undefined } => {
+      if (release) return { status: "dispatched", detail: undefined };
+      if (approve) return { status: "blocked_gate", detail: "approved after gate closed" };
+      return { status: "denied", detail: "rejected" };
+    })();
+    const nextStatus = outcome.status;
     try {
       this.tx(() => {
         const { writer } = this.deps;
@@ -508,32 +619,24 @@ export class Engine {
       });
     } catch (error) {
       // Record failure: the call stays held and pending; nothing is released.
-      return {
-        ok: false,
-        code: "record_failure",
-        message: `decision not recorded; call remains held: ${error instanceof Error ? error.message : String(error)}`,
-      };
+      return fail(
+        "record_failure",
+        `decision not recorded; call remains held: ${errorMessage(error)}`,
+      );
     }
     call.status = nextStatus;
     task.pendingApprovals.delete(approvalId);
     if (task.pendingApprovals.size === 0 && task.status === "awaiting_approval")
       task.status = "running";
-    this.notifyToolCall(
-      task,
-      call,
-      release ? undefined : approve ? "approved after gate closed" : "rejected",
-    );
-    this.settle(
-      call,
-      release
-        ? { behavior: "allow" }
-        : {
-            behavior: "deny",
-            message: approve
-              ? "Mia blocked this call: the task was interrupted before it could be released."
-              : "The user rejected this call. Do not retry it.",
-          },
-    );
+    this.notifyToolCall(task, call, outcome.detail);
+    if (release) this.settle(call, { behavior: "allow" });
+    else
+      this.settle(call, {
+        behavior: "deny",
+        message: approve
+          ? "Mia blocked this call: the task was interrupted before it could be released."
+          : "The user rejected this call. Do not retry it.",
+      });
     return {
       ok: true,
       result: { approval_id: approvalId, released: release, decision: payload.decision },
@@ -548,17 +651,14 @@ export class Engine {
     if (guard) return guard;
     const task = this.task;
     if (!task || task.id !== payload.task_id)
-      return {
-        ok: false,
-        code: "not_found",
-        message: `task ${payload.task_id} is not the active task`,
-      };
+      return fail("not_found", `task ${payload.task_id} is not the active task`);
     if (task.status === "interrupting") return { ok: true, result: { already_interrupting: true } };
     if (task.status !== "running" && task.status !== "awaiting_approval")
-      return { ok: false, code: "invalid_state", message: `task is ${task.status}` };
-    const conversation = this.conversation!;
+      return fail("invalid_state", `task is ${task.status}`);
+    const conversation = this.activeConversation;
     const epoch = conversation.epoch + 1;
-    const pending = [...task.pendingApprovals.values()];
+    // Pending approvals are keyed by their approval id.
+    const pending = [...task.pendingApprovals.entries()];
     const opts = { taskId: task.id, executionId: task.executionId };
     try {
       // Atomically: close the gate, advance the epoch, invalidate pending approvals, record the order. Memory changes after commit.
@@ -568,8 +668,8 @@ export class Engine {
           { conversation_id: conversation.id, task_id: task.id, execution_epoch: epoch },
           opts,
         );
-        for (const call of pending) {
-          this.deps.writer.updateApproval(call.approvalId!, {
+        for (const [approvalId, call] of pending) {
+          this.deps.writer.updateApproval(approvalId, {
             status: "invalidated",
             reason: "interrupted",
             decisionEventId: requested.id,
@@ -583,7 +683,7 @@ export class Engine {
             {
               conversation_id: conversation.id,
               task_id: task.id,
-              approval_id: call.approvalId!,
+              approval_id: approvalId,
               tool_call_id: call.id,
               status: "invalidated",
               reason: "interrupted",
@@ -594,18 +694,14 @@ export class Engine {
         this.deps.writer.updateTask(task.id, { status: "interrupting" });
       });
     } catch (error) {
-      return {
-        ok: false,
-        code: "record_failure",
-        message: `interruption not recorded: ${error instanceof Error ? error.message : String(error)}`,
-      };
+      return fail("record_failure", `interruption not recorded: ${errorMessage(error)}`);
     }
     task.gateOpen = false;
     task.interrupted = true;
     task.status = "interrupting";
     conversation.epoch = epoch;
     task.pendingApprovals.clear();
-    for (const call of pending) {
+    for (const [, call] of pending) {
       call.status = "invalidated";
       this.notifyToolCall(task, call, "interrupted");
       this.settle(call, {
@@ -653,7 +749,7 @@ export class Engine {
       });
       return { ok: true };
     } catch (error) {
-      return { ok: false, code: "record_failure", message: String(error) };
+      return fail("record_failure", String(error));
     }
   }
 
@@ -677,7 +773,7 @@ export class Engine {
       });
       return { ok: true };
     } catch (error) {
-      return { ok: false, code: "record_failure", message: String(error) };
+      return fail("record_failure", String(error));
     }
   }
 
@@ -718,21 +814,13 @@ export class Engine {
 
   private guard(ctx: CommandContext, conversationId: string): CommandResult | null {
     if (!this.conversation)
-      return {
-        ok: false,
-        code: "invalid_state",
-        message: "no conversation; send start_conversation first",
-      };
+      return fail("invalid_state", "no conversation; send start_conversation first");
     if (this.conversation.id !== conversationId)
-      return {
-        ok: false,
-        code: "not_found",
-        message: `conversation ${conversationId} is not active`,
-      };
+      return fail("not_found", `conversation ${conversationId} is not active`);
     if (this.activeConnectionId && this.activeConnectionId !== ctx.connectionId)
-      return { ok: false, code: "busy", message: "another client owns the active conversation" };
+      return fail("busy", "another client owns the active conversation");
     if (!this.activeConnectionId && !this.adoptConnection(ctx.connectionId, ctx.clientId))
-      return { ok: false, code: "busy", message: "the conversation belongs to another client" };
+      return fail("busy", "the conversation belongs to another client");
     return null;
   }
 
@@ -749,153 +837,146 @@ export class Engine {
     if (!conversation) return;
     const opts = { taskId: task.id, executionId: task.executionId };
     try {
-      this.tx(() => {
-        switch (event.type) {
-          case "runtime_started":
-            this.record("runtime_started", { pid: event.pid, launch: event.launch }, opts);
-            return;
-          case "runtime_init":
-            task.reportedModel = event.init.model;
-            this.record("runtime_init", event.init, opts);
-            this.deps.writer.updateExecution(task.executionId, { reportedModel: event.init.model });
-            return;
-          case "text_delta":
+      this.tx(() =>
+        match(event)
+          .with({ type: "runtime_started" }, (started) => {
+            this.record("runtime_started", { pid: started.pid, launch: started.launch }, opts);
+          })
+          .with({ type: "runtime_init" }, (init) => {
+            task.reportedModel = init.init.model;
+            this.record("runtime_init", init.init, opts);
+            this.deps.writer.updateExecution(task.executionId, { reportedModel: init.init.model });
+          })
+          .with({ type: "text_delta" }, (delta) => {
             this.emit(
               "text_delta",
               {
                 conversation_id: conversation.id,
                 task_id: task.id,
                 execution_id: task.executionId,
-                text: event.text,
+                text: delta.text,
               },
               opts,
             );
-            return;
-          case "tool_proposed": {
-            if (!event.complete) {
+          })
+          .with({ type: "tool_proposed" }, (proposed) => {
+            if (!proposed.complete) {
               this.record(
                 "tool_proposal_started",
-                { runtime_call_id: event.runtime_call_id, tool_identity: event.tool_identity },
+                { runtime_call_id: proposed.runtimeCallId, tool_identity: proposed.toolIdentity },
                 opts,
               );
               return;
             }
-            const digest = canonicalDigest(event.arguments);
+            const digest = canonicalDigest(proposed.arguments);
             const proposal = this.record(
               "tool_proposed",
               {
-                runtime_call_id: event.runtime_call_id,
-                tool_identity: event.tool_identity,
-                redacted_arguments: redactValue(event.arguments),
+                runtime_call_id: proposed.runtimeCallId,
+                tool_identity: proposed.toolIdentity,
+                redacted_arguments: redactValue(proposed.arguments),
                 argument_digest: digest,
               },
               opts,
             );
-            const last = task.calls.get(event.runtime_call_id)?.at(-1);
+            const last = task.calls.get(proposed.runtimeCallId)?.at(-1);
             if (last && last.digest === digest) {
               this.deps.writer.updateToolCall(last.id, { proposalEventId: proposal.id });
               return;
             }
             if (last) this.supersede(task, last);
-            const policy = this.deps.profile.runtime.toolPolicy[event.tool_identity] ?? "unlisted";
-            const state = this.newCallState(
-              task,
-              event.runtime_call_id,
-              event.tool_identity,
+            const policy =
+              this.deps.profile.runtime.toolPolicy[proposed.toolIdentity] ?? "unlisted";
+            const state = this.newCallState(task, {
+              runtimeCallId: proposed.runtimeCallId,
+              toolIdentity: proposed.toolIdentity,
               digest,
-              event.arguments,
+              args: proposed.arguments,
               policy,
-              proposal.id,
-            );
+              proposalEventId: proposal.id,
+            });
             this.afterCommit.push(() => this.notifyToolCall(task, state));
-            return;
-          }
-          case "assistant_message":
-            this.record("assistant_message", event.message, opts);
-            return;
-          case "tool_result": {
+          })
+          .with({ type: "assistant_message" }, (message) => {
+            this.record("assistant_message", message.message, opts);
+          })
+          .with({ type: "tool_result" }, (toolResult) => {
             const result = this.record(
               "tool_result",
               {
-                runtime_call_id: event.runtime_call_id,
-                is_error: event.is_error,
-                content: event.content,
-                raw: event.raw,
+                runtime_call_id: toolResult.runtimeCallId,
+                is_error: toolResult.isError,
+                content: toolResult.content,
+                raw: toolResult.raw,
               },
               opts,
             );
-            const call = task.calls.get(event.runtime_call_id)?.at(-1);
+            const call = task.calls.get(toolResult.runtimeCallId)?.at(-1);
             if (!call) {
               this.record(
                 "tool_result_unmatched",
-                { runtime_call_id: event.runtime_call_id },
+                { runtime_call_id: toolResult.runtimeCallId },
                 opts,
               );
               return;
             }
-            if (!TERMINAL.has(call.status)) call.status = event.is_error ? "failed" : "completed";
+            if (!TERMINAL.has(call.status))
+              call.status = toolResult.isError ? "failed" : "completed";
             this.deps.writer.updateToolCall(call.id, {
               status: call.status,
               resultEventId: result.id,
             });
             if (call.status === "completed")
-              this.collectArtifacts(task, call, event.content, result.id);
+              this.collectArtifacts(task, call, {
+                content: toolResult.content,
+                eventId: result.id,
+              });
             this.afterCommit.push(() => this.notifyToolCall(task, call));
-            return;
-          }
-          case "turn_result":
-            this.record("runtime_result", event.result, opts);
+          })
+          .with({ type: "turn_result" }, (turn) => {
+            this.record("runtime_result", turn.result, opts);
             this.deps.writer.updateExecution(task.executionId, {
               usage: {
-                usage: event.result.usage,
-                total_cost_usd: event.result.total_cost_usd,
-                duration_ms: event.result.duration_ms,
-                duration_api_ms: event.result.duration_api_ms,
-                num_turns: event.result.num_turns,
+                usage: turn.result.usage,
+                total_cost_usd: turn.result.total_cost_usd,
+                duration_ms: turn.result.duration_ms,
+                duration_api_ms: turn.result.duration_api_ms,
+                num_turns: turn.result.num_turns,
               },
             });
-            return;
-          case "runtime_stderr":
-            this.record("runtime_stderr", { text: event.text }, opts);
-            return;
-          case "malformed_event":
+          })
+          .with({ type: "runtime_stderr" }, (stderr) => {
+            this.record("runtime_stderr", { text: stderr.text }, opts);
+          })
+          .with({ type: "malformed_event" }, (malformed) => {
             this.emit(
               "error",
               {
                 code: "runtime_failure",
-                message: `malformed runtime event: ${event.error}`,
+                message: `malformed runtime event: ${malformed.error}`,
                 conversation_id: conversation.id,
                 task_id: task.id,
               },
               opts,
             );
-            return;
-          case "runtime_exit":
-            this.record("runtime_exit", { code: event.code, signal: event.signal }, opts);
-            return;
-        }
-      });
-    } catch (error) {
-      this.deps.log(
-        `failed to record ${event.type}: ${error instanceof Error ? error.message : String(error)}`,
+          })
+          .with({ type: "runtime_exit" }, (exit) => {
+            this.record("runtime_exit", { code: exit.code, signal: exit.signal }, opts);
+          })
+          .exhaustive(),
       );
+    } catch (error) {
+      this.deps.log(`failed to record ${event.type}: ${errorMessage(error)}`);
     }
   }
 
-  private newCallState(
-    task: TaskState,
-    runtimeCallId: string,
-    toolIdentity: string,
-    digest: string,
-    args: unknown,
-    policy: string,
-    proposalEventId: string | null,
-  ): ToolCallState {
+  private newCallState(task: TaskState, input: NewCallInput): ToolCallState {
+    const { runtimeCallId, toolIdentity, digest, policy, proposalEventId } = input;
     const revisions = task.calls.get(runtimeCallId) ?? [];
     const revision = (revisions.at(-1)?.revision ?? 0) + 1;
-    const redactedArguments = redactValue(args);
+    const redactedArguments = redactValue(input.args);
     const id = this.deps.writer.createToolCall({
-      conversationId: this.conversation!.id,
+      conversationId: this.activeConversation.id,
       taskId: task.id,
       executionId: task.executionId,
       runtimeCallId,
@@ -927,7 +1008,7 @@ export class Engine {
   /** Changed arguments under the same runtime call id: the old binding (and any pending approval) can never release anything. */
   private supersede(task: TaskState, last: ToolCallState): void {
     if (last.status !== "awaiting_approval" && last.status !== "proposed") return;
-    const conversation = this.conversation!;
+    const conversation = this.activeConversation;
     const opts = { taskId: task.id, executionId: task.executionId };
     if (last.approvalId) {
       this.deps.writer.updateApproval(last.approvalId, {
@@ -971,14 +1052,14 @@ export class Engine {
     if (!conversation || this.task !== task)
       return { behavior: "deny", message: "Mia has no active task for this call." };
     const opts = { taskId: task.id, executionId: task.executionId };
-    const runtimeCallId = req.tool_use_id;
+    const runtimeCallId = req.toolUseId;
     if (!runtimeCallId) {
       this.tx(() =>
         this.emit(
           "error",
           {
             code: "runtime_failure",
-            message: `permission request for ${req.tool_name} carried no runtime call id; rejected`,
+            message: `permission request for ${req.toolName} carried no runtime call id; rejected`,
             conversation_id: conversation.id,
             task_id: task.id,
           },
@@ -993,162 +1074,166 @@ export class Engine {
     const digest = canonicalDigest(req.input);
     // Policy is exactly what the profile says. After an interruption the next turn's Mia note tells the model which
     // effects are unknown; deciding whether a repeat is safe is the model's job, not a reason to re-prompt an allowed tool.
-    const policy = this.deps.profile.runtime.toolPolicy[req.tool_name] ?? "unlisted";
+    const policy = this.deps.profile.runtime.toolPolicy[req.toolName] ?? "unlisted";
     let call: ToolCallState;
     let decision: PermissionDecision | null;
     try {
-      ({ call, decision } = this.tx(() => {
-        const last = task.calls.get(runtimeCallId)?.at(-1);
-        let c: ToolCallState;
-        if (
-          last &&
-          last.digest === digest &&
-          last.toolIdentity === req.tool_name &&
-          (last.status === "proposed" || last.status === "awaiting_approval")
-        ) {
-          c = last;
-        } else {
-          if (last) this.supersede(task, last);
-          const proposal = this.record(
-            "tool_proposed",
+      ({ call, decision } = this.tx<{ call: ToolCallState; decision: PermissionDecision | null }>(
+        () => {
+          const last = task.calls.get(runtimeCallId)?.at(-1);
+          let bound: ToolCallState;
+          if (
+            last &&
+            last.digest === digest &&
+            last.toolIdentity === req.toolName &&
+            (last.status === "proposed" || last.status === "awaiting_approval")
+          ) {
+            bound = last;
+          } else {
+            if (last) this.supersede(task, last);
+            const proposal = this.record(
+              "tool_proposed",
+              {
+                runtime_call_id: runtimeCallId,
+                tool_identity: req.toolName,
+                redacted_arguments: redactValue(req.input),
+                argument_digest: digest,
+                source: "permission_request",
+              },
+              opts,
+            );
+            bound = this.newCallState(task, {
+              runtimeCallId,
+              toolIdentity: req.toolName,
+              digest,
+              args: req.input,
+              policy,
+              proposalEventId: proposal.id,
+            });
+          }
+          const evaluation = this.record(
+            "policy_evaluated",
             {
-              runtime_call_id: runtimeCallId,
-              tool_identity: req.tool_name,
-              redacted_arguments: redactValue(req.input),
-              argument_digest: digest,
-              source: "permission_request",
+              tool_call_id: bound.id,
+              tool_identity: bound.toolIdentity,
+              policy,
+              gate_open: task.gateOpen,
+              execution_epoch: task.epoch,
+              binding_revision: bound.revision,
             },
             opts,
           );
-          c = this.newCallState(
-            task,
-            runtimeCallId,
-            req.tool_name,
-            digest,
-            req.input,
-            policy,
-            proposal.id,
-          );
-        }
-        const evaluation = this.record(
-          "policy_evaluated",
-          {
-            tool_call_id: c.id,
-            tool_identity: c.toolIdentity,
-            policy,
-            gate_open: task.gateOpen,
-            execution_epoch: task.epoch,
-            binding_revision: c.revision,
-          },
-          opts,
-        );
-        const deny = (
-          status: ToolCallStatus,
-          detail: string,
-          message: string,
-          interrupt = false,
-        ): PermissionDecision => {
-          this.deps.writer.updateToolCall(c.id, { status, detail });
-          c.status = status;
-          return interrupt
-            ? { behavior: "deny", message, interrupt }
-            : { behavior: "deny", message };
-        };
-        if (policy === "unlisted") {
-          this.emit(
-            "error",
+          const deny = (denial: {
+            status: ToolCallStatus;
+            detail: string;
+            message: string;
+            interrupt?: boolean;
+          }): PermissionDecision => {
+            this.deps.writer.updateToolCall(bound.id, {
+              status: denial.status,
+              detail: denial.detail,
+            });
+            bound.status = denial.status;
+            return denial.interrupt
+              ? { behavior: "deny", message: denial.message, interrupt: denial.interrupt }
+              : { behavior: "deny", message: denial.message };
+          };
+          if (policy === "unlisted") {
+            this.emit(
+              "error",
+              {
+                code: "configuration_error",
+                message: `tool ${bound.toolIdentity} is not listed in toolPolicy; call denied`,
+                conversation_id: conversation.id,
+                task_id: task.id,
+              },
+              opts,
+            );
+            return {
+              call: bound,
+              decision: deny({
+                status: "denied",
+                detail: "tool not listed in toolPolicy",
+                message: `Mia denied ${bound.toolIdentity}: it is not part of the configured policy.`,
+              }),
+            };
+          }
+          if (policy === "deny")
+            return {
+              call: bound,
+              decision: deny({
+                status: "denied",
+                detail: "denied by policy",
+                message: `Mia denied ${bound.toolIdentity}: policy forbids it.`,
+              }),
+            };
+          if (!task.gateOpen)
+            return {
+              call: bound,
+              decision: deny({
+                status: "blocked_gate",
+                detail: "action gate closed by interruption",
+                message: "Mia blocked this call: the task is being interrupted.",
+                interrupt: true,
+              }),
+            };
+          if (policy === "allow") {
+            const dispatched = this.record(
+              "tool_dispatched",
+              {
+                tool_call_id: bound.id,
+                runtime_call_id: bound.runtimeCallId,
+                tool_identity: bound.toolIdentity,
+                policy,
+                via: "policy",
+              },
+              { ...opts, causedBy: evaluation.id },
+            );
+            this.deps.writer.updateToolCall(bound.id, {
+              status: "dispatched",
+              dispatchEventId: dispatched.id,
+            });
+            bound.status = "dispatched";
+            return { call: bound, decision: { behavior: "allow" } };
+          }
+          // ask: durable pending approval bound to (conversation, task, runtime call, revision, tool, digest, epoch).
+          const approvalId = this.deps.writer.createApproval({
+            toolCallId: bound.id,
+            executionEpoch: task.epoch,
+            requestingEventId: null,
+          });
+          const requested = this.emit(
+            "approval_requested",
             {
-              code: "configuration_error",
-              message: `tool ${c.toolIdentity} is not listed in toolPolicy; call denied`,
               conversation_id: conversation.id,
               task_id: task.id,
+              approval_id: approvalId,
+              tool_call_id: bound.id,
+              runtime_call_id: bound.runtimeCallId,
+              binding_revision: bound.revision,
+              execution_epoch: task.epoch,
+              tool_identity: bound.toolIdentity,
+              intended_action: describeAction(bound.toolIdentity, bound.redactedArguments),
+              redacted_arguments: bound.redactedArguments,
+              argument_digest: bound.digest,
+              explainable: true,
             },
             opts,
           );
-          return {
-            call: c,
-            decision: deny(
-              "denied",
-              "tool not listed in toolPolicy",
-              `Mia denied ${c.toolIdentity}: it is not part of the configured policy.`,
-            ),
-          };
-        }
-        if (policy === "deny")
-          return {
-            call: c,
-            decision: deny(
-              "denied",
-              "denied by policy",
-              `Mia denied ${c.toolIdentity}: policy forbids it.`,
-            ),
-          };
-        if (!task.gateOpen)
-          return {
-            call: c,
-            decision: deny(
-              "blocked_gate",
-              "action gate closed by interruption",
-              "Mia blocked this call: the task is being interrupted.",
-              true,
-            ),
-          };
-        if (policy === "allow") {
-          const dispatched = this.record(
-            "tool_dispatched",
-            {
-              tool_call_id: c.id,
-              runtime_call_id: c.runtimeCallId,
-              tool_identity: c.toolIdentity,
-              policy,
-              via: "policy",
-            },
-            { ...opts, causedBy: evaluation.id },
-          );
-          this.deps.writer.updateToolCall(c.id, {
-            status: "dispatched",
-            dispatchEventId: dispatched.id,
+          this.deps.catalog.update("approvals", approvalId, {
+            requesting_event_id: requested.id,
           });
-          c.status = "dispatched";
-          return { call: c, decision: { behavior: "allow" } as PermissionDecision };
-        }
-        // ask: durable pending approval bound to (conversation, task, runtime call, revision, tool, digest, epoch).
-        const approvalId = this.deps.writer.createApproval({
-          toolCallId: c.id,
-          executionEpoch: task.epoch,
-          requestingEventId: null,
-        });
-        const requested = this.emit(
-          "approval_requested",
-          {
-            conversation_id: conversation.id,
-            task_id: task.id,
-            approval_id: approvalId,
-            tool_call_id: c.id,
-            runtime_call_id: c.runtimeCallId,
-            binding_revision: c.revision,
-            execution_epoch: task.epoch,
-            tool_identity: c.toolIdentity,
-            intended_action: describeAction(c.toolIdentity, c.redactedArguments),
-            redacted_arguments: c.redactedArguments,
-            argument_digest: c.digest,
-            explainable: true,
-          },
-          opts,
-        );
-        this.deps.catalog.update("approvals", approvalId, { requesting_event_id: requested.id });
-        this.deps.writer.updateToolCall(c.id, { status: "awaiting_approval" });
-        this.deps.writer.updateTask(task.id, { status: "awaiting_approval" });
-        c.status = "awaiting_approval";
-        c.approvalId = approvalId;
-        task.pendingApprovals.set(approvalId, c);
-        task.status = "awaiting_approval";
-        return { call: c, decision: null };
-      }));
+          this.deps.writer.updateToolCall(bound.id, { status: "awaiting_approval" });
+          this.deps.writer.updateTask(task.id, { status: "awaiting_approval" });
+          bound.status = "awaiting_approval";
+          bound.approvalId = approvalId;
+          task.pendingApprovals.set(approvalId, bound);
+          task.status = "awaiting_approval";
+          return { call: bound, decision: null };
+        },
+      ));
     } catch (error) {
-      this.deps.log(
-        `permission handling failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      this.deps.log(`permission handling failed: ${errorMessage(error)}`);
       return { behavior: "deny", message: "Mia could not record this call; it was not released." };
     }
     this.notifyToolCall(task, call);
@@ -1165,7 +1250,7 @@ export class Engine {
   private abandon(
     task: TaskState,
     call: ToolCallState,
-    resolve: (d: PermissionDecision) => void,
+    resolve: (decision: PermissionDecision) => void,
   ): void {
     if (call.resolve !== resolve) return;
     call.resolve = null;
@@ -1184,7 +1269,7 @@ export class Engine {
           this.emit(
             "approval_resolved",
             {
-              conversation_id: this.conversation!.id,
+              conversation_id: this.activeConversation.id,
               task_id: task.id,
               approval_id: approvalId,
               tool_call_id: call.id,
@@ -1214,62 +1299,60 @@ export class Engine {
     if (!conversation) return;
     const opts = { taskId: task.id, executionId: task.executionId };
     const actions = classifyActions(task);
-    const unknown = actions.some((a) => a.status === "unknown");
+    const unknown = actions.some((action) => action.status === "unknown");
     const { status, error } = classifyTask(task, result, unknown);
     const hooks = readHookEvidence(result.hookEvidencePath);
     const efforts = effortLevels(hooks);
     try {
       this.tx(() => {
         const { writer } = this.deps;
-        for (const revisions of task.calls.values())
-          for (const call of revisions)
-            writer.updateToolCall(call.id, { status: call.status, detail: detailFor(call.status) });
+        for (const call of task.calls.values().flatMap((revisions) => revisions))
+          writer.updateToolCall(call.id, { status: call.status, detail: detailFor(call.status) });
         for (const call of task.pendingApprovals.values())
           if (call.approvalId)
             writer.updateApproval(call.approvalId, { status: "expired", reason: "task ended" });
-        const retain = (
-          kind: string,
-          name: string,
-          bytes: Buffer,
-          relation: "runtime_transcript" | "task_output",
-          originalPath?: string,
-        ) => {
+        const retain = (artifact: {
+          kind: string;
+          name: string;
+          bytes: Buffer;
+          relation: "runtime_transcript" | "task_output";
+          originalPath?: string;
+        }) => {
           const art = writer.registerArtifact({
-            kind,
-            logicalName: name,
+            kind: artifact.kind,
+            logicalName: artifact.name,
             mimeType: "application/x-ndjson",
-            bytes,
+            bytes: artifact.bytes,
             producerExecutionId: task.executionId,
-            originalPath: originalPath ?? null,
+            originalPath: artifact.originalPath ?? null,
           });
           writer.linkArtifact({
             conversationId: conversation.id,
             artifactId: art.artifactId,
-            relation,
+            relation: artifact.relation,
             taskId: task.id,
           });
         };
         if (existsSync(result.streamLogPath))
-          retain(
-            "runtime_transcript",
-            `turn-${conversation.turnCount}.stream.jsonl`,
-            readFileSync(result.streamLogPath),
-            "runtime_transcript",
-            result.streamLogPath,
-          );
+          retain({
+            kind: "runtime_transcript",
+            name: `turn-${conversation.turnCount}.stream.jsonl`,
+            bytes: readFileSync(result.streamLogPath),
+            relation: "runtime_transcript",
+            originalPath: result.streamLogPath,
+          });
         if (hooks.length > 0)
-          retain(
-            "effort_evidence",
-            `turn-${conversation.turnCount}.hooks.jsonl`,
-            Buffer.from(hooks.map((h) => JSON.stringify(h)).join("\n") + "\n"),
-            "task_output",
-          );
+          retain({
+            kind: "effort_evidence",
+            name: `turn-${conversation.turnCount}.hooks.jsonl`,
+            bytes: Buffer.from(hooks.map((hook) => JSON.stringify(hook)).join("\n") + "\n"),
+            relation: "task_output",
+          });
         writer.updateExecution(task.executionId, {
-          status:
-            result.status === "completed" ? "completed" : task.interrupted ? "killed" : "failed",
+          status: executionStatusFor(task, result),
           endedAt: nowIso(),
           reportedModel: task.reportedModel,
-          reportedEffort: efforts.length === 1 ? (efforts[0] as string) : null,
+          reportedEffort: efforts.length === 1 ? (efforts[0] ?? null) : null,
           effortEvidence: {
             source: "PreToolUse hook",
             values: efforts,
@@ -1322,12 +1405,15 @@ export class Engine {
     if (task.interrupted || unknown) {
       // The runtime's own memory of a killed turn is incomplete (capability record L1); Mia's records are authoritative.
       const lines = actions
-        .filter((a) => a.status !== "denied")
-        .map((a) => `- ${a.tool_identity}: ${a.status}${a.detail ? ` (${a.detail})` : ""}`);
+        .filter((action) => action.status !== "denied")
+        .map(
+          (action) =>
+            `- ${action.tool_identity}: ${action.status}${action.detail ? ` (${action.detail})` : ""}`,
+        );
       conversation.pendingNote = `[Mia note, not from the user] Your previous turn was ${task.interrupted ? "interrupted by the user" : "ended by a runtime failure"}. Mia's records of tool calls in that turn:\n${lines.join("\n") || "- no tool calls"}\nAn "unknown" action may or may not have taken effect; do not repeat any of those actions unless the user asks again, and if they do, weigh whether a repeat could double an effect before calling.`;
     } else if (task.abandoned.length > 0) {
       const lines = task.abandoned.map(
-        (c) => `- ${c.toolIdentity} ${JSON.stringify(c.redactedArguments)}`,
+        (call) => `- ${call.toolIdentity} ${JSON.stringify(call.redactedArguments)}`,
       );
       conversation.pendingNote = `[Mia note, not from the user] In your previous turn the runtime abandoned the approval prompt for these calls before the user decided:\n${lines.join("\n")}\nMia never released them: they did not run and their outcome is known (nothing happened), not unknown. If you reported otherwise, correct it. Do not retry them unless the user asks again.`;
     }
@@ -1337,10 +1423,9 @@ export class Engine {
   private collectArtifacts(
     task: TaskState,
     call: ToolCallState,
-    content: unknown,
-    resultEventId: string,
+    result: { content: unknown; eventId: string },
   ): void {
-    const declared = extractDeclaredArtifact(content);
+    const declared = extractDeclaredArtifact(result.content);
     if (!declared) return;
     const { writer } = this.deps;
     let capture:
@@ -1371,12 +1456,13 @@ export class Engine {
             : { status: "retained", bytes };
       }
     }
+    const conversationId = this.activeConversation.id;
     const art = writer.registerArtifact({
       kind: "tool_output",
       logicalName: declared.name ?? declared.path,
       mimeType: declared.mime_type ?? "application/octet-stream",
       producerExecutionId: task.executionId,
-      producerEventId: resultEventId,
+      producerEventId: result.eventId,
       originalPath: declared.path,
       ...(capture.status === "retained"
         ? { bytes: capture.bytes }
@@ -1387,7 +1473,7 @@ export class Engine {
           }),
     });
     writer.linkArtifact({
-      conversationId: this.conversation!.id,
+      conversationId,
       artifactId: art.artifactId,
       relation: "tool_result",
       toolCallId: call.id,
@@ -1395,7 +1481,7 @@ export class Engine {
     });
     if (capture.status === "retained") {
       writer.linkArtifact({
-        conversationId: this.conversation!.id,
+        conversationId,
         artifactId: art.artifactId,
         relation: "task_output",
         taskId: task.id,
@@ -1409,7 +1495,7 @@ export class Engine {
           size: art.byteSize,
           original_path: declared.path,
         },
-        { taskId: task.id, executionId: task.executionId, causedBy: resultEventId },
+        { taskId: task.id, executionId: task.executionId, causedBy: result.eventId },
       );
     }
   }
@@ -1417,97 +1503,4 @@ export class Engine {
   async waitForIdle(): Promise<void> {
     await this.task?.finished;
   }
-}
-
-/** Final status of every call in the task: released-without-result is unknown; anything still held can never run. */
-function classifyActions(task: TaskState): EventPayload<"interruption_outcome">["actions"] {
-  const actions: EventPayload<"interruption_outcome">["actions"] = [];
-  for (const revisions of task.calls.values()) {
-    for (const call of revisions) {
-      if (call.status === "dispatched") call.status = "unknown";
-      if (call.status === "awaiting_approval" || call.status === "proposed")
-        call.status = task.interrupted ? "blocked_gate" : "invalidated";
-      actions.push({
-        tool_call_id: call.id,
-        tool_identity: call.toolIdentity,
-        status: call.status,
-        detail: detailFor(call.status),
-      });
-    }
-  }
-  return actions;
-}
-
-/** Task status is separate from action outcomes: an interrupted or completed task with an unknown action is outcome_unknown. */
-function classifyTask(
-  task: TaskState,
-  result: TurnResult,
-  unknown: boolean,
-): { status: TaskStatus; error?: string } {
-  if (task.interrupted) return { status: unknown ? "outcome_unknown" : "interrupted" };
-  if (result.status === "completed") return { status: unknown ? "outcome_unknown" : "completed" };
-  return {
-    status: unknown ? "outcome_unknown" : "failed",
-    error: result.error ?? "runtime failed",
-  };
-}
-
-/** Distinct effective-effort values reported by the PreToolUse hook (`effort.level`, else CLAUDE_EFFORT). */
-function effortLevels(hooks: Array<Record<string, unknown>>): string[] {
-  const levels = hooks.map((h) => {
-    const effort = h.effort as { level?: string } | string | undefined;
-    return (
-      (typeof effort === "object" && effort ? effort.level : effort) ??
-      (h.env_claude_effort as string | undefined)
-    );
-  });
-  return [...new Set(levels.filter((l): l is string => typeof l === "string"))];
-}
-
-function detailFor(status: ToolCallStatus): string | undefined {
-  switch (status) {
-    case "unknown":
-      return "released; no result observed; effect unknown";
-    case "blocked_gate":
-      return "not released: action gate closed";
-    case "invalidated":
-      return "never released: proposal or pending approval invalidated";
-    default:
-      return undefined;
-  }
-}
-
-function describeAction(toolIdentity: string, args: unknown): string {
-  const m = /^mcp__(.+?)__(.+)$/.exec(toolIdentity);
-  const argText = JSON.stringify(args ?? {});
-  return m
-    ? `Call tool "${m[2]}" on MCP server "${m[1]}" with arguments ${argText}`
-    : `Call ${toolIdentity} with arguments ${argText}`;
-}
-
-interface DeclaredArtifact {
-  path: string;
-  sha256?: string;
-  name?: string;
-  mime_type?: string;
-}
-
-export function extractDeclaredArtifact(content: unknown): DeclaredArtifact | null {
-  const texts: string[] =
-    typeof content === "string"
-      ? [content]
-      : Array.isArray(content)
-        ? content
-            .map((b) => (b as { text?: unknown })?.text)
-            .filter((t): t is string => typeof t === "string")
-        : [];
-  for (const text of texts) {
-    try {
-      const parsed = JSON.parse(text) as { artifact?: DeclaredArtifact };
-      if (parsed?.artifact && typeof parsed.artifact.path === "string") return parsed.artifact;
-    } catch {
-      /* not JSON */
-    }
-  }
-  return null;
 }

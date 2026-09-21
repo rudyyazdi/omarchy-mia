@@ -14,24 +14,26 @@ export interface ProvenanceSummary {
   architecture_revision: string | null;
   server_build: Omit<BuildInfo, "local_changes">;
   runtime_version: string | null;
-  entries: Array<{
+  entries: {
     role: string;
     availability: string;
     artifact_id: string | null;
     reason: string | null;
-  }>;
+  }[];
 }
 
 /**
  * Snapshot everything that shaped this conversation, immutably, at creation time. Later edits to the
  * prompt, configuration or source tree do not change retained objects.
  */
-export function createConversationProvenance(
-  writer: RecordWriter,
-  profile: Profile,
-  clientBuild: unknown,
-  sourceRoot: string,
-): ProvenanceSummary {
+export const createConversationProvenance = (input: {
+  writer: RecordWriter;
+  profile: Profile;
+  /** Client build as reported at connection time. */
+  clientBuild: unknown;
+  sourceRoot: string;
+}): ProvenanceSummary => {
+  const { writer, profile, clientBuild, sourceRoot } = input;
   const setId = writer.createProvenanceSet(
     `conversation provenance for profile ${profile.profile}`,
   );
@@ -172,14 +174,14 @@ export function createConversationProvenance(
 
   // Server build, plus retained local changes for dirty trees.
   const build = collectBuildInfo("mia-server", sourceRoot);
-  const { local_changes, ...buildSummary } = build;
+  const { local_changes: localChanges, ...buildSummary } = build;
   const buildArt = add("server_build", {
     text: JSON.stringify(buildSummary, null, 2),
     version: build.commit ?? "no-git",
   });
-  if (local_changes && buildArt) {
+  if (localChanges && buildArt) {
     const diffArt = add("server_local_changes", {
-      text: local_changes,
+      text: localChanges,
       version: build.local_changes_digest,
       mime: "text/x-diff",
       logicalName: "server-local-changes.diff",
@@ -203,4 +205,4 @@ export function createConversationProvenance(
     runtime_version: staticCaps.runtime_version,
     entries,
   };
-}
+};

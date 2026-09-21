@@ -1,8 +1,8 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
 import { dirname } from "node:path";
+import { match } from "ts-pattern";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
   ClientCommandSchema,
@@ -15,7 +15,7 @@ import {
   type ServerEvent,
 } from "@mia/protocol";
 import { nowIso, type RecordWriter } from "@mia/records";
-import type { CommandResult, Engine } from "./engine.ts";
+import type { CommandContext, CommandResult, Engine } from "./engine.ts";
 
 export interface GatewayOptions {
   host: "127.0.0.1";
@@ -35,7 +35,7 @@ export interface GatewayHandle {
 }
 
 /** Load or create the local client secret (0600, outside Git). Never logged. */
-export function loadOrCreateSecret(path: string): string {
+export const loadOrCreateSecret = (path: string): string => {
   if (existsSync(path)) {
     const secret = readFileSync(path, "utf8").trim();
     if (secret.length < 32)
@@ -49,7 +49,7 @@ export function loadOrCreateSecret(path: string): string {
   chmodSync(path, 0o600);
   registerSecret(secret);
   return secret;
-}
+};
 
 interface ConnectionState {
   id: string;
@@ -59,11 +59,28 @@ interface ConnectionState {
   opened: boolean;
 }
 
+interface AckReply {
+  commandId: string;
+  disposition: "accepted" | "duplicate" | "rejected";
+  error?: { code: ErrorCode; message: string };
+  result?: Record<string, unknown>;
+}
+
+const dispatch = (engine: Engine, ctx: CommandContext, command: ClientCommand): CommandResult =>
+  match(command)
+    .with({ type: "start_conversation" }, () => engine.startConversation(ctx))
+    .with({ type: "submit_text" }, (cmd) => engine.submitText(ctx, cmd.payload))
+    .with({ type: "approval_decision" }, (cmd) => engine.approvalDecision(ctx, cmd.payload))
+    .with({ type: "interrupt_task" }, (cmd) => engine.interruptTask(ctx, cmd.payload))
+    .with({ type: "diagnostic_snapshot" }, (cmd) => engine.diagnosticSnapshot(ctx, cmd.payload))
+    .with({ type: "heartbeat" }, (cmd) => engine.heartbeat(ctx, cmd.payload))
+    .exhaustive();
+
 /**
  * Client gateway: loopback-only, bearer-authenticated WebSocket. Validates every envelope before any state
  * changes, deduplicates command IDs per connection, acknowledges every command, and delivers events.
  */
-export async function startGateway(options: GatewayOptions): Promise<GatewayHandle> {
+export const startGateway = async (options: GatewayOptions): Promise<GatewayHandle> => {
   const secret = loadOrCreateSecret(options.secretFile);
   const secretBuf = Buffer.from(secret);
   const httpServer: Server = createServer((_, res) => {
@@ -78,9 +95,9 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
 
   const authenticate = (req: IncomingMessage): boolean => {
     const header = req.headers.authorization ?? "";
-    const m = /^Bearer\s+(.+)$/.exec(header);
-    if (!m) return false;
-    const provided = Buffer.from(m[1]!.trim());
+    const token = /^Bearer\s+(.+)$/.exec(header)?.[1];
+    if (token === undefined) return false;
+    const provided = Buffer.from(token.trim());
     return provided.length === secretBuf.length && timingSafeEqual(provided, secretBuf);
   };
 
@@ -99,12 +116,8 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
     conn.socket.send(JSON.stringify(event));
   };
 
-  const ack = (
-    conn: ConnectionState,
-    commandId: string,
-    disposition: "accepted" | "duplicate" | "rejected",
-    extra: { error?: { code: ErrorCode; message: string }; result?: Record<string, unknown> } = {},
-  ) => {
+  const ack = (conn: ConnectionState, reply: AckReply) => {
+    const { commandId, ...rest } = reply;
     const event: ServerEvent = {
       protocol_version: PROTOCOL_VERSION,
       message_id: randomUUID(),
@@ -112,7 +125,7 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
       conversation_id: options.engine.conversation?.id ?? null,
       sequence: null,
       server_time: nowIso(),
-      payload: { command_id: commandId, disposition, ...extra },
+      payload: { command_id: commandId, ...rest },
     };
     if (conn.socket.readyState === conn.socket.OPEN) conn.socket.send(JSON.stringify(event));
   };
@@ -120,10 +133,9 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
   const rejectRaw = (
     conn: ConnectionState,
     commandId: string,
-    code: ErrorCode,
-    message: string,
+    error: { code: ErrorCode; message: string },
   ) => {
-    ack(conn, commandId, "rejected", { error: { code, message } });
+    ack(conn, { commandId, disposition: "rejected", error });
   };
 
   wss.on("connection", (socket) => {
@@ -139,56 +151,52 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
 
     socket.on("message", (data, isBinary) => {
       if (isBinary)
-        return rejectRaw(conn, "unknown", "invalid_message", "binary frames are not accepted");
+        return rejectRaw(conn, "unknown", {
+          code: "invalid_message",
+          message: "binary frames are not accepted",
+        });
       const text = data.toString("utf8");
       if (text.length > LIMITS.maxEnvelopeBytes)
-        return rejectRaw(
-          conn,
-          "unknown",
-          "invalid_message",
-          `envelope exceeds ${LIMITS.maxEnvelopeBytes} bytes`,
-        );
+        return rejectRaw(conn, "unknown", {
+          code: "invalid_message",
+          message: `envelope exceeds ${LIMITS.maxEnvelopeBytes} bytes`,
+        });
       let json: unknown;
       try {
         json = JSON.parse(text);
       } catch {
-        return rejectRaw(conn, "unknown", "invalid_message", "envelope is not valid JSON");
+        return rejectRaw(conn, "unknown", {
+          code: "invalid_message",
+          message: "envelope is not valid JSON",
+        });
       }
       const head = EnvelopeHeadSchema.safeParse(json);
       const commandId =
         head.success && typeof head.data.message_id === "string" ? head.data.message_id : "unknown";
       if (!head.success)
-        return rejectRaw(
-          conn,
-          commandId,
-          "invalid_message",
-          "envelope must carry protocol_version, message_id, client_id, type and payload",
-        );
+        return rejectRaw(conn, commandId, {
+          code: "invalid_message",
+          message: "envelope must carry protocol_version, message_id, client_id, type and payload",
+        });
       if (head.data.protocol_version !== PROTOCOL_VERSION) {
-        return rejectRaw(
-          conn,
-          commandId,
-          "unsupported_protocol_version",
-          `this server speaks protocol_version ${PROTOCOL_VERSION}; received ${JSON.stringify(head.data.protocol_version)}. Upgrade the client or server.`,
-        );
+        return rejectRaw(conn, commandId, {
+          code: "unsupported_protocol_version",
+          message: `this server speaks protocol_version ${PROTOCOL_VERSION}; received ${JSON.stringify(head.data.protocol_version)}. Upgrade the client or server.`,
+        });
       }
       const parsed = ClientCommandSchema.safeParse(json);
       if (!parsed.success) {
-        return rejectRaw(
-          conn,
-          commandId,
-          "invalid_message",
-          `invalid ${String(head.data.type)} command: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
-        );
+        return rejectRaw(conn, commandId, {
+          code: "invalid_message",
+          message: `invalid ${String(head.data.type)} command: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
+        });
       }
       const command = parsed.data;
       if (conn.clientId && conn.clientId !== command.client_id)
-        return rejectRaw(
-          conn,
-          commandId,
-          "invalid_message",
-          "client_id changed within a connection",
-        );
+        return rejectRaw(conn, commandId, {
+          code: "invalid_message",
+          message: "client_id changed within a connection",
+        });
       try {
         if (!conn.opened) {
           conn.clientId = command.client_id;
@@ -207,9 +215,7 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
         }
         options.writer.touchConnection(conn.id);
         const conversationId =
-          "conversation_id" in command.payload
-            ? (command.payload.conversation_id as string | null)
-            : null;
+          "conversation_id" in command.payload ? command.payload.conversation_id : null;
         const recorded = options.writer.recordCommand({
           connectionId: conn.id,
           clientId: command.client_id,
@@ -220,18 +226,17 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
         });
         if (recorded.duplicate) {
           if (!recorded.sameDigest)
-            return rejectRaw(
-              conn,
-              commandId,
-              "duplicate_command_conflict",
-              "message_id reused with a different payload; nothing executed",
-            );
-          return ack(
-            conn,
+            return rejectRaw(conn, commandId, {
+              code: "duplicate_command_conflict",
+              message: "message_id reused with a different payload; nothing executed",
+            });
+          return ack(conn, {
             commandId,
-            "duplicate",
-            recorded.error ? { error: { code: "invalid_state", message: recorded.error } } : {},
-          );
+            disposition: "duplicate",
+            ...(recorded.error
+              ? { error: { code: "invalid_state", message: recorded.error } }
+              : {}),
+          });
         }
         const result = dispatch(
           options.engine,
@@ -244,16 +249,25 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
           command,
         );
         if (result.ok) {
-          options.writer.finishCommand(recorded.commandId, "accepted", null, null);
-          ack(conn, commandId, "accepted", result.result ? { result: result.result } : {});
+          options.writer.finishCommand(recorded.commandId, {
+            disposition: "accepted",
+            error: null,
+            resultEventId: null,
+          });
+          ack(conn, {
+            commandId,
+            disposition: "accepted",
+            ...(result.result ? { result: result.result } : {}),
+          });
         } else {
-          options.writer.finishCommand(
-            recorded.commandId,
-            "rejected",
-            `${result.code}: ${result.message}`,
-            null,
-          );
-          ack(conn, commandId, "rejected", {
+          options.writer.finishCommand(recorded.commandId, {
+            disposition: "rejected",
+            error: `${result.code}: ${result.message}`,
+            resultEventId: null,
+          });
+          ack(conn, {
+            commandId,
+            disposition: "rejected",
             error: { code: result.code, message: result.message },
           });
         }
@@ -261,12 +275,10 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
         options.log(
           `command handling failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
         );
-        rejectRaw(
-          conn,
-          commandId,
-          "internal",
-          "internal error while handling the command; nothing executed",
-        );
+        rejectRaw(conn, commandId, {
+          code: "internal",
+          message: "internal error while handling the command; nothing executed",
+        });
       }
     });
 
@@ -287,7 +299,9 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
     httpServer.once("error", reject);
     httpServer.listen(options.port, options.host, () => resolve());
   });
-  const address = httpServer.address() as AddressInfo;
+  const address = httpServer.address();
+  if (address === null || typeof address === "string")
+    throw new Error("gateway is not listening on a TCP port");
   return {
     url: `ws://${options.host}:${address.port}`,
     port: address.port,
@@ -301,25 +315,4 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
       });
     },
   };
-}
-
-function dispatch(
-  engine: Engine,
-  ctx: { connectionId: string; clientId: string; commandId: string; clientBuild: unknown },
-  command: ClientCommand,
-): CommandResult {
-  switch (command.type) {
-    case "start_conversation":
-      return engine.startConversation(ctx);
-    case "submit_text":
-      return engine.submitText(ctx, command.payload);
-    case "approval_decision":
-      return engine.approvalDecision(ctx, command.payload);
-    case "interrupt_task":
-      return engine.interruptTask(ctx, command.payload);
-    case "diagnostic_snapshot":
-      return engine.diagnosticSnapshot(ctx, command.payload);
-    case "heartbeat":
-      return engine.heartbeat(ctx, command.payload);
-  }
-}
+};

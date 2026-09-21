@@ -1,13 +1,17 @@
-import { parseArgs } from "node:util";
+import { Command } from "commander";
+import { errorMessage } from "@mia/protocol";
 import { startServer } from "./server.ts";
 
-const { values } = parseArgs({ options: { config: { type: "string" } } });
-if (!values.config) {
-  console.error("usage: mia-server --config <profile.json>");
-  process.exit(2);
-}
+const program = new Command()
+  .name("mia-server")
+  .requiredOption("--config <profile.json>", "server profile to run")
+  // Usage errors exit 2 (as before commander); --help and --version keep commander's exit 0.
+  .exitOverride((commanderError) => process.exit(commanderError.exitCode === 0 ? 0 : 2))
+  .parse();
+const { config } = program.opts<{ config: string }>();
+
 try {
-  const server = await startServer({ profilePath: values.config });
+  const server = await startServer({ profilePath: config });
   const shutdown = async () => {
     await server.close();
     process.exit(0);
@@ -15,6 +19,6 @@ try {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 } catch (error) {
-  console.error(`mia-server: ${error instanceof Error ? error.message : String(error)}`);
+  console.error(`mia-server: ${errorMessage(error)}`);
   process.exit(1);
 }

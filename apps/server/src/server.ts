@@ -1,6 +1,5 @@
 import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { ApprovalBridge, ClaudeCodeAdapter } from "@mia/agent-adapter";
 import { Catalog, RecordWriter } from "@mia/records";
 import { loadProfile, type Profile } from "./config.ts";
@@ -16,16 +15,22 @@ export interface MiaServer {
   close(): Promise<void>;
 }
 
-export const SOURCE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+export const SOURCE_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 
-export async function startServer(input: {
+const resolveProfile = (input: { profilePath?: string; profile?: Profile }): Profile => {
+  if (input.profile) return input.profile;
+  if (input.profilePath !== undefined) return loadProfile(input.profilePath);
+  throw new Error("startServer needs a profile or a profilePath");
+};
+
+export const startServer = async (input: {
   profilePath?: string;
   profile?: Profile;
   adapter?: TurnRunner;
-  log?: (m: string) => void;
-}): Promise<MiaServer> {
-  const profile = input.profile ?? loadProfile(input.profilePath!);
-  const log = input.log ?? ((m: string) => process.stderr.write(`[mia-server] ${m}\n`));
+  log?: (message: string) => void;
+}): Promise<MiaServer> => {
+  const profile = resolveProfile(input);
+  const log = input.log ?? ((message: string) => process.stderr.write(`[mia-server] ${message}\n`));
   mkdirSync(profile.stateDirectory, { recursive: true, mode: 0o700 });
   const catalog = new Catalog(profile.stateDirectory);
   const writer = new RecordWriter(catalog);
@@ -64,4 +69,4 @@ export async function startServer(input: {
       catalog.close();
     },
   };
-}
+};

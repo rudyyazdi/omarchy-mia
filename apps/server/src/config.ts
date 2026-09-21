@@ -7,6 +7,7 @@ import {
   validateRuntimeConfig,
   type RuntimeConfig,
 } from "@mia/agent-adapter";
+import { errorMessage } from "@mia/protocol";
 
 /**
  * A profile is explicit about everything. Relative paths resolve against the profile file's directory.
@@ -33,8 +34,8 @@ export const ProfileSchema = z
   .strict();
 export type Profile = z.infer<typeof ProfileSchema>;
 
-function substitute(text: string, env: NodeJS.ProcessEnv): string {
-  return text.replace(/\$\{([A-Z0-9_]+)\}/g, (_, name: string) => {
+const substitute = (text: string, env: NodeJS.ProcessEnv): string =>
+  text.replace(/\$\{([A-Z0-9_]+)\}/g, (_, name: string) => {
     const value = env[name];
     if (value === undefined)
       throw new ConfigurationError(
@@ -42,33 +43,28 @@ function substitute(text: string, env: NodeJS.ProcessEnv): string {
       );
     return value;
   });
-}
 
-export function loadProfile(path: string, env: NodeJS.ProcessEnv = process.env): Profile {
+export const loadProfile = (path: string, env: NodeJS.ProcessEnv = process.env): Profile => {
   const absolute = resolve(path);
   let raw: string;
   try {
     raw = readFileSync(absolute, "utf8");
   } catch (error) {
-    throw new ConfigurationError(
-      `cannot read profile ${absolute}: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    throw new ConfigurationError(`cannot read profile ${absolute}: ${errorMessage(error)}`);
   }
   let json: unknown;
   try {
     json = JSON.parse(substitute(raw, env));
   } catch (error) {
-    throw new ConfigurationError(
-      `profile ${absolute} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    throw new ConfigurationError(`profile ${absolute} is not valid JSON: ${errorMessage(error)}`);
   }
   const parsed = ProfileSchema.safeParse(json);
   if (!parsed.success)
     throw new ConfigurationError(
-      `profile ${absolute} is invalid: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
+      `profile ${absolute} is invalid: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
     );
   const base = dirname(absolute);
-  const abs = (p: string) => (isAbsolute(p) ? p : resolve(base, p));
+  const abs = (candidate: string) => (isAbsolute(candidate) ? candidate : resolve(base, candidate));
   const profile: Profile = {
     ...parsed.data,
     stateDirectory: abs(parsed.data.stateDirectory),
@@ -83,6 +79,6 @@ export function loadProfile(path: string, env: NodeJS.ProcessEnv = process.env):
   };
   validateRuntimeConfig(profile.runtime);
   return profile;
-}
+};
 
 export type { RuntimeConfig };
