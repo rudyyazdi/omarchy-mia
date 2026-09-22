@@ -11,42 +11,48 @@ import {
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { sha256Hex } from "@mia/protocol";
+import { z } from "zod";
 import { parseJson, type Catalog } from "./catalog.ts";
 import { ObjectStore } from "./objects.ts";
-import { snapshotConversation, type UnresolvedReference } from "./queries.ts";
+import { snapshotConversation } from "./queries.ts";
 import { renderReport } from "./report.ts";
-import { EXPORT_TABLES, SCHEMA_VERSION, type ExportTable, type SnapshotTables } from "./schema.ts";
+import { EXPORT_TABLES, SCHEMA_VERSION, type ExportTable } from "./schema.ts";
 
 export const EXPORT_VERSION = 1;
 
-export interface ExportedFile {
-  sha256: string;
-  bytes: number;
-}
+const ExportedFileSchema = z.object({ sha256: z.string(), bytes: z.number() });
+export type ExportedFile = z.infer<typeof ExportedFileSchema>;
 
-export interface ExportManifest {
-  export_version: number;
-  schema_version: number;
-  root_conversation_id: string;
-  captured_at: string;
-  cutoff_sequence: number;
-  complete: boolean;
-  partial_reasons: string[];
-  record_counts: Record<string, number>;
-  artifact_count: number;
-  coverage: Record<string, number>;
-  objects: {
-    included: number;
-    missing: string[];
-    corrupt: string[];
-    external_only: number;
-    pending: number;
-  };
-  unresolved_references: UnresolvedReference[];
-  ongoing_tasks: string[];
-  redaction: string;
-  files: Record<string, ExportedFile>;
-}
+const ManifestVersionsSchema = z.object({
+  export_version: z.number(),
+  schema_version: z.number(),
+});
+
+export const ExportManifestSchema = ManifestVersionsSchema.extend({
+  root_conversation_id: z.string(),
+  captured_at: z.string(),
+  cutoff_sequence: z.number(),
+  complete: z.boolean(),
+  partial_reasons: z.array(z.string()),
+  record_counts: z.record(z.string(), z.number()),
+  artifact_count: z.number(),
+  coverage: z.record(z.string(), z.number()),
+  objects: z.object({
+    included: z.number(),
+    missing: z.array(z.string()),
+    corrupt: z.array(z.string()),
+    external_only: z.number(),
+    pending: z.number(),
+  }),
+  unresolved_references: z.array(
+    z.object({ table: z.string(), id: z.string(), reason: z.string() }),
+  ),
+  ongoing_tasks: z.array(z.string()),
+  redaction: z.string(),
+  files: z.record(z.string(), ExportedFileSchema),
+});
+
+export type ExportManifest = z.infer<typeof ExportManifestSchema>;
 
 /** Where a table's rows live inside an export directory. */
 const tableFile = (table: ExportTable): string =>
@@ -204,20 +210,43 @@ const walk = (dir: string): string[] =>
 
 const idsOf = (rows: { id: string }[]): Set<string> => new Set(rows.map((row) => row.id));
 
+const failedVerification = (problem: string): VerificationResult => ({
+  ok: false,
+  complete: false,
+  problems: [problem],
+  checked_files: 0,
+  checked_objects: 0,
+});
+
+const RecordIdSchema = z.object({ id: z.string() });
+
 /** Verify an export offline: file checksums, object digests, referential integrity, report safety. */
 export const verifyExport = (dir: string): VerificationResult => {
   const problems: string[] = [];
   const manifestPath = join(dir, "manifest.json");
-  if (!existsSync(manifestPath))
-    return {
-      ok: false,
-      complete: false,
-      problems: ["manifest.json missing"],
-      checked_files: 0,
-      checked_objects: 0,
-    };
-  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- the manifest was written by exportConversation in this package; verification below checks its contents against the files
-  const manifest = parseJson(readFileSync(manifestPath, "utf8")) as ExportManifest;
+  if (!existsSync(manifestPath)) return failedVerification("manifest.json missing");
+  let manifestJson: unknown;
+  try {
+    manifestJson = parseJson(readFileSync(manifestPath, "utf8"));
+  } catch {
+    return failedVerification("manifest.json invalid: unable to read JSON");
+  }
+  // Other versions may have different manifest and row shapes; inspect only the header first.
+  const versions = ManifestVersionsSchema.safeParse(manifestJson);
+  if (!versions.success)
+    return failedVerification(`manifest.json invalid: ${versions.error.message}`);
+  for (const [name, expected] of Object.entries({
+    export_version: EXPORT_VERSION,
+    schema_version: SCHEMA_VERSION,
+  })) {
+    const actual =
+      name === "export_version" ? versions.data.export_version : versions.data.schema_version;
+    if (actual !== expected)
+      return failedVerification(`${name} ${actual} is not supported (expected ${expected})`);
+  }
+  const parsed = ExportManifestSchema.safeParse(manifestJson);
+  if (!parsed.success) return failedVerification(`manifest.json invalid: ${parsed.error.message}`);
+  const manifest = parsed.data;
   let checkedFiles = 0;
   for (const [rel, expected] of Object.entries(manifest.files)) {
     const path = join(dir, rel);
@@ -235,39 +264,66 @@ export const verifyExport = (dir: string): VerificationResult => {
     const rel = relative(dir, file);
     if (rel !== "manifest.json" && !manifest.files[rel]) problems.push(`unlisted file: ${rel}`);
   }
-  // Rows are read back as the row types this package wrote; a line that is not JSON is reported.
-  const readTable = <Table extends ExportTable>(table: Table): SnapshotTables[Table] => {
+  // Validate only row identities and fields used below, not the full catalog schemas.
+  const readTable = <Row>(table: ExportTable, schema: z.ZodType<Row>): Row[] => {
     const path = join(dir, tableFile(table));
-    const rows: unknown[] = [];
+    const rows: Row[] = [];
     if (existsSync(path)) {
       for (const line of readFileSync(path, "utf8").split("\n").filter(Boolean)) {
         try {
-          rows.push(parseJson(line));
+          const parsedRow = schema.safeParse(parseJson(line));
+          if (parsedRow.success) rows.push(parsedRow.data);
+          else problems.push(`unparsable record in ${table}`);
         } catch {
           problems.push(`unparsable record in ${table}`);
         }
       }
     }
-    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- rows are read back from the JSONL this package wrote; the manifest digest verifies the bytes
-    return rows as SnapshotTables[Table];
+    return rows;
   };
-  const tables: SnapshotTables = {
-    objects: readTable("objects"),
-    provenance_sets: readTable("provenance_sets"),
-    artifacts: readTable("artifacts"),
-    provenance_entries: readTable("provenance_entries"),
-    conversations: readTable("conversations"),
-    clients: readTable("clients"),
-    client_connections: readTable("client_connections"),
-    tasks: readTable("tasks"),
-    executions: readTable("executions"),
-    events: readTable("events"),
-    commands: readTable("commands"),
-    tool_calls: readTable("tool_calls"),
-    approvals: readTable("approvals"),
-    diagnostics: readTable("diagnostics"),
-    artifact_links: readTable("artifact_links"),
-    artifact_dependencies: readTable("artifact_dependencies"),
+  const tables = {
+    objects: readTable("objects", z.object({ digest: z.string() })),
+    provenance_sets: readTable("provenance_sets", RecordIdSchema),
+    artifacts: readTable(
+      "artifacts",
+      RecordIdSchema.extend({
+        capture_status: z.string(),
+        object_digest: z.string().nullable(),
+      }),
+    ),
+    provenance_entries: readTable(
+      "provenance_entries",
+      RecordIdSchema.extend({
+        artifact_id: z.string().nullable(),
+      }),
+    ),
+    conversations: readTable("conversations", RecordIdSchema),
+    clients: readTable("clients", RecordIdSchema),
+    client_connections: readTable("client_connections", RecordIdSchema),
+    tasks: readTable("tasks", RecordIdSchema),
+    executions: readTable("executions", RecordIdSchema),
+    events: readTable(
+      "events",
+      RecordIdSchema.extend({
+        sequence: z.number(),
+        task_id: z.string().nullable(),
+        caused_by_event_id: z.string().nullable(),
+      }),
+    ),
+    commands: readTable("commands", RecordIdSchema),
+    tool_calls: readTable("tool_calls", RecordIdSchema.extend({ task_id: z.string() })),
+    approvals: readTable("approvals", RecordIdSchema.extend({ tool_call_id: z.string() })),
+    diagnostics: readTable("diagnostics", RecordIdSchema),
+    artifact_links: readTable("artifact_links", RecordIdSchema.extend({ artifact_id: z.string() })),
+    // These two tables use a digest or composite key rather than an id column.
+    artifact_dependencies: readTable(
+      "artifact_dependencies",
+      z.object({
+        parent_artifact_id: z.string(),
+        required_artifact_id: z.string(),
+        relation: z.string(),
+      }),
+    ),
   };
   for (const table of EXPORT_TABLES) {
     const count = tables[table].length;
