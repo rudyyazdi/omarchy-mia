@@ -113,8 +113,15 @@ jobs:
       - name: Prefer post-review.py from the base commit
         run: |
           trusted=.trusted-review/.github/scripts/post-review.py
-          test -f "$trusted"
-          echo "POST_REVIEW_PY=$trusted" >> "$GITHUB_ENV"
+          if [ -f "$trusted" ]; then
+            echo "POST_REVIEW_PY=$trusted" >> "$GITHUB_ENV"
+          elif [ ! -e .trusted-review/.github/scripts ]; then
+            echo "Base commit predates post-review.py; using the PR copy for its initial introduction"
+            echo "POST_REVIEW_PY=.github/scripts/post-review.py" >> "$GITHUB_ENV"
+          else
+            echo "Trusted post-review.py is missing from the base checkout" >&2
+            exit 1
+          fi
       - name: Write PR diff for the reviewer
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -240,8 +247,15 @@ jobs:
       - name: Prefer post-review.py from the base commit
         run: |
           trusted=.trusted-review/.github/scripts/post-review.py
-          test -f "$trusted"
-          echo "POST_REVIEW_PY=$trusted" >> "$GITHUB_ENV"
+          if [ -f "$trusted" ]; then
+            echo "POST_REVIEW_PY=$trusted" >> "$GITHUB_ENV"
+          elif [ ! -e .trusted-review/.github/scripts ]; then
+            echo "Base commit predates post-review.py; using the PR copy for its initial introduction"
+            echo "POST_REVIEW_PY=.github/scripts/post-review.py" >> "$GITHUB_ENV"
+          else
+            echo "Trusted post-review.py is missing from the base checkout" >&2
+            exit 1
+          fi
       - name: Write PR diff for the reviewer
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
