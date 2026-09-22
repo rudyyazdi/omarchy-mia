@@ -46,6 +46,7 @@ export const catalogPaths = (root: string): CatalogPaths => ({
 export class Catalog {
   readonly db: DatabaseSync;
   readonly paths: CatalogPaths;
+  private closed = false;
 
   constructor(root: string, options: { readonly?: boolean } = {}) {
     this.paths = catalogPaths(root);
@@ -134,7 +135,10 @@ export class Catalog {
     return row?.next ?? 1;
   }
 
+  /** Idempotent: node:sqlite throws on an already closed database, and shutdown paths can run twice. */
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.db.close();
   }
 }
