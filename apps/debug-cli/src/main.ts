@@ -23,16 +23,12 @@ interface GlobalOptions {
   json: boolean;
 }
 
-const USAGE = `usage:
-  mia debug conversations                       [--state DIR]
-  mia debug conversation <conversation-id>      [--state DIR] [--json]
-  mia debug artifacts <conversation-id>         [--state DIR]
-  mia debug export <conversation-id> --output <directory> [--state DIR]
-  mia debug verify <export-directory>
-  mia debug reconcile                           [--state DIR]`;
-
+/**
+ * Bad arguments exit 2 with commander's own help for `mia debug` on stderr, which lists the
+ * subcommands commander already defines plus the global options, so no synopsis is written twice.
+ */
 const usage: () => never = () => {
-  console.error(USAGE);
+  console.error(debug.helpInformation());
   process.exit(2);
 };
 
@@ -48,7 +44,8 @@ const program = new Command()
     if (error.exitCode === 0) process.exit(0);
     usage();
   })
-  .configureOutput({ writeErr: () => undefined });
+  .configureOutput({ writeErr: () => undefined })
+  .configureHelp({ showGlobalOptions: true });
 
 const options = () => program.opts<GlobalOptions>();
 const stateDir = () => resolve(options().state ?? defaultStateDir());
