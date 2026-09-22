@@ -32,41 +32,55 @@ export const startServer = async (input: {
   const profile = resolveProfile(input);
   const log = input.log ?? ((message: string) => process.stderr.write(`[mia-server] ${message}\n`));
   mkdirSync(profile.stateDirectory, { recursive: true, mode: 0o700 });
+  // Acquire in order; on any throw release what is already held, in reverse, before rethrowing.
   const catalog = new Catalog(profile.stateDirectory);
-  const writer = new RecordWriter(catalog);
-  const bridge = new ApprovalBridge();
-  await bridge.start();
-  const adapter: TurnRunner = input.adapter ?? new ClaudeCodeAdapter(profile.runtime, bridge);
-  const engine = new Engine({
-    profile,
-    catalog,
-    writer,
-    adapter,
-    sourceRoot: SOURCE_ROOT,
-    log,
-  });
-  const gateway = await startGateway({
-    host: profile.server.host,
-    port: profile.server.port,
-    secretFile: profile.server.secretFile,
-    engine,
-    writer,
-    log,
-  });
-  engine.send = gateway.send;
-  log(
-    `listening on ${gateway.url} (profile ${profile.profile}, model ${profile.runtime.model}, effort ${profile.runtime.effort})`,
-  );
-  return {
-    profile,
-    gateway,
-    engine,
-    catalog,
-    bridge,
-    close: async () => {
-      await gateway.close();
+  try {
+    const writer = new RecordWriter(catalog);
+    const bridge = new ApprovalBridge();
+    await bridge.start();
+    try {
+      const adapter: TurnRunner = input.adapter ?? new ClaudeCodeAdapter(profile.runtime, bridge);
+      const engine = new Engine({
+        profile,
+        catalog,
+        writer,
+        adapter,
+        sourceRoot: SOURCE_ROOT,
+        log,
+      });
+      const gateway = await startGateway({
+        host: profile.server.host,
+        port: profile.server.port,
+        secretFile: profile.server.secretFile,
+        engine,
+        writer,
+        log,
+      });
+      engine.send = gateway.send;
+      log(
+        `listening on ${gateway.url} (profile ${profile.profile}, model ${profile.runtime.model}, effort ${profile.runtime.effort})`,
+      );
+      let shutdownStarted: Promise<void> | null = null;
+      const shutdown = async () => {
+        await gateway.close();
+        await bridge.close();
+        catalog.close();
+      };
+      return {
+        profile,
+        gateway,
+        engine,
+        catalog,
+        bridge,
+        // Memoised: SIGINT then SIGTERM must await the one shutdown, not release these resources twice.
+        close: () => (shutdownStarted ??= shutdown()),
+      };
+    } catch (error) {
       await bridge.close();
-      catalog.close();
-    },
-  };
+      throw error;
+    }
+  } catch (error) {
+    catalog.close();
+    throw error;
+  }
 };

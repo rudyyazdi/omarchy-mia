@@ -300,18 +300,22 @@ export const startFixture = async (options: FixtureOptions): Promise<FixtureHand
   if (harnessAddress === null || typeof harnessAddress === "string")
     throw new Error("harness server did not bind a TCP port");
 
+  let shutdownStarted: Promise<void> | null = null;
+  const shutdown = async () => {
+    for (const call of pending.values()) call.release();
+    await mcp.close();
+    await new Promise<void>((resolveClosed) => {
+      harnessServer.closeAllConnections();
+      harnessServer.close(() => resolveClosed());
+    });
+  };
+
   return {
     mcpUrl: mcp.url,
     harnessUrl: `http://${host}:${harnessAddress.port}`,
     ledger,
-    close: async () => {
-      for (const call of pending.values()) call.release();
-      await mcp.close();
-      await new Promise<void>((resolveClosed) => {
-        harnessServer.closeAllConnections();
-        harnessServer.close(() => resolveClosed());
-      });
-    },
+    // Memoised: a repeated shutdown must await the first, not close an already closed server.
+    close: () => (shutdownStarted ??= shutdown()),
   };
 };
 
