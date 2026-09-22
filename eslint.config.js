@@ -119,7 +119,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ["packages/**/*.ts", "apps/**/*.ts", "fixtures/**/*.ts"],
+    files: ["packages/**/*.ts", "apps/**/*.ts", "fixtures/**/*.ts", "tools/**/*.ts"],
     ignores: ["**/*.test.ts"],
     rules: {
       "no-restricted-syntax": [
