@@ -32,3 +32,7 @@ This file contains the guidelines for contributing to this codebase. It should n
 ## Documentation
 
 - Nothing is repeated twice, every issue, task, guide or info should appear exactly once across any of the code, pr description or issue description.
+
+## Agents
+
+- Agents work in the sibling worktrees `../mia-a` to `../mia-d`, never in the main checkout and never in a fresh worktree. Take the first one that is clean and has no open PR, run `git fetch && git switch -C <branch> origin/main && npm install`, and leave it clean when the PR is merged.
