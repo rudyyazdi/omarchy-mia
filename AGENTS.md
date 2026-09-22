@@ -1,6 +1,6 @@
-# Working in this repo
+# This file:
 
-Style is enforced by `npm run check` (Prettier, ESLint, tsc, Vitest); CI runs the same and nothing merges red.
+This file contains the guidlines for contributing to this codebase. It should not contain anything that is easy to lookup or is subjected to change.
 
 ## Style
 
