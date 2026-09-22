@@ -9,7 +9,7 @@ import { basename, join, resolve } from "node:path";
 import { Command } from "commander";
 import { z } from "zod";
 import { startFixture } from "@mia/controlled-mcp";
-import { errorMessage } from "@mia/protocol";
+import { errorMessage, isRecord } from "@mia/protocol";
 import { Catalog, exportConversation, snapshotConversation, verifyExport } from "@mia/records";
 import { loadProfile, startServer, type MiaServer } from "@mia/server";
 
@@ -38,8 +38,6 @@ const outDir = resolve(values.out ?? join(REPO_ROOT, ".mia-state", "live", stamp
 mkdirSync(outDir, { recursive: true, mode: 0o700 });
 const log = (message: string) => console.log(`[live] ${message}`);
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 const stringOrUndefined = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined;
 
