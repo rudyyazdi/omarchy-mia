@@ -107,17 +107,14 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.base.sha }}
-          sparse-checkout: .github/scripts/post-review.py
+          sparse-checkout: .github/scripts
           path: .trusted-review
           persist-credentials: false
       - name: Prefer post-review.py from the base commit
         run: |
           trusted=.trusted-review/.github/scripts/post-review.py
-          if [ -f "$trusted" ]; then
-            echo "POST_REVIEW_PY=$trusted" >> "$GITHUB_ENV"
-          else
-            echo "POST_REVIEW_PY=.github/scripts/post-review.py" >> "$GITHUB_ENV"
-          fi
+          test -f "$trusted"
+          echo "POST_REVIEW_PY=$trusted" >> "$GITHUB_ENV"
       - name: Write PR diff for the reviewer
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -144,7 +141,6 @@ jobs:
         run: python3 "$POST_REVIEW_PY" post
 
   review-safety:
-    needs: review-brevity
     if: >
       github.event.pull_request.draft == false &&
       github.event.pull_request.head.repo.full_name == github.repository
@@ -238,17 +234,14 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.base.sha }}
-          sparse-checkout: .github/scripts/post-review.py
+          sparse-checkout: .github/scripts
           path: .trusted-review
           persist-credentials: false
       - name: Prefer post-review.py from the base commit
         run: |
           trusted=.trusted-review/.github/scripts/post-review.py
-          if [ -f "$trusted" ]; then
-            echo "POST_REVIEW_PY=$trusted" >> "$GITHUB_ENV"
-          else
-            echo "POST_REVIEW_PY=.github/scripts/post-review.py" >> "$GITHUB_ENV"
-          fi
+          test -f "$trusted"
+          echo "POST_REVIEW_PY=$trusted" >> "$GITHUB_ENV"
       - name: Write PR diff for the reviewer
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

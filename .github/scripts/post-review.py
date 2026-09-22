@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import ast
 import urllib.error
 import urllib.request
 
@@ -204,8 +205,18 @@ def parse_diff(text):
             path = None
             line_no = 0
             in_hunk = False
-        elif line.startswith("+++ "):
+        elif not in_hunk and line.startswith("+++ "):
             rest = line[4:].split("\t", 1)[0]
+            if rest.startswith('"') and rest.endswith('"'):
+                try:
+                    decoded = ast.literal_eval(rest)
+                    if isinstance(decoded, str):
+                        try:
+                            rest = decoded.encode("latin-1").decode("utf-8")
+                        except UnicodeError:
+                            rest = decoded
+                except (SyntaxError, ValueError):
+                    pass
             if rest.startswith("b/"):
                 path = rest[2:]
             elif rest == "/dev/null":
@@ -357,12 +368,11 @@ def serialize_thread(thread):
 
 
 def dump_threads():
-    threads, _complete = fetch_review_threads()
-    if threads is None:
-        print("warn: could not load review threads; writing empty prior-threads.json")
-        open_threads = []
-    else:
-        open_threads = [serialize_thread(t) for t in threads if not t.get("isResolved") and ours(t)]
+    threads, complete = fetch_review_threads()
+    if threads is None or not complete:
+        print("warn: could not load a complete review-thread inventory")
+        return 1
+    open_threads = [serialize_thread(t) for t in threads if not t.get("isResolved") and ours(t)]
     with open(THREADS_FILE, "w", encoding="utf-8") as handle:
         json.dump(open_threads, handle, indent=2)
         handle.write("\n")
