@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { once } from "node:events";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { dirname } from "node:path";
@@ -264,10 +265,10 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
     socket.on("error", (error) => options.log(`socket error on ${conn.id}: ${error.message}`));
   });
 
-  await new Promise<void>((resolve, reject) => {
-    httpServer.once("error", reject);
-    httpServer.listen(options.port, options.host, () => resolve());
-  });
+  const listening = Promise.withResolvers<undefined>();
+  httpServer.once("error", listening.reject);
+  httpServer.listen(options.port, options.host, () => listening.resolve(undefined));
+  await listening.promise;
   const address = httpServer.address();
   if (address === null || typeof address === "string")
     throw new Error("gateway is not listening on a TCP port");
@@ -277,11 +278,13 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
     send,
     close: async () => {
       for (const conn of connections.values()) conn.socket.close(1001, "server shutting down");
-      await new Promise<void>((resolve) => wss.close(() => resolve()));
-      await new Promise<void>((resolve) => {
-        httpServer.closeAllConnections();
-        httpServer.close(() => resolve());
-      });
+      const socketsClosed = once(wss, "close");
+      wss.close();
+      await socketsClosed;
+      const httpClosed = once(httpServer, "close");
+      httpServer.closeAllConnections();
+      httpServer.close();
+      await httpClosed;
     },
   };
 };

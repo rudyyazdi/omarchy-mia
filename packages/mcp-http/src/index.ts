@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import { appendFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -149,10 +150,10 @@ export const startMcpHttpServer = async (
   });
   httpServer.keepAliveTimeout = 5_000;
 
-  await new Promise<void>((resolve, reject) => {
-    httpServer.once("error", reject);
-    httpServer.listen(options.port ?? 0, host, () => resolve());
-  });
+  const listening = Promise.withResolvers<undefined>();
+  httpServer.once("error", listening.reject);
+  httpServer.listen(options.port ?? 0, host, () => listening.resolve(undefined));
+  await listening.promise;
   const address = httpServer.address();
   if (address === null || typeof address === "string")
     throw new Error("MCP HTTP server did not bind a TCP address");
@@ -161,11 +162,12 @@ export const startMcpHttpServer = async (
     url: `http://${host}:${address.port}${path}`,
     port: address.port,
     host,
-    close: () =>
-      new Promise<void>((resolve) => {
-        httpServer.closeAllConnections();
-        httpServer.close(() => resolve());
-      }),
+    close: async () => {
+      const closed = once(httpServer, "close");
+      httpServer.closeAllConnections();
+      httpServer.close();
+      await closed;
+    },
   };
 };
 

@@ -1279,12 +1279,12 @@ export class Engine {
     }
     this.notifyToolCall(task, call);
     if (decision) return decision;
-    return new Promise<PermissionDecision>((resolve) => {
-      call.resolve = resolve;
-      req.abandoned.addEventListener("abort", () => this.abandon(task, call, resolve), {
-        once: true,
-      });
+    const { promise, resolve } = Promise.withResolvers<PermissionDecision>();
+    call.resolve = resolve;
+    req.abandoned.addEventListener("abort", () => this.abandon(task, call, resolve), {
+      once: true,
     });
+    return promise;
   }
 
   /** The runtime dropped the held prompt (process gone or turn aborted): the pending approval can never release anything. */

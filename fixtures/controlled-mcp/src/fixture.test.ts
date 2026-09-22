@@ -45,6 +45,21 @@ afterAll(async () => {
 });
 
 describe("controlled fixture", () => {
+  it("times out a long poll, then still reports the next slow call", async () => {
+    await harness.reset();
+    await expect(harness.waitEntered(1)).rejects.toThrow("no slow call entered before timeout");
+    const mcpClient = await client();
+    try {
+      const pendingEntry = harness.waitEntered(10_000);
+      const call = mcpClient.callTool({ name: "slow", arguments: { mode: "cancellable" } });
+      const entered = await pendingEntry;
+      await harness.release(entered.call_id);
+      expect((await call).isError).not.toBe(true);
+    } finally {
+      await mcpClient.close();
+    }
+  });
+
   it("lists exactly the five tools", async () => {
     const mcpClient = await client();
     const tools = await mcpClient.listTools();
