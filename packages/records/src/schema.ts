@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 export const SCHEMA_VERSION = 1;
 
 /** Logical records from docs/D1/CONVERSATION-RECORDS.md. Foreign keys are enforced per connection (see catalog.ts). */
@@ -273,7 +275,14 @@ export interface ProvenanceSetRow {
   description: string | null;
 }
 
-export type CaptureStatus = "retained" | "pending" | "external_only" | "missing" | "failed";
+export const CaptureStatusSchema = z.enum([
+  "retained",
+  "pending",
+  "external_only",
+  "missing",
+  "failed",
+]);
+export type CaptureStatus = z.infer<typeof CaptureStatusSchema>;
 
 export interface ArtifactRow {
   id: string;

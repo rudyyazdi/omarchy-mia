@@ -41,11 +41,12 @@ export const listConversations = (catalog: Catalog): ConversationSummary[] =>
       (SELECT COALESCE(MAX(sequence), 0) FROM events e WHERE e.conversation_id = c.id) AS last_sequence
     FROM conversations c ORDER BY c.started_at DESC, c.id DESC`);
 
-export interface UnresolvedReference {
-  table: string;
-  id: string;
-  reason: string;
-}
+export const UnresolvedReferenceSchema = z.object({
+  table: z.string(),
+  id: z.string(),
+  reason: z.string(),
+});
+export type UnresolvedReference = z.infer<typeof UnresolvedReferenceSchema>;
 
 export interface ConversationSnapshot {
   conversation_id: string;
