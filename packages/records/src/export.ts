@@ -16,7 +16,22 @@ import { parseJson, type Catalog } from "./catalog.ts";
 import { ObjectStore } from "./objects.ts";
 import { snapshotConversation, UnresolvedReferenceSchema } from "./queries.ts";
 import { renderReport } from "./report.ts";
-import { CaptureStatusSchema, EXPORT_TABLES, SCHEMA_VERSION, type ExportTable } from "./schema.ts";
+import {
+  CaptureStatusSchema,
+  EXPORT_TABLES,
+  SCHEMA_VERSION,
+  type ExportTable,
+  type ObjectRow,
+  type ArtifactRow,
+  type ProvenanceEntryRow,
+  type ConversationRow,
+  type TaskRow,
+  type EventRow,
+  type ToolCallRow,
+  type ApprovalRow,
+  type ArtifactLinkRow,
+  type ArtifactDependencyRow,
+} from "./schema.ts";
 
 export const EXPORT_VERSION = 1;
 
@@ -219,7 +234,7 @@ const failedVerification = (problem: string): VerificationResult => ({
 const invalidManifest = (error: z.ZodError): VerificationResult =>
   failedVerification(`manifest.json invalid: ${z.prettifyError(error).replaceAll("\n", "; ")}`);
 
-const RecordIdSchema = z.object({ id: z.string() });
+const RecordIdSchema = z.object({ id: z.string() }) satisfies z.ZodType<Pick<TaskRow, "id">>;
 
 /** Verify an export offline: file checksums, object digests, referential integrity, report safety. */
 export const verifyExport = (dir: string): VerificationResult => {
@@ -230,7 +245,7 @@ export const verifyExport = (dir: string): VerificationResult => {
   try {
     manifestJson = parseJson(readFileSync(manifestPath, "utf8"));
   } catch {
-    return failedVerification("manifest.json invalid: unable to read JSON");
+    return failedVerification("manifest.json invalid: unreadable or not JSON");
   }
   // Other versions may have different manifest and row shapes; inspect only the header first.
   const versions = ManifestVersionsSchema.safeParse(manifestJson);
@@ -281,23 +296,30 @@ export const verifyExport = (dir: string): VerificationResult => {
     }
     return rows;
   };
+  // Objects use a digest key; artifact dependencies use a composite key instead of id.
   const tables = {
-    objects: readTable("objects", z.object({ digest: z.string() })),
+    objects: readTable(
+      "objects",
+      z.object({ digest: z.string() }) satisfies z.ZodType<Pick<ObjectRow, "digest">>,
+    ),
     provenance_sets: readTable("provenance_sets", RecordIdSchema),
     artifacts: readTable(
       "artifacts",
       RecordIdSchema.extend({
         capture_status: CaptureStatusSchema,
         object_digest: z.string().nullable(),
-      }),
+      }) satisfies z.ZodType<Pick<ArtifactRow, "id" | "capture_status" | "object_digest">>,
     ),
     provenance_entries: readTable(
       "provenance_entries",
       RecordIdSchema.extend({
         artifact_id: z.string().nullable(),
-      }),
+      }) satisfies z.ZodType<Pick<ProvenanceEntryRow, "id" | "artifact_id">>,
     ),
-    conversations: readTable("conversations", RecordIdSchema),
+    conversations: readTable(
+      "conversations",
+      RecordIdSchema satisfies z.ZodType<Pick<ConversationRow, "id">>,
+    ),
     clients: readTable("clients", RecordIdSchema),
     client_connections: readTable("client_connections", RecordIdSchema),
     tasks: readTable("tasks", RecordIdSchema),
@@ -308,21 +330,35 @@ export const verifyExport = (dir: string): VerificationResult => {
         sequence: z.number(),
         task_id: z.string().nullable(),
         caused_by_event_id: z.string().nullable(),
-      }),
+      }) satisfies z.ZodType<Pick<EventRow, "id" | "sequence" | "task_id" | "caused_by_event_id">>,
     ),
     commands: readTable("commands", RecordIdSchema),
-    tool_calls: readTable("tool_calls", RecordIdSchema.extend({ task_id: z.string() })),
-    approvals: readTable("approvals", RecordIdSchema.extend({ tool_call_id: z.string() })),
+    tool_calls: readTable(
+      "tool_calls",
+      RecordIdSchema.extend({ task_id: z.string() }) satisfies z.ZodType<
+        Pick<ToolCallRow, "id" | "task_id">
+      >,
+    ),
+    approvals: readTable(
+      "approvals",
+      RecordIdSchema.extend({ tool_call_id: z.string() }) satisfies z.ZodType<
+        Pick<ApprovalRow, "id" | "tool_call_id">
+      >,
+    ),
     diagnostics: readTable("diagnostics", RecordIdSchema),
-    artifact_links: readTable("artifact_links", RecordIdSchema.extend({ artifact_id: z.string() })),
-    // These two tables use a digest or composite key rather than an id column.
+    artifact_links: readTable(
+      "artifact_links",
+      RecordIdSchema.extend({ artifact_id: z.string() }) satisfies z.ZodType<
+        Pick<ArtifactLinkRow, "id" | "artifact_id">
+      >,
+    ),
     artifact_dependencies: readTable(
       "artifact_dependencies",
       z.object({
         parent_artifact_id: z.string(),
         required_artifact_id: z.string(),
         relation: z.string(),
-      }),
+      }) satisfies z.ZodType<ArtifactDependencyRow>,
     ),
   };
   for (const table of EXPORT_TABLES) {
