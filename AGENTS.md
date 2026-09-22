@@ -29,7 +29,6 @@ This file contains the guidelines for contributing to this codebase. It should n
 - Keep dependencies directional (`docs/DEPENDENCIES.md`) and expose a module's contract by name, never its internals.
 - Document non-obvious invariants and design tradeoffs near their owner; explain why, without restating the implementation.
 
-
 ## Documentation
 
 - Nothing is repeated twice, every issue, task, guide or info should appear exactly once across any of the code, pr description or issue description.
