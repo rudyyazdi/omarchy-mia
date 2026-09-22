@@ -114,12 +114,17 @@ Keep A (fixture) and C (server) running. Terminal B:
 npm run client -- --config examples/config/fixture-test.json
 ```
 
+Each step below drives one live-lane scenario by hand. Type the prompt the named scenario submits
+([`scenarios.ts`](../../tests/acceptance/promptfoo/scenarios.ts)); what the run must produce is what that scenario's
+assertion already checks ([`assert.ts`](../../tests/acceptance/promptfoo/assert.ts)), so this tour only shows where to
+look. `npm run live` runs the same four unattended.
+
 ### 4.1 One streamed turn (1 live turn)
 
-Type: `Remember marker K7. Say hello in one sentence.`
+Prompt: the `stream-context` scenario's first turn.
 
-Watch: `▶ task … started`, streamed text, `■ task … completed`. In the code: `engine.submitText` → `adapter.submitTurn`
-→ `onAdapterEvent("text_delta")` → `emit("text_delta")`. Now look at what was recorded:
+In the code: `engine.submitText` → `adapter.submitTurn` → `onAdapterEvent("text_delta")` → `emit("text_delta")`. Now
+look at what was recorded:
 
 ```sh
 sqlite3 .mia-state/fixture-test/catalog.sqlite \
@@ -132,50 +137,47 @@ jq . .mia-state/fixture-test/conversations/*/runtime/settings.json   # the deny/
 
 ### 4.2 An approval, held then released (1 live turn)
 
-Type: `Call d1.change with delta 1 exactly once.`
+Prompt: the `approve-reject` scenario's.
 
-Before answering the approval panel, prove nothing ran:
+Before answering the approval panel, and again after `/approve <id>`, read the two independent records:
 
 ```sh
-curl -s localhost:47332/state | jq '[.ledger[].kind]'    # no "committed" for change yet
-sqlite3 .mia-state/fixture-test/catalog.sqlite "select status from approvals"   # pending
+curl -s localhost:47332/state | jq '[.ledger[].kind]'
+sqlite3 .mia-state/fixture-test/catalog.sqlite "select status from approvals"
 ```
 
-Then `/approve <id>`. Re-run both commands: `approved`, and a `committed` entry. In `engine.approvalDecision`
-the transaction records `approval_resolved` then `tool_dispatched`, and only after commit calls `settle(call, allow)`,
-which resolves the promise the bridge is awaiting. Check the order:
+In `engine.approvalDecision` the transaction records `approval_resolved` then `tool_dispatched`, and only after commit
+calls `settle(call, allow)`, which resolves the promise the bridge is awaiting. Check the order:
 
 ```sh
 sqlite3 .mia-state/fixture-test/catalog.sqlite \
   "select sequence, type from events where type in ('approval_requested','approval_resolved','tool_dispatched','tool_result') order by sequence"
 ```
 
-Try `/approve <same id>` again: `invalid_state`. Type the same request again and `/reject` it: a new approval id,
-no new commit.
+Try `/approve <same id>` again: `invalid_state`, because an approval authorises exactly one call once.
 
 ### 4.3 Interruption (1 live turn)
 
-Type: `Call d1.slow with mode cancellable exactly once, then call d1.change with delta 1 exactly once.`
-Approve `slow`. When `curl -s localhost:47332/state | jq .pending` shows the entered call, type `/interrupt`.
+Prompt: the `cancellable` scenario's. Approve `slow`. When `curl -s localhost:47332/state | jq .pending` shows the
+entered call, type `/interrupt`.
 
-Watch the outcome panel: the released `slow` is reported `unknown` (Mia has no evidence; the process is gone) and
-the ledger shows `cancelled` (the fixture saw the connection drop). No `change` appears anywhere. Code path:
-`engine.interruptTask` (gate closed + epoch advanced + pending invalidated, in one transaction) → `adapter.interrupt`
-(SIGKILL of the process group). Then ask a follow-up, e.g. `What happened?`: the runtime's prompt now starts with a
-Mia note; see it with
+Code path: `engine.interruptTask` (gate closed + epoch advanced + pending invalidated, in one transaction) →
+`adapter.interrupt` (SIGKILL of the process group). Mia's own classification of the released call comes from
+`classifyActions`, and the fixture's `cancelled` entry is independent evidence. Then ask a follow-up, e.g.
+`What happened?`: the runtime's prompt now starts with a Mia note; see it with
 
 ```sh
 sqlite3 .mia-state/fixture-test/catalog.sqlite "select payload from events where type='task_submitted' order by sequence desc limit 1" | jq -r .runtime_prompt
 ```
 
-Repeat with `uncancellable`, interrupt at `entered`, then `curl -s -XPOST localhost:47332/release`: the ledger commits,
-Mia still says `unknown`. That is the honest report the plan asks for. The next turn's prompt carries a Mia note listing
-the unknown outcome (see the `runtime_prompt` query above); the configured policy for `d1.slow` is unchanged.
+Repeat with the `uncancellable` scenario's prompt, interrupt at `entered`, then
+`curl -s -XPOST localhost:47332/release`. The next turn's prompt carries a Mia note listing the unknown outcome (see
+the `runtime_prompt` query above); the configured policy for `d1.slow` is unchanged.
 
 ### 4.4 Denied tool and unlisted tool (1 live turn)
 
-Type: `Call d1.forbidden once. If it is unavailable, say so.` The model does not see the tool at all; check
-`settings.json` (`permissions.deny`) and the `runtime_init` event's `tools` list:
+Prompt: the `denied` scenario's. The model does not see the tool at all; check `settings.json`
+(`permissions.deny`) and the `runtime_init` event's `tools` list:
 
 ```sh
 sqlite3 .mia-state/fixture-test/catalog.sqlite "select payload from events where type='runtime_init'" | jq .tools

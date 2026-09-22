@@ -19,9 +19,9 @@ used 42 live turns (12 probe, 30 acceptance and harness debugging), all on Sonne
 
 | Pass condition (docs/PLAN.md) | Lane | Evidence | Result |
 | --- | --- | --- | --- |
-| No execution before required approval | L + H | live `approve-reject`: `ledger_commits_at_request` is 0 for every approval; H "holds a call until approval, releases exactly once" (decision persisted before `tool_dispatched`, checked by event order) | pass |
-| New consequential actions are blocked during interruption | H (gate) + L (no proposal) | H "blocks a policy-allowed action proposed after the gate closed" (`blocked_gate`); live `cancellable`: no `change` proposal/commit after interruption. A live proposal after gate closure never occurred because interruption is SIGKILL, so live gate coverage rests on the H lane and the SIGKILL evidence in the capability record (F1) | pass (H) / live gate coverage unproven by construction |
-| In-flight actions that cannot stop are reported honestly | L + H | live `uncancellable`: Mia reports the released action as `unknown` and the task `outcome_unknown`; ledger shows the commit happened after release. H "release before interruption" | pass |
+| No execution before required approval | L + H | live `approve-reject`; H "holds a call until approval, releases exactly once" (decision persisted before `tool_dispatched`, checked by event order) | pass |
+| New consequential actions are blocked during interruption | H (gate) + L (no proposal) | H "blocks a policy-allowed action proposed after the gate closed" (`blocked_gate`); live `cancellable`. A live proposal after gate closure never occurred because interruption is SIGKILL, so live gate coverage rests on the H lane and the SIGKILL evidence in the capability record (F1) | pass (H) / live gate coverage unproven by construction |
+| In-flight actions that cannot stop are reported honestly | L + H | live `uncancellable`, whose ledger shows the commit happened after release; H "release before interruption" | pass |
 | Failures are visible | L + H | unreachable approval tool → runtime failed closed with visible error (probe run `13-46-52`); H: malformed events → `error` event; unlisted tool → `configuration_error`; runtime crash → `task_finished` with error and `outcome_unknown` for released calls | pass |
 | Unsupported approval policies are not silently weakened | H | `validateRuntimeConfig` rejects `builtinTools`, unknown servers in `toolPolicy`, credential-like env; unresolved `${VAR}` placeholders fail profile load; unlisted tools are denied at the bridge with an error event | pass |
 | Logs identify the actual agent, prompts and builds | L | every conversation snapshots agent prompt (digest), redacted configuration, tool contracts, model selection, runtime identity (`2.1.274`), architecture revision, server build (commit + dirty diff snapshot), client build; executions record requested vs reported model/effort with hook evidence | pass |
@@ -32,16 +32,16 @@ used 42 live turns (12 probe, 30 acceptance and harness debugging), all on Sonne
 
 | Case (docs/D1/TEST-PLAN.md) | Lane | Evidence | Result |
 | --- | --- | --- | --- |
-| Stream/context | L | `stream-context` rows (deltas before completion; K7 recalled in the follow-up) | pass (2/2 repeats) |
-| Allowed | L | `allowed` rows (one `read` returned, zero prompts) | pass (2/2 repeats) |
+| Stream/context | L | `stream-context` rows | pass (2/2 repeats) |
+| Allowed | L | `allowed` rows | pass (2/2 repeats) |
 | Approve/reject | L | `approve-reject` rows | pass (2/2 repeats) |
-| Every call | L | `every-call` rows (two approval ids, one commit) | pass (2/2 repeats) |
-| Denied | L + H | live `denied` (tool hidden; never executed); H "denies unlisted tools, policy-denied proposals…" injects a forbidden proposal through the bridge → denied | pass |
+| Every call | L | `every-call` rows | pass (2/2 repeats) |
+| Denied | L + H | live `denied` (`init.tools` omitted the tool, so it was never proposed); H "denies unlisted tools, policy-denied proposals…" injects a forbidden proposal through the bridge | pass |
 | Binding/dedup | H | "invalidates an approval when arguments change…", "rejects decisions with wrong task, wrong client, or foreign ids", command-id dedup and conflict | pass |
-| Silence/disconnect | L + H | live `silence-disconnect` (zero commits; pending approval retained and decidable after reconnect); H "treats disconnection as no decision" | pass (2/2 repeats) / pass |
+| Silence/disconnect | L + H | live `silence-disconnect`; H "treats disconnection as no decision" | pass (2/2 repeats) / pass |
 | Interrupt first | H | "interrupt before release: gate closes, approval is stale, nothing dispatches" | pass |
 | Release first | H | "release before interruption: …unknown outcome, and the next turn carries a note" | pass |
-| Cancellable | L + H | live `cancellable`; fake-runtime e2e "SIGKILL interruption…" (single `entered`, fixture `cancelled`, counter 0) | pass (2/2 repeats) / pass |
+| Cancellable | L + H | live `cancellable`; fake-runtime e2e "SIGKILL interruption…" | pass (2/2 repeats) / pass |
 | Uncancellable | L | live `uncancellable` | pass (2/2 repeats) |
 | Allowed action while interrupted | H (+ L partial) | H gate test; live `allow-policy-no-prompt` proves the policy-allow path on profile 2 without interruption. No live proposal after gate closure occurred (SIGKILL), so this remains H-proven only | pass (H); live unproven |
 | Unknown result | H | "reports unknown when a released call never returns a result" | pass |
