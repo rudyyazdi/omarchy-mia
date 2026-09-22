@@ -56,13 +56,13 @@ export class MiaClient extends EventEmitter {
       headers: { authorization: `Bearer ${this.options.secret}` },
     });
     this.socket = socket;
-    await new Promise<void>((resolve, reject) => {
-      socket.once("open", () => resolve());
-      socket.once("error", (error) => reject(error));
-      socket.once("unexpected-response", (_, res) =>
-        reject(new Error(`server refused the connection: HTTP ${res.statusCode}`)),
-      );
-    });
+    const { promise, resolve, reject } = Promise.withResolvers<undefined>();
+    socket.once("open", () => resolve(undefined));
+    socket.once("error", (error) => reject(error));
+    socket.once("unexpected-response", (_, res) =>
+      reject(new Error(`server refused the connection: HTTP ${res.statusCode}`)),
+    );
+    await promise;
     this.connectionState = "connected";
     socket.on("message", (data) => this.onMessage(data.toString("utf8")));
     socket.on("close", (code, reason) => {
@@ -128,17 +128,21 @@ export class MiaClient extends EventEmitter {
       payload,
     };
     this.recentInteractionIds.push(messageId);
-    return new Promise<AckPayload>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingAcks.delete(messageId);
-        reject(new Error(`no acknowledgement for ${type} (${messageId}) within 30s`));
-      }, 30_000);
-      this.pendingAcks.set(messageId, (ack) => {
-        clearTimeout(timer);
-        resolve(ack);
-      });
+    const { promise, resolve, reject } = Promise.withResolvers<AckPayload>();
+    const deadline = AbortSignal.timeout(30_000);
+    const onTimeout = () => {
+      this.pendingAcks.delete(messageId);
+      reject(new Error(`no acknowledgement for ${type} (${messageId}) within 30s`));
+    };
+    deadline.addEventListener("abort", onTimeout, { once: true });
+    this.pendingAcks.set(messageId, resolve);
+    try {
       socket.send(JSON.stringify(envelope));
-    });
+    } catch (error) {
+      this.pendingAcks.delete(messageId);
+      reject(error);
+    }
+    return promise.finally(() => deadline.removeEventListener("abort", onTimeout));
   }
 
   /** Send raw text (tests use this to exercise validation paths). */
@@ -229,19 +233,17 @@ export class MiaClient extends EventEmitter {
     );
     if (existing) return Promise.resolve(existing);
     const channel = type === "error" ? "server_error" : type;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.off(channel, handler);
-        reject(new Error(`timed out waiting for ${type}`));
-      }, timeoutMs);
-      const handler = (event: ServerEvent) => {
-        if (isWanted(event) && predicate(event)) {
-          clearTimeout(timer);
-          this.off(channel, handler);
-          resolve(event);
-        }
-      };
-      this.on(channel, handler);
+    const { promise, resolve, reject } = Promise.withResolvers<ServerEventOf<T>>();
+    const deadline = AbortSignal.timeout(timeoutMs);
+    const onTimeout = () => reject(new Error(`timed out waiting for ${type}`));
+    const handler = (event: ServerEvent) => {
+      if (isWanted(event) && predicate(event)) resolve(event);
+    };
+    deadline.addEventListener("abort", onTimeout, { once: true });
+    this.on(channel, handler);
+    return promise.finally(() => {
+      deadline.removeEventListener("abort", onTimeout);
+      this.off(channel, handler);
     });
   }
 

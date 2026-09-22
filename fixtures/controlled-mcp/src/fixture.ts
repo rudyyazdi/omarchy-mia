@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -62,10 +63,11 @@ export const startFixture = async (options: FixtureOptions): Promise<FixtureHand
   mkdirSync(artifactsDir, { recursive: true, mode: 0o700 });
 
   const pending = new Map<string, ControlledSlowCall>();
-  const enteredWaiters: ((call: PendingSlowCall) => void)[] = [];
+  const enteredWaiters = new Set<(call: PendingSlowCall) => void>();
 
   const notifyEntered = (call: PendingSlowCall) => {
-    while (enteredWaiters.length > 0) enteredWaiters.shift()?.(call);
+    for (const waiter of enteredWaiters) waiter(call);
+    enteredWaiters.clear();
   };
 
   const createServerForRequest = (ctx: McpRequestContext): McpServer => {
@@ -262,18 +264,18 @@ export const startFixture = async (options: FixtureOptions): Promise<FixtureHand
         const existing = [...pending.values()].find((call) => !call.released && !call.cancelled);
         if (existing) return sendJson(res, 200, { call_id: existing.call_id, mode: existing.mode });
         const timeoutMs = Number(url.searchParams.get("timeout_ms") ?? "60000");
-        let done = false;
-        const timer = setTimeout(() => {
-          if (done) return;
-          done = true;
-          sendJson(res, 408, { error: "no slow call entered before timeout" });
-        }, timeoutMs);
-        enteredWaiters.push((call) => {
-          if (done) return;
-          done = true;
-          clearTimeout(timer);
-          sendJson(res, 200, { call_id: call.call_id, mode: call.mode });
-        });
+        const { promise, resolve: entered } = Promise.withResolvers<PendingSlowCall | null>();
+        // Match the timer API's handling of invalid or out-of-range delays.
+        const delay = timeoutMs >= 1 && timeoutMs <= 2_147_483_647 ? Math.trunc(timeoutMs) : 1;
+        const deadline = AbortSignal.timeout(delay);
+        const onTimeout = () => entered(null);
+        deadline.addEventListener("abort", onTimeout, { once: true });
+        enteredWaiters.add(entered);
+        const call = await promise;
+        deadline.removeEventListener("abort", onTimeout);
+        enteredWaiters.delete(entered);
+        if (call) sendJson(res, 200, { call_id: call.call_id, mode: call.mode });
+        else sendJson(res, 408, { error: "no slow call entered before timeout" });
         return;
       }
       if (req.method === "POST" && url.pathname === "/release") {
@@ -293,10 +295,9 @@ export const startFixture = async (options: FixtureOptions): Promise<FixtureHand
       sendJson(res, 500, { error: errorMessage(error) });
     }
   });
-  await new Promise<void>((resolveListen, reject) => {
-    harnessServer.once("error", reject);
-    harnessServer.listen(options.harnessPort ?? 0, host, () => resolveListen());
-  });
+  const listening = once(harnessServer, "listening");
+  harnessServer.listen(options.harnessPort ?? 0, host);
+  await listening;
   const harnessAddress = harnessServer.address();
   if (harnessAddress === null || typeof harnessAddress === "string")
     throw new Error("harness server did not bind a TCP port");
@@ -305,10 +306,10 @@ export const startFixture = async (options: FixtureOptions): Promise<FixtureHand
   const shutdown = async () => {
     for (const call of pending.values()) call.release();
     await mcp.close();
-    await new Promise<void>((resolveClosed) => {
-      harnessServer.closeAllConnections();
-      harnessServer.close(() => resolveClosed());
-    });
+    const closed = once(harnessServer, "close");
+    harnessServer.closeAllConnections();
+    harnessServer.close();
+    await closed;
   };
 
   return {
