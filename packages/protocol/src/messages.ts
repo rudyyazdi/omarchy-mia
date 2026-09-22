@@ -14,6 +14,18 @@ const isoTime = z.string().datetime({ offset: true });
 export const DecisionSchema = z.enum(["approve", "reject"]);
 export type Decision = z.infer<typeof DecisionSchema>;
 
+export const ToolPolicySchema = z.enum(["allow", "ask", "deny"]);
+export type ToolPolicy = z.infer<typeof ToolPolicySchema>;
+
+export const ApprovalStatusSchema = z.enum([
+  "pending",
+  "approved",
+  "rejected",
+  "invalidated",
+  "expired",
+]);
+export type ApprovalStatus = z.infer<typeof ApprovalStatusSchema>;
+
 export const TaskStatusSchema = z.enum([
   "running",
   "awaiting_approval",
@@ -184,7 +196,7 @@ const eventPayloads = {
     task_id: id,
     approval_id: id,
     tool_call_id: id,
-    status: z.enum(["approved", "rejected", "invalidated", "expired"]),
+    status: ApprovalStatusSchema.exclude(["pending"]),
     reason: z.string().optional(),
   }),
   interruption_requested: z.object({

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { ADAPTER_VERSION, probeStaticCapabilities } from "@mia/agent-adapter";
 import { PROTOCOL_VERSION, redactValue, sha256Hex } from "@mia/protocol";
-import type { RecordWriter } from "@mia/records";
+import type { ProvenanceEntryRow, ProvenanceRole, RecordWriter } from "@mia/records";
 import { collectBuildInfo, type BuildInfo } from "./build-info.ts";
 import type { Profile } from "./config.ts";
 
@@ -14,12 +14,7 @@ export interface ProvenanceSummary {
   architecture_revision: string | null;
   server_build: Omit<BuildInfo, "local_changes">;
   runtime_version: string | null;
-  entries: {
-    role: string;
-    availability: string;
-    artifact_id: string | null;
-    reason: string | null;
-  }[];
+  entries: Pick<ProvenanceEntryRow, "role" | "availability" | "artifact_id" | "reason">[];
 }
 
 /**
@@ -39,7 +34,7 @@ export const createConversationProvenance = (input: {
   );
   const entries: ProvenanceSummary["entries"] = [];
   const add = (
-    role: string,
+    role: ProvenanceRole,
     input: {
       text?: string;
       bytes?: Uint8Array;
