@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
 import {
   McpServer,
@@ -336,6 +337,24 @@ export class FixtureHarness {
     if (!res.ok) throw new Error(`wait-entered failed: ${res.status} ${await res.text()}`);
     return EnteredSchema.parse(await res.json());
   }
+  /**
+   * Poll the state until `settled` holds, then return it; return the last state seen once the budget
+   * is spent, so the caller's own assertion reports what was actually observed. The fixture is a
+   * separate process: its ledger settles a moment after the event that caused it, and every caller
+   * needs the same bounded wait rather than a sleep long enough "most of the time".
+   */
+  async waitForState(
+    settled: (state: FixtureState) => boolean,
+    timeoutMs = 5_000,
+  ): Promise<FixtureState> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const state = await this.state();
+      if (settled(state) || Date.now() >= deadline) return state;
+      await sleep(25);
+    }
+  }
+
   async release(callId?: string): Promise<void> {
     await fetch(`${this.baseUrl}/release`, {
       method: "POST",
