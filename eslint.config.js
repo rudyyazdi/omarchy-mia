@@ -5,9 +5,9 @@ import tseslint from "typescript-eslint";
 
 const BYPASS_NOTE = "Bypass with an eslint-disable-next-line comment that carries a `-- reason`.";
 
-// The layer table of docs/DEPENDENCIES.md, lowest layer first. A layer may import the layers
-// above it in this list, never one below it and never a sibling in its own layer. Editing this
-// list without editing the doc (or the reverse) leaves the two out of step.
+// The dependency layers, lowest layer first. A layer may import the layers above it in this list,
+// never one below it and never a sibling in its own layer. Why the direction matters, and when to
+// split a module or a package instead of reaching across it: docs/DEPENDENCIES.md.
 const LAYERS = [
   { files: ["packages/protocol/**"], workspaces: ["@mia/protocol"], mayImportAnything: false },
   {
