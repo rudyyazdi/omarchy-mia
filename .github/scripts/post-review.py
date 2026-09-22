@@ -47,7 +47,7 @@ def load_env():
     TOKEN = os.environ["GITHUB_TOKEN"]
     # User PAT for resolveReviewThread only. GITHUB_TOKEN cannot resolve threads
     # (Resource not accessible by integration); keep TOKEN for bot identity.
-    RESOLVE_TOKEN = os.environ.get("RESOLVE_TOKEN") or TOKEN
+    RESOLVE_TOKEN = os.environ.get("RESOLVE_TOKEN")
     API = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
     REPO = os.environ["GITHUB_REPOSITORY"]
     PR = os.environ["PR_NUMBER"]
@@ -451,6 +451,9 @@ def reply_to_thread(thread_id, body, prior):
 
 
 def resolve_thread(thread_id):
+    if not RESOLVE_TOKEN:
+        print(f"warn: no RESOLVE_TOKEN; leaving thread {thread_id} open")
+        return True
     mutation = """
     mutation($id:ID!){
       resolveReviewThread(input:{threadId:$id}){
