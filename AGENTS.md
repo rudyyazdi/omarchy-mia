@@ -1,6 +1,6 @@
 # This file:
 
-This file contains the guidlines for contributing to this codebase. It should not contain anything that is easy to lookup or is subjected to change.
+This file contains the guidlines for contributing to this codebase. It should not contain anything that is easy to lookup or it is likely to change.
 
 ## Style
 
