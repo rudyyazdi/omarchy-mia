@@ -2,9 +2,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { afterEach, beforeEach } from "vitest";
 import { startServer, type MiaServer, type Profile, type TurnRunner } from "@mia/server";
 import { MiaClient } from "@mia/text-client";
 import { Catalog } from "@mia/records";
+import { ScriptedRuntime } from "./scripted-runtime.ts";
 
 export interface TestServer {
   server: MiaServer;
@@ -99,6 +101,52 @@ export const startTestServer = async (
       rmSync(dir, { recursive: true, force: true });
     },
   };
+};
+
+export interface ScriptedSession {
+  runtime: ScriptedRuntime;
+  server: TestServer;
+  client: MiaClient;
+}
+
+/**
+ * The starting point every scripted suite needs: a scripted runtime behind a fresh server, one
+ * connected client that has reported diagnostics and started a conversation. Suites differ in what
+ * they then submit, not in how they get here, so getting here is defined once.
+ */
+const startScriptedSession = async (
+  overrides: Partial<Profile["runtime"]> = {},
+): Promise<ScriptedSession> => {
+  const runtime = new ScriptedRuntime();
+  const server = await startTestServer(runtime, overrides);
+  const client = await server.connect("client-A");
+  await client.sendDiagnostics();
+  await client.startConversation();
+  return { runtime, server, client };
+};
+
+/**
+ * Register the setup and teardown of a scripted suite: one session per test, handed to `hold` so the
+ * suite can keep it in its own variables, and closed afterwards whether the test replaced it or not.
+ * The returned function restarts the session under a different runtime profile mid-test, which is
+ * how a test states the policy it needs without owning the lifecycle.
+ */
+export const useScriptedSession = (
+  hold: (session: ScriptedSession) => void,
+): ((overrides?: Partial<Profile["runtime"]>) => Promise<void>) => {
+  let current: TestServer | null = null;
+  const start = async (overrides: Partial<Profile["runtime"]> = {}): Promise<void> => {
+    await current?.close();
+    const session = await startScriptedSession(overrides);
+    current = session.server;
+    hold(session);
+  };
+  beforeEach(() => start());
+  afterEach(async () => {
+    await current?.close();
+    current = null;
+  });
+  return start;
 };
 
 export const tick = () => sleep(20);

@@ -1,7 +1,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ApprovalBridge,
@@ -115,11 +114,9 @@ describe("real adapter against a fake runtime process", () => {
         await harness.waitEntered(20_000);
         const cancellation = await handle.interrupt();
         expect(cancellation).toBe("forced_kill");
-        for (let attempt = 0; attempt < 100; attempt++) {
-          const state = await harness.state();
-          if (state.ledger.some((entry) => entry.kind === "cancelled")) break;
-          await sleep(20);
-        }
+        await harness.waitForState((state) =>
+          state.ledger.some((entry) => entry.kind === "cancelled"),
+        );
       },
     );
     expect(result.status).toBe("killed");
