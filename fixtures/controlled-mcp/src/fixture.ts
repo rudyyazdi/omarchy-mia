@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
@@ -11,7 +11,7 @@ import {
   startMcpHttpServer,
   type McpRequestContext,
 } from "@mia/mcp-http";
-import { errorMessage } from "@mia/protocol";
+import { errorMessage, sha256Hex } from "@mia/protocol";
 import { Ledger, LedgerEntrySchema } from "./ledger.ts";
 
 export const PendingSlowCallSchema = z.object({
@@ -197,7 +197,7 @@ export const startFixture = async (options: FixtureOptions): Promise<FixtureHand
           };
         }
         const bytes = Buffer.from(text, "utf8");
-        const sha256 = createHash("sha256").update(bytes).digest("hex");
+        const sha256 = sha256Hex(bytes);
         writeFileSync(target, bytes, { mode: 0o600 });
         ledger.append({ kind: "committed", tool: "artifact", callId: id, args: { name, sha256 } });
         ledger.append({ kind: "returned", tool: "artifact", callId: id, args: { name } });

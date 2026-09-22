@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
@@ -11,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
+import { sha256Hex } from "@mia/protocol";
 import { parseJson, type Catalog } from "./catalog.ts";
 import { ObjectStore } from "./objects.ts";
 import { snapshotConversation, type UnresolvedReference } from "./queries.ts";
@@ -48,8 +48,6 @@ export interface ExportManifest {
   files: Record<string, ExportedFile>;
 }
 
-const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-
 /** Where a table's rows live inside an export directory. */
 const tableFile = (table: ExportTable): string =>
   table === "events" ? "events.jsonl" : join("records", `${table}.jsonl`);
@@ -78,7 +76,7 @@ export const exportConversation = (
     const path = join(staging, rel);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, buf, { mode: 0o600 });
-    files[rel] = { sha256: sha256(buf), bytes: buf.byteLength };
+    files[rel] = { sha256: sha256Hex(buf), bytes: buf.byteLength };
   };
 
   const counts: Record<string, number> = {};
@@ -125,7 +123,7 @@ export const exportConversation = (
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(store.pathFor(digest), target);
     const copied = readFileSync(target);
-    if (sha256(copied) !== digest) {
+    if (sha256Hex(copied) !== digest) {
       corrupt.push(digest);
       objectStatus[digest] = "corrupt";
       continue;
@@ -228,7 +226,7 @@ export const verifyExport = (dir: string): VerificationResult => {
       continue;
     }
     const bytes = readFileSync(path);
-    if (bytes.byteLength !== expected.bytes || sha256(bytes) !== expected.sha256)
+    if (bytes.byteLength !== expected.bytes || sha256Hex(bytes) !== expected.sha256)
       problems.push(`checksum mismatch: ${rel}`);
     checkedFiles++;
   }
@@ -324,7 +322,7 @@ export const verifyExport = (dir: string): VerificationResult => {
         problems.push(`object bytes missing and not declared: ${digest}`);
       continue;
     }
-    if (sha256(readFileSync(path)) !== digest) problems.push(`object corrupt: ${digest}`);
+    if (sha256Hex(readFileSync(path)) !== digest) problems.push(`object corrupt: ${digest}`);
     checkedObjects++;
   }
   const reportPath = join(dir, "report.html");

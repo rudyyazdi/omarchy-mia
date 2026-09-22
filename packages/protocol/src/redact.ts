@@ -1,3 +1,5 @@
+import { isRecord } from "./value.ts";
+
 const SENSITIVE_KEY =
   /(token|secret|password|passwd|api[-_]?key|authorization|credential|cookie|private[-_]?key|bearer)/i;
 const SENSITIVE_VALUE: RegExp[] = [
@@ -24,9 +26,6 @@ export const redactString = (text: string): string => {
   for (const pattern of SENSITIVE_VALUE) out = out.replace(pattern, REDACTED);
   return out;
 };
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const walk = (value: unknown, key: string | undefined): unknown => {
   if (key !== undefined && SENSITIVE_KEY.test(key)) return REDACTED;

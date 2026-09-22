@@ -2,7 +2,7 @@ import { appendFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { errorMessage } from "@mia/protocol";
+import { errorMessage, isRecord } from "@mia/protocol";
 
 /** Per-HTTP-request context handed to the MCP server factory. */
 export interface McpRequestContext {
@@ -24,9 +24,6 @@ export interface McpHttpServerHandle {
   readonly host: string;
   close(): Promise<void>;
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const readBody = async (req: IncomingMessage, limitBytes: number): Promise<string> => {
   const chunks: Buffer[] = [];

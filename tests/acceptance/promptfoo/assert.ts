@@ -1,14 +1,12 @@
 /** promptfoo javascript assertion: judge a scenario by fixture-ledger evidence and recorded events, never by model prose alone. */
 import { match } from "ts-pattern";
 import { z } from "zod";
+import { isRecord } from "@mia/protocol";
 import { ScenarioEvidenceSchema, type ScenarioEvidence } from "./scenarios.ts";
 
 type Result = { pass: boolean; score: number; reason: string };
 
 const fail = (reason: string): Result => ({ pass: false, score: 0, reason });
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** What the provider emits instead of evidence when the scenario itself failed. */
 const ErrorEnvelopeSchema = z.looseObject({ error: z.string().optional() });

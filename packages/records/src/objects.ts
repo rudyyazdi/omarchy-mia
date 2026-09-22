@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -11,6 +11,7 @@ import {
   writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { sha256Hex } from "@mia/protocol";
 import type { CatalogPaths } from "./catalog.ts";
 
 export interface StoredObject {
@@ -28,7 +29,7 @@ export class ObjectStore {
   constructor(readonly paths: CatalogPaths) {}
 
   static digestOf(bytes: Uint8Array): string {
-    return createHash("sha256").update(bytes).digest("hex");
+    return sha256Hex(bytes);
   }
 
   storageKey(digest: string): string {
