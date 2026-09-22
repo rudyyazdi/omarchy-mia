@@ -14,13 +14,17 @@ This file contains the guidelines for contributing to this codebase. It should n
 
 ## Design
 
-- Design for single responsibility: give each module one clear purpose and explicit, typed interfaces. A function fits on one screen and a module has one reason to change; when either outgrows that, split it instead of adding section comments.
+- Design for single responsibility: give each module one clear purpose and explicit, typed interfaces. Keep functions at one level of abstraction; extract cohesive responsibilities so each module has one reason to change.
+- Give mutable state and resources one owner; expose state changes through explicit operations and clean up on partial failure and repeated shutdown.
 - Prefer pure functions for decisions; push I/O to boundaries.
 - Separate decisions, persistence, and effects.
+- Make commit and effect ordering explicit; keep in-memory state consistent with committed records. Define behavior for duplicate requests, late callbacks, cancellation, and failures after commit.
 - Favor extending behavior through stable contracts over modifying consumers; introduce abstractions for concrete needs, not speculative flexibility.
+- Treat persisted formats and public protocols as compatibility contracts; make migrations and incompatible-version handling explicit.
 - Make invalid states unrepresentable with discriminated unions. Each concept has one definition: a domain vocabulary (statuses, kinds, policies) is a union declared once and imported, never retyped as `string`; a helper has one home, never a second copy.
 - Validate external data once at boundaries.
 - Keep business rules independent of infrastructure.
 - Make failure and partial-success behavior explicit.
-- Test observable contracts and invariants, not implementation details. Decisions get fast unit tests beside the module; the acceptance lane tests wiring, not logic.
+- Test observable contracts and invariants, not implementation details. Test decisions with fast unit tests beside the module, and verify wiring and critical end-to-end invariants through acceptance tests.
 - Keep dependencies directional (`docs/DEPENDENCIES.md`) and expose a module's contract by name, never its internals.
+- Document non-obvious invariants and design tradeoffs near their owner; explain why, without restating the implementation.
