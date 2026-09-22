@@ -12,3 +12,5 @@ config/*.local.json
 # promptfoo outputs
 tests/acceptance/promptfoo/output/
 .promptfoo/
+# agent worktrees: whole copies of this tree, checked out inside it
+.claude/worktrees/
