@@ -9,3 +9,5 @@ Style is enforced by `npm run check` (Prettier, ESLint, tsc, Vitest); CI runs th
 - Dispatch on a discriminated union uses `match()` from ts-pattern with `.exhaustive()`, never `switch`. No nested ternaries.
 - Use the platform: `Promise.withResolvers`, `import.meta.dirname`, `node:timers/promises`, iterator helpers. Node is pinned in `.node-version`.
 - Command-line entry points use commander; do not parse `process.argv` by hand.
+
+Design for single responsibility: give each module one clear purpose and explicit, typed interfaces. Prefer pure functions for decisions; push I/O to boundaries. Separate decisions, persistence, and effects. Favor extending behavior through stable contracts over modifying consumers; introduce abstractions for concrete needs, not speculative flexibility.
