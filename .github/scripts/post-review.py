@@ -342,11 +342,6 @@ def ours(thread):
     return any(MARKER in (c.get("body") or "") for c in comments)
 
 
-def has_human_reply(thread):
-    comments = thread.get("comments", {}).get("nodes") or []
-    return any(not is_bot_login((c.get("author") or {}).get("login")) for c in comments)
-
-
 def serialize_thread(thread):
     comments = []
     for comment in thread.get("comments", {}).get("nodes") or []:

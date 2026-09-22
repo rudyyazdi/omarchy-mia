@@ -24,6 +24,27 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          sparse-checkout: .github/scripts
+          path: .trusted-review
+          persist-credentials: false
+      - name: Prefer dump script from the base commit
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          trusted=.trusted-review/.github/scripts/post-review.py
+          if [ -f "$trusted" ]; then
+            echo "POST_REVIEW_PY=$trusted" >> "$GITHUB_ENV"
+          elif [ "$BASE_REF" = "$DEFAULT_BRANCH" ] && [ ! -e .trusted-review/.github/scripts ]; then
+            echo "Base commit predates post-review.py; using the PR copy for its initial introduction"
+            echo "POST_REVIEW_PY=.github/scripts/post-review.py" >> "$GITHUB_ENV"
+          else
+            echo "Trusted post-review.py is missing from the base checkout" >&2
+            exit 1
+          fi
       - name: Write PR diff for the reviewer
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -38,7 +59,7 @@ jobs:
           PRIOR_THREADS: prior-threads.json
         run: |
           echo "prior-threads.json" >> .git/info/exclude
-          python3 .github/scripts/post-review.py dump-threads
+          python3 "$POST_REVIEW_PY" dump-threads
       - name: Review
         uses: anomalyco/opencode/github@3104c1428ec91f809e5ab86631300de41eb6952e # v1.18.30
         env:
@@ -167,6 +188,27 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          sparse-checkout: .github/scripts
+          path: .trusted-review
+          persist-credentials: false
+      - name: Prefer dump script from the base commit
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          trusted=.trusted-review/.github/scripts/post-review.py
+          if [ -f "$trusted" ]; then
+            echo "POST_REVIEW_PY=$trusted" >> "$GITHUB_ENV"
+          elif [ "$BASE_REF" = "$DEFAULT_BRANCH" ] && [ ! -e .trusted-review/.github/scripts ]; then
+            echo "Base commit predates post-review.py; using the PR copy for its initial introduction"
+            echo "POST_REVIEW_PY=.github/scripts/post-review.py" >> "$GITHUB_ENV"
+          else
+            echo "Trusted post-review.py is missing from the base checkout" >&2
+            exit 1
+          fi
       - name: Write PR diff for the reviewer
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -181,7 +223,7 @@ jobs:
           PRIOR_THREADS: prior-threads.json
         run: |
           echo "prior-threads.json" >> .git/info/exclude
-          python3 .github/scripts/post-review.py dump-threads
+          python3 "$POST_REVIEW_PY" dump-threads
       - name: Review
         uses: anomalyco/opencode/github@3104c1428ec91f809e5ab86631300de41eb6952e # v1.18.30
         env:
