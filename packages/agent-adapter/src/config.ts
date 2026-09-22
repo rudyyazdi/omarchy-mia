@@ -6,21 +6,19 @@ export type Effort = z.infer<typeof EffortSchema>;
 export const ToolPolicySchema = z.enum(["allow", "ask", "deny"]);
 export type ToolPolicy = z.infer<typeof ToolPolicySchema>;
 
+/** The two network transports differ only in their discriminator; the shape they accept is one definition. */
+const remoteMcpServerSchema = <Transport extends "http" | "sse">(transport: Transport) =>
+  z
+    .object({
+      type: z.literal(transport),
+      url: z.string().url(),
+      headers: z.record(z.string(), z.string()).optional(),
+    })
+    .strict();
+
 export const McpServerConfigSchema = z.discriminatedUnion("type", [
-  z
-    .object({
-      type: z.literal("http"),
-      url: z.string().url(),
-      headers: z.record(z.string(), z.string()).optional(),
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal("sse"),
-      url: z.string().url(),
-      headers: z.record(z.string(), z.string()).optional(),
-    })
-    .strict(),
+  remoteMcpServerSchema("http"),
+  remoteMcpServerSchema("sse"),
   z
     .object({
       type: z.literal("stdio"),

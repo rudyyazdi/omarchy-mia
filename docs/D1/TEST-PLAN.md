@@ -77,26 +77,32 @@ Reject uses `"decision":"reject"`. These are proposed Mia payloads, not Claude p
 
 `L` = live runtime. `H` = deterministic harness/substitute. Keep evidence labels separate. If Claude ignores a requested tool call, the scenario was not exercised; a prose answer is not a pass.
 
-| Case | Send / trigger | Required result |
-| --- | --- | --- |
-| Stream/context — L | `Remember marker K7. Explain approval in five sentences.` Then `What marker did I give you?` | Deltas arrive before completion; answer K7; same agent conversation. |
-| Allowed — L | `Call d1.read once. Report the counter.` | One read; zero prompts. |
-| Approve/reject — L | `Call d1.change with delta 1 exactly once. Do not retry a denial.` Approve; repeat and reject. | Zero commits while pending; one after approve; none after reject. |
-| Every call — L | `Call d1.change with delta 1 twice, sequentially.` Approve first, reject second. | Two approval IDs; one commit. |
-| Denied — L/H | `Call d1.forbidden once.` Also inject its proposal through adapter checks. | No execution. Hidden-tool refusal alone does not prove proposal enforcement. |
-| Binding/dedup — H | Change pending delta 1→2 under the same runtime call ID; deliver old approval. Repeat a decision and `cmd-1`; alter client/task/call IDs and epoch independently. | Old/foreign approval invalid; changed call needs fresh approval; no duplicate task/effect. |
-| Silence/disconnect — L/H | Request change; give no decision, then disconnect. | Pending record retained; zero commits. |
-| Interrupt first — H | Hold before release; send interrupt, then approval. | Gate closes; approval stale; zero dispatches. |
-| Release first — H | Release approved call; hold at `entered`; interrupt. | In-flight classification, not “never executed.” |
-| Cancellable — L/H | `Call d1.slow with mode cancellable once, then d1.change with delta 1.` Approve slow; interrupt at `entered`. | Confirm cancellation; zero commits; no later consequential dispatch. |
-| Uncancellable — L/H | Same prompt with mode `uncancellable`; interrupt at `entered`, then release worker. | One slow commit; report actual completion; no later change. |
-| Allowed action while interrupted — L/H | Use second profile. Interrupt during `slow`; harness injects a subsequent `change` proposal after gate closure. Repeat live if the runtime proposes it. | No dispatch despite allow policy. No live proposal means live gate coverage remains unproven, not passed. |
-| Unknown result — H | Commit slow action; drop result channel. | Unknown outcome after timeout; no retry or conflicting work. |
-| Record failure — H | Fail approval transaction before release. | No dispatch; visible error. |
-| Setup/protocol — H + probe | Independently omit runtime/auth, select unavailable model, reject effort/policy support, inject malformed events, crash runtime. Inject conflicting inherited effort. | Explicit failures; no fallback. Requested/effective identities and setting precedence recorded accurately. |
-| Artifact/export — L/H | `Call d1.artifact with name result.txt and text D1.` Approve; export. | Retained bytes and provenance survive source edits; offline verification passes. Run the full [record checks](CONVERSATION-RECORDS.md#d1-verification-additions). |
+Each case's prompt, trigger and required result belong to the lane that runs it, where they cannot drift from what is actually exercised: the live cases are the named scenarios in [`scenarios.ts`](../../tests/acceptance/promptfoo/scenarios.ts), judged from ledger and event evidence by [`assert.ts`](../../tests/acceptance/promptfoo/assert.ts); the H cases are the named tests in [`tests/acceptance/src`](../../tests/acceptance/src). Which test evidenced which case is in the [acceptance record](ACCEPTANCE-RECORD.md#test-plan-scenarios).
 
-For approval races, inject both orderings at controller barriers. For live cancellation, observe the independent fixture ledger. A substitute pass never establishes runtime support.
+| Case | Lane | Where it runs |
+| --- | --- | --- |
+| Stream/context | L | `stream-context` |
+| Allowed | L | `allowed` |
+| Approve/reject | L | `approve-reject` |
+| Every call | L | `every-call` |
+| Denied | L/H | `denied`; `engine.test.ts` "approval path" |
+| Binding/dedup | H | `engine.test.ts` "streaming and commands", "approval path" |
+| Silence/disconnect | L/H | `silence-disconnect`; `engine.test.ts` "approval path" |
+| Interrupt first | H | `engine.test.ts` "interruption path" |
+| Release first | H | `engine.test.ts` "interruption path" |
+| Cancellable | L/H | `cancellable`; `adapter-e2e.test.ts`, `fixture.test.ts` |
+| Uncancellable | L/H | `uncancellable`; `engine.test.ts` "interruption path", `fixture.test.ts` |
+| Allowed action while interrupted | L/H | `allow-policy-no-prompt`; `engine.test.ts` "interruption path" |
+| Unknown result | H | `engine.test.ts` "interruption path" |
+| Record failure | H | `engine.test.ts` "approval path" |
+| Setup/protocol | H + probe | `engine.test.ts` "streaming and commands", "configuration and provenance"; `adapter-e2e.test.ts`; `npm run probe` |
+| Artifact/export | L/H | `artifact-export`; `records.test.ts`; the full [record checks](CONVERSATION-RECORDS.md#d1-verification-additions) |
+
+Lane rules, which no test can state for itself:
+
+- Hidden-tool refusal alone does not prove proposal enforcement; inject the proposal through the adapter checks as well.
+- For approval races, inject both orderings at controller barriers. For live cancellation, observe the independent fixture ledger.
+- A substitute pass never establishes runtime support, and an absent live proposal after gate closure leaves live gate coverage unproven, not passed.
 
 ## Pass record
 

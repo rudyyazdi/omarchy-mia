@@ -8,8 +8,14 @@ import { z } from "zod";
 import { errorMessage, type EventPayload, type ServerEventOf } from "@mia/protocol";
 import { MiaClient } from "./client.ts";
 
-const USAGE =
-  "usage: mia-client --config <profile.json> | --url ws://127.0.0.1:PORT --secret-file <path>";
+/**
+ * Bad arguments exit 2 with commander's own help on stderr: the option list and the argument
+ * synopsis below are written once, where commander parses them, and never restated as a string.
+ */
+const usage: () => never = () => {
+  console.error(program.helpInformation());
+  process.exit(2);
+};
 
 const program = new Command()
   .name("mia-client")
@@ -19,8 +25,7 @@ const program = new Command()
   .option("--config <profile.json>", "server profile to read the connection from")
   .exitOverride((error) => {
     if (error.exitCode === 0) process.exit(0);
-    console.error(USAGE);
-    process.exit(2);
+    usage();
   })
   .configureOutput({ writeErr: () => undefined });
 program.parse();
@@ -39,10 +44,7 @@ const resolveConnection = (): { url: string; secretFile: string } => {
       secretFile: resolve(base, profile.server.secretFile),
     };
   }
-  if (!values.url || !values.secretFile) {
-    console.error(USAGE);
-    process.exit(2);
-  }
+  if (!values.url || !values.secretFile) usage();
   return { url: values.url, secretFile: values.secretFile };
 };
 

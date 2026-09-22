@@ -67,24 +67,24 @@ Generated files must be explicitly registered by the adapter/tool result or an o
 
 ## D1 logical records
 
-Names below define the proposed schema contract; implementation migrations supply exact SQL types. Every table has a stable primary key, schema-versioned payloads where used, and explicit timestamps. Scoped relationships must reject cross-conversation mismatches, using composite foreign keys where appropriate. Enable foreign-key enforcement on every connection; SQLite requires applications to enable it. [SQLite foreign-key documentation](https://www.sqlite.org/foreignkeys.html).
+Each record below exists for a reason the schema cannot express; its columns, types and constraints are the SQL in [`packages/records/src/schema.ts`](../../packages/records/src/schema.ts). Every table has a stable primary key, schema-versioned payloads where used, and explicit timestamps. Scoped relationships must reject cross-conversation mismatches, using composite foreign keys where appropriate. Enable foreign-key enforcement on every connection; SQLite requires applications to enable it. [SQLite foreign-key documentation](https://www.sqlite.org/foreignkeys.html).
 
-| Record | Essential fields and relationships | Why it exists |
-| --- | --- | --- |
-| `conversations` | `id`, `started_at`, status, initial provenance ID | Stable debugging and retrieval root. |
-| `tasks` | `id`, `conversation_id`, status, `created_at` | Work retains its originating conversation even if another becomes active later. |
-| `executions` | `id`, `task_id`, `conversation_id`, runtime identity, runtime conversation identifier, requested/reported model, requested/reported effort, provenance ID, execution epoch, status, start/end | Attribute actual runtime attempts and builds; do not assume a task always has only one execution. D1 runs one at a time. |
-| `events` | `id`, `conversation_id`, conversation sequence, type, payload version, task/execution/client/connection IDs where applicable, `caused_by_event_id`, producer identity/sequence, captured/received times, optional duration and timing source | Ordered history plus causal links across different clocks. Unknown or unobservable timing remains unknown. |
-| `commands` | `id`, conversation/client/connection IDs, client command ID, payload digest, disposition, result-event ID | Detect duplicate commands and reject reuse of an ID with a different payload. |
-| `tool_calls` | `id`, conversation/task/execution IDs, runtime call ID, binding revision, tool identity, argument binding digest, effective policy snapshot, status, proposal/dispatch/result event IDs | Distinguish intent, authorization, dispatch, result, and uncertain side effects. |
-| `approvals` | `id`, tool-call ID, execution epoch, status, requesting event, decision event/client, consumed time | Single-use exact-call authorization; denial and invalidation are evidence too. |
-| `clients`, `client_connections` | Client identity; connection ID, client/build/provenance IDs, connected/disconnected/last-received times | Differentiate stable devices from process/connection lifetimes and changing builds. |
-| `diagnostics` | `id`, conversation/client/connection IDs, optional task ID, event ID, captured/received times, base-snapshot ID if differential, structured state | Freshness and reconstruction without repeatedly storing unchanged detail. Retain all referenced bases. |
-| `provenance_sets`, `provenance_entries` | Set ID; named entry linking immutable artifact ID, role/version and availability | Prompt, configuration, contract, architecture, source/build and adapter snapshots; missing entries have explicit reasons. |
-| `artifacts` | `id`, kind, MIME type, schema version, logical name, created time, producer execution/event IDs, optional object digest, byte size, capture status, external locator, redaction metadata | Inventory of generated outputs, tool payloads, runtime transcripts if exposed, diagnostic data and snapshots. |
-| `objects` | Digest primary key, byte count, relative storage key, integrity state | Immutable retained bytes; storage location is independent of original paths. |
-| `artifact_links` | `id`, conversation ID, artifact ID, relation, optional task/event/tool-call/diagnostic/provenance-set IDs | Enumerate every artifact needed by a conversation, including shared snapshots and large event payloads. Typed references avoid an unverifiable generic owner string. |
-| `artifact_dependencies` | Parent artifact ID, required artifact ID, relation | Include referenced data, bases and attachments needed to interpret an artifact. Traverse with cycle detection. |
+| Record | Why it exists |
+| --- | --- |
+| `conversations` | Stable debugging and retrieval root. |
+| `tasks` | Work retains its originating conversation even if another becomes active later. |
+| `executions` | Attribute actual runtime attempts and builds; do not assume a task always has only one execution. D1 runs one at a time. |
+| `events` | Ordered history plus causal links across different clocks. Unknown or unobservable timing remains unknown. |
+| `commands` | Detect duplicate commands and reject reuse of an ID with a different payload. |
+| `tool_calls` | Distinguish intent, authorization, dispatch, result, and uncertain side effects. |
+| `approvals` | Single-use exact-call authorization; denial and invalidation are evidence too. |
+| `clients`, `client_connections` | Differentiate stable devices from process/connection lifetimes and changing builds. |
+| `diagnostics` | Freshness and reconstruction without repeatedly storing unchanged detail. Retain all referenced bases. |
+| `provenance_sets`, `provenance_entries` | Prompt, configuration, contract, architecture, source/build and adapter snapshots; missing entries have explicit reasons. |
+| `artifacts` | Inventory of generated outputs, tool payloads, runtime transcripts if exposed, diagnostic data and snapshots. |
+| `objects` | Immutable retained bytes; storage location is independent of original paths. |
+| `artifact_links` | Enumerate every artifact needed by a conversation, including shared snapshots and large event payloads. Typed references avoid an unverifiable generic owner string. |
+| `artifact_dependencies` | Include referenced data, bases and attachments needed to interpret an artifact. Traverse with cycle detection. |
 
 Make artifact-link registration part of the same database transaction that introduces a reference. Use check constraints to validate link roles and required typed IDs. A snapshot shared across conversations gets a link in each conversation. Add indexes for other foreign-key child columns where the actual joins/integrity checks require them; avoid redundant indexes already covered by a leading key below.
 

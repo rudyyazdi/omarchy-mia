@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
   Catalog,
@@ -13,22 +13,14 @@ import {
   verifyExport,
 } from "@mia/records";
 import type { MiaClient } from "@mia/text-client";
-import { ScriptedRuntime } from "./scripted-runtime.ts";
-import { must, mustString, startTestServer, tick, type TestServer } from "./harness.ts";
+import type { ScriptedRuntime } from "./scripted-runtime.ts";
+import { must, mustString, tick, useScriptedSession, type TestServer } from "./harness.ts";
 
 let runtime: ScriptedRuntime;
 let ts: TestServer;
 let client: MiaClient;
-
-beforeEach(async () => {
-  runtime = new ScriptedRuntime();
-  ts = await startTestServer(runtime);
-  client = await ts.connect("client-A");
-  await client.sendDiagnostics();
-  await client.startConversation();
-});
-afterEach(async () => {
-  await ts.close();
+useScriptedSession((session) => {
+  ({ runtime, server: ts, client } = session);
 });
 
 const ExportedArtifactRow = z.object({ logical_name: z.string(), object_digest: z.string() });

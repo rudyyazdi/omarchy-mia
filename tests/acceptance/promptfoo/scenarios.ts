@@ -4,7 +4,7 @@
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
-import { FixtureHarness } from "@mia/controlled-mcp";
+import { FixtureHarness, type FixtureState } from "@mia/controlled-mcp";
 import { MiaClient, type AckPayload } from "@mia/text-client";
 import type { ServerEvent } from "@mia/protocol";
 
@@ -72,6 +72,10 @@ type Decider = (request: {
   index: number;
 }) => "approve" | "reject" | "ignore";
 
+/** Commits are the fixture's own count of executed actions; model prose never establishes one. */
+const commitCount = (state: FixtureState): number =>
+  state.ledger.filter((entry) => entry.kind === "committed").length;
+
 const taskIdOf = (ack: AckPayload): string => {
   const taskId = ack.result?.task_id;
   if (typeof taskId !== "string") throw new Error("accepted submission carried no task id");
@@ -112,7 +116,7 @@ const runTask = async (
       approval_id: event.payload.approval_id,
       tool: event.payload.tool_identity,
       decision: choice,
-      ledger_commits_at_request: state.ledger.filter((entry) => entry.kind === "committed").length,
+      ledger_commits_at_request: commitCount(state),
     });
     if (choice === "ignore") return;
     const decided = await client.decide({
@@ -145,114 +149,132 @@ const runTask = async (
   return { taskId, transcript, status: finished.payload.status, decisions };
 };
 
+type TaskResult = Awaited<ReturnType<typeof runTask>>;
+type ScenarioResult = Awaited<ReturnType<Scenario["run"]>>;
+
+/** What a task's `during` hook can reach: the live context, the task it belongs to, the notes it may add to. */
+interface TaskContext {
+  ctx: ScenarioContext;
+  taskId: string;
+  notes: string[];
+}
+
+interface TaskSpec {
+  text: string;
+  decide: Decider;
+  during?: (context: TaskContext) => Promise<void>;
+}
+
+const evidenceOf = (
+  ctx: ScenarioContext,
+  tasks: TaskResult[],
+  notes: string[],
+): ScenarioResult => ({
+  conversation_id: conversationIdOf(ctx.client),
+  task_ids: tasks.map((task) => task.taskId),
+  decisions: tasks.flatMap((task) => task.decisions),
+  transcript: tasks.map((task) => task.transcript),
+  notes,
+  final_status: tasks.map((task) => task.status),
+});
+
+/**
+ * Every scenario below is "submit these tasks in this conversation, decide their approvals this
+ * way, report the evidence". Defining that once leaves each scenario stating only what is specific
+ * to it, and keeps every scenario's evidence assembled identically.
+ */
+const taskScenario = (spec: {
+  name: string;
+  profile: Scenario["profile"];
+  tasks: TaskSpec[];
+  notes?: string[];
+}): Scenario => ({
+  name: spec.name,
+  profile: spec.profile,
+  async run(ctx) {
+    const notes = [...(spec.notes ?? [])];
+    const results: TaskResult[] = [];
+    for (const task of spec.tasks) {
+      const during = task.during;
+      results.push(
+        await runTask(ctx, {
+          text: task.text,
+          decide: task.decide,
+          ...(during ? { during: (taskId: string) => during({ ctx, taskId, notes }) } : {}),
+        }),
+      );
+    }
+    return evidenceOf(ctx, results, notes);
+  },
+});
+
+const rejectEverything: Decider = () => "reject";
+const approveEverything: Decider = () => "approve";
+const approveSlowOnly: Decider = ({ tool }) => (tool === "mcp__d1__slow" ? "approve" : "reject");
+
+const CHANGE_ONCE = "Call d1.change with delta 1 exactly once. Do not retry a denial.";
+const slowThenChange = (mode: "cancellable" | "uncancellable"): string =>
+  `Call d1.slow with mode ${mode} exactly once, then call d1.change with delta 1 exactly once.`;
+
+/** Interrupt the moment the fixture reports the slow action entered: the shared part of both interruption scenarios. */
+const interruptAtEntered = async ({
+  ctx,
+  taskId,
+  notes,
+}: TaskContext): Promise<{ call_id: string }> => {
+  const entered = await ctx.harness.waitEntered(300_000);
+  notes.push(`entered ${entered.call_id} (${entered.mode})`);
+  const ack = await ctx.client.interrupt(taskId);
+  notes.push(`interrupt ack ${ack.disposition}`);
+  return entered;
+};
+
 export const SCENARIOS: Scenario[] = [
-  {
+  taskScenario({
     name: "stream-context",
     profile: "fixture-test",
-    async run(ctx) {
-      const first = await runTask(ctx, {
-        text: "Remember marker K7. Explain approval in five sentences.",
-        decide: () => "reject",
-      });
-      const second = await runTask(ctx, {
-        text: "What marker did I give you?",
-        decide: () => "reject",
-      });
-      return {
-        conversation_id: conversationIdOf(ctx.client),
-        task_ids: [first.taskId, second.taskId],
-        decisions: [...first.decisions, ...second.decisions],
-        transcript: [first.transcript, second.transcript],
-        notes: [],
-        final_status: [first.status, second.status],
-      };
-    },
-  },
-  {
+    tasks: [
+      { text: "Remember marker K7. Explain approval in five sentences.", decide: rejectEverything },
+      { text: "What marker did I give you?", decide: rejectEverything },
+    ],
+  }),
+  taskScenario({
     name: "allowed",
     profile: "fixture-test",
-    async run(ctx) {
-      const first = await runTask(ctx, {
-        text: "Call d1.read once. Report the counter.",
-        decide: () => "reject",
-      });
-      return {
-        conversation_id: conversationIdOf(ctx.client),
-        task_ids: [first.taskId],
-        decisions: first.decisions,
-        transcript: [first.transcript],
-        notes: [],
-        final_status: [first.status],
-      };
-    },
-  },
-  {
+    tasks: [{ text: "Call d1.read once. Report the counter.", decide: rejectEverything }],
+  }),
+  taskScenario({
     name: "approve-reject",
     profile: "fixture-test",
-    async run(ctx) {
-      const first = await runTask(ctx, {
-        text: "Call d1.change with delta 1 exactly once. Do not retry a denial.",
-        decide: () => "approve",
-      });
-      const second = await runTask(ctx, {
-        text: "Call d1.change with delta 1 exactly once. Do not retry a denial.",
-        decide: () => "reject",
-      });
-      return {
-        conversation_id: conversationIdOf(ctx.client),
-        task_ids: [first.taskId, second.taskId],
-        decisions: [...first.decisions, ...second.decisions],
-        transcript: [first.transcript, second.transcript],
-        notes: [],
-        final_status: [first.status, second.status],
-      };
-    },
-  },
-  {
+    tasks: [
+      { text: CHANGE_ONCE, decide: approveEverything },
+      { text: CHANGE_ONCE, decide: rejectEverything },
+    ],
+  }),
+  taskScenario({
     name: "every-call",
     profile: "fixture-test",
-    async run(ctx) {
-      const first = await runTask(ctx, {
+    tasks: [
+      {
         text: "Call d1.change with delta 1 twice, sequentially (two separate calls). Do not retry a denial.",
         decide: ({ index }) => (index === 0 ? "approve" : "reject"),
-      });
-      return {
-        conversation_id: conversationIdOf(ctx.client),
-        task_ids: [first.taskId],
-        decisions: first.decisions,
-        transcript: [first.transcript],
-        notes: [],
-        final_status: [first.status],
-      };
-    },
-  },
-  {
+      },
+    ],
+  }),
+  taskScenario({
     name: "denied",
     profile: "fixture-test",
-    async run(ctx) {
-      const first = await runTask(ctx, {
-        text: "Call d1.forbidden once. If it is not available, say so.",
-        decide: () => "reject",
-      });
-      return {
-        conversation_id: conversationIdOf(ctx.client),
-        task_ids: [first.taskId],
-        decisions: first.decisions,
-        transcript: [first.transcript],
-        notes: [],
-        final_status: [first.status],
-      };
-    },
-  },
+    tasks: [
+      { text: "Call d1.forbidden once. If it is not available, say so.", decide: rejectEverything },
+    ],
+  }),
   {
     name: "silence-disconnect",
     profile: "fixture-test",
     async run(ctx) {
       const notes: string[] = [];
       ctx.budget("silence-disconnect");
-      const ack = await ctx.client.submitText(
-        "Call d1.change with delta 1 exactly once. Do not retry a denial.",
-      );
+      const ack = await ctx.client.submitText(CHANGE_ONCE);
       const taskId = taskIdOf(ack);
       const requested = await ctx.client.waitFor(
         "approval_requested",
@@ -260,15 +282,10 @@ export const SCENARIOS: Scenario[] = [
         300_000,
       );
       const approvalId = requested.payload.approval_id;
-      const commitsAtRequest = (await ctx.harness.state()).ledger.filter(
-        (entry) => entry.kind === "committed",
-      ).length;
+      const commitsAtRequest = commitCount(await ctx.harness.state());
       ctx.client.close();
       await sleep(1_500);
-      const afterDisconnect = await ctx.harness.state();
-      notes.push(
-        `commits after disconnect: ${afterDisconnect.ledger.filter((entry) => entry.kind === "committed").length}`,
-      );
+      notes.push(`commits after disconnect: ${commitCount(await ctx.harness.state())}`);
       const again = await ctx.reconnect();
       again.conversationId = ctx.client.conversationId;
       const decided = await again.decide({
@@ -300,108 +317,65 @@ export const SCENARIOS: Scenario[] = [
       };
     },
   },
-  {
+  taskScenario({
     name: "cancellable",
     profile: "fixture-test",
-    async run(ctx) {
-      const notes: string[] = [];
-      const first = await runTask(ctx, {
-        text: "Call d1.slow with mode cancellable exactly once, then call d1.change with delta 1 exactly once.",
-        decide: ({ tool }) => (tool === "mcp__d1__slow" ? "approve" : "reject"),
-        during: async (taskId) => {
-          const entered = await ctx.harness.waitEntered(300_000);
-          notes.push(`entered ${entered.call_id} (${entered.mode})`);
-          const ack = await ctx.client.interrupt(taskId);
-          notes.push(`interrupt ack ${ack.disposition}`);
+    tasks: [
+      {
+        text: slowThenChange("cancellable"),
+        decide: approveSlowOnly,
+        during: async (context) => {
+          await interruptAtEntered(context);
         },
-      });
-      return {
-        conversation_id: conversationIdOf(ctx.client),
-        task_ids: [first.taskId],
-        decisions: first.decisions,
-        transcript: [first.transcript],
-        notes,
-        final_status: [first.status],
-      };
-    },
-  },
-  {
+      },
+    ],
+  }),
+  taskScenario({
     name: "uncancellable",
     profile: "fixture-test",
-    async run(ctx) {
-      const notes: string[] = [];
-      const first = await runTask(ctx, {
-        text: "Call d1.slow with mode uncancellable exactly once, then call d1.change with delta 1 exactly once.",
-        decide: ({ tool }) => (tool === "mcp__d1__slow" ? "approve" : "reject"),
-        during: async (taskId) => {
-          const entered = await ctx.harness.waitEntered(300_000);
-          notes.push(`entered ${entered.call_id} (${entered.mode})`);
-          const ack = await ctx.client.interrupt(taskId);
-          notes.push(`interrupt ack ${ack.disposition}`);
+    tasks: [
+      {
+        text: slowThenChange("uncancellable"),
+        decide: approveSlowOnly,
+        during: async (context) => {
+          const entered = await interruptAtEntered(context);
+          const { ctx, taskId, notes } = context;
           await ctx.client.waitFor(
             "interruption_outcome",
             (event) => event.payload.task_id === taskId,
             120_000,
           );
-          const before = await ctx.harness.state();
-          notes.push(
-            `commits before release: ${before.ledger.filter((entry) => entry.kind === "committed").length}`,
-          );
+          notes.push(`commits before release: ${commitCount(await ctx.harness.state())}`);
           await ctx.harness.release(entered.call_id);
-          for (let attempt = 0; attempt < 200; attempt++) {
-            const state = await ctx.harness.state();
-            if (state.ledger.some((entry) => entry.kind === "committed" && entry.tool === "slow"))
-              break;
-            await sleep(25);
-          }
+          await ctx.harness.waitForState((state) =>
+            state.ledger.some((entry) => entry.kind === "committed" && entry.tool === "slow"),
+          );
         },
-      });
-      return {
-        conversation_id: conversationIdOf(ctx.client),
-        task_ids: [first.taskId],
-        decisions: first.decisions,
-        transcript: [first.transcript],
-        notes,
-        final_status: [first.status],
-      };
-    },
-  },
-  {
+      },
+    ],
+  }),
+  taskScenario({
     name: "allow-policy-no-prompt",
     profile: "fixture-test-interrupt",
-    async run(ctx) {
-      const first = await runTask(ctx, {
+    tasks: [
+      {
         text: "Call d1.change with delta 1 exactly once. Report the new counter.",
-        decide: () => "reject",
-      });
-      return {
-        conversation_id: conversationIdOf(ctx.client),
-        task_ids: [first.taskId],
-        decisions: first.decisions,
-        transcript: [first.transcript],
-        notes: ["profile 2: change is policy-allow; expected zero prompts and one commit"],
-        final_status: [first.status],
-      };
-    },
-  },
-  {
+        decide: rejectEverything,
+      },
+    ],
+    notes: ["profile 2: change is policy-allow; expected zero prompts and one commit"],
+  }),
+  taskScenario({
     name: "artifact-export",
     profile: "fixture-test",
-    async run(ctx) {
-      const first = await runTask(ctx, {
+    tasks: [
+      {
         text: "Call d1.artifact with name result.txt and text D1. Report the result.",
-        decide: () => "approve",
-      });
-      return {
-        conversation_id: conversationIdOf(ctx.client),
-        task_ids: [first.taskId],
-        decisions: first.decisions,
-        transcript: [first.transcript],
-        notes: ["export and offline verification run by the harness after the eval"],
-        final_status: [first.status],
-      };
-    },
-  },
+        decide: approveEverything,
+      },
+    ],
+    notes: ["export and offline verification run by the harness after the eval"],
+  }),
 ];
 
 export const runScenario = async (

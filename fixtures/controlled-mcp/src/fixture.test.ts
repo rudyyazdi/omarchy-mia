@@ -78,13 +78,9 @@ describe("controlled fixture", () => {
     const entered = await harness.waitEntered(10_000);
     expect(entered.mode).toBe("cancellable");
     await mcpClient.close(); // drops the HTTP connection
-    // wait until ledger shows cancelled
-    for (let attempt = 0; attempt < 100; attempt++) {
-      const state = await harness.state();
-      if (state.ledger.some((entry) => entry.kind === "cancelled")) break;
-      await sleep(20);
-    }
-    const state = await harness.state();
+    const state = await harness.waitForState((current) =>
+      current.ledger.some((entry) => entry.kind === "cancelled"),
+    );
     expect(state.counter).toBe(0);
     expect(state.ledger.some((entry) => entry.kind === "cancelled" && entry.tool === "slow")).toBe(
       true,
