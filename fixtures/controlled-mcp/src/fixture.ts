@@ -1,5 +1,5 @@
-import { once } from "node:events";
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
@@ -295,9 +295,10 @@ export const startFixture = async (options: FixtureOptions): Promise<FixtureHand
       sendJson(res, 500, { error: errorMessage(error) });
     }
   });
-  const listening = once(harnessServer, "listening");
-  harnessServer.listen(options.harnessPort ?? 0, host);
-  await listening;
+  const listening = Promise.withResolvers<undefined>();
+  harnessServer.once("error", listening.reject);
+  harnessServer.listen(options.harnessPort ?? 0, host, () => listening.resolve(undefined));
+  await listening.promise;
   const harnessAddress = harnessServer.address();
   if (harnessAddress === null || typeof harnessAddress === "string")
     throw new Error("harness server did not bind a TCP port");

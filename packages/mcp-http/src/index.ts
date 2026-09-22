@@ -150,9 +150,10 @@ export const startMcpHttpServer = async (
   });
   httpServer.keepAliveTimeout = 5_000;
 
-  const listening = once(httpServer, "listening");
-  httpServer.listen(options.port ?? 0, host);
-  await listening;
+  const listening = Promise.withResolvers<undefined>();
+  httpServer.once("error", listening.reject);
+  httpServer.listen(options.port ?? 0, host, () => listening.resolve(undefined));
+  await listening.promise;
   const address = httpServer.address();
   if (address === null || typeof address === "string")
     throw new Error("MCP HTTP server did not bind a TCP address");

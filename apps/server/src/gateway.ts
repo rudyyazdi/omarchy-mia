@@ -1,5 +1,5 @@
-import { once } from "node:events";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { once } from "node:events";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { dirname } from "node:path";
@@ -265,9 +265,10 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
     socket.on("error", (error) => options.log(`socket error on ${conn.id}: ${error.message}`));
   });
 
-  const listening = once(httpServer, "listening");
-  httpServer.listen(options.port, options.host);
-  await listening;
+  const listening = Promise.withResolvers<undefined>();
+  httpServer.once("error", listening.reject);
+  httpServer.listen(options.port, options.host, () => listening.resolve(undefined));
+  await listening.promise;
   const address = httpServer.address();
   if (address === null || typeof address === "string")
     throw new Error("gateway is not listening on a TCP port");

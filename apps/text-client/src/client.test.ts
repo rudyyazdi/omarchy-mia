@@ -1,11 +1,11 @@
 import { once } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
-import { type ServerEventOf } from "@mia/protocol";
+import { PROTOCOL_VERSION, type ServerEventOf } from "@mia/protocol";
 import { MiaClient } from "./client.ts";
 
 const ackEvent = (commandId: string): ServerEventOf<"ack"> => ({
-  protocol_version: 1,
+  protocol_version: PROTOCOL_VERSION,
   message_id: `event_${commandId}`,
   conversation_id: null,
   sequence: null,
@@ -25,12 +25,9 @@ afterEach(() => vi.restoreAllMocks());
 
 describe("client deadlines", () => {
   it("rejects an event wait on deadline and keeps independent predicates working", async () => {
-    const deadline = new AbortController();
-    vi.spyOn(AbortSignal, "timeout").mockReturnValueOnce(deadline.signal);
     const client = makeClient();
-    const expired = client.waitFor("ack");
+    const expired = client.waitFor("ack", () => true, 1);
     const rejected = expect(expired).rejects.toThrow("timed out waiting for ack");
-    deadline.abort();
     await rejected;
     const wanted = client.waitFor("ack", (event) => event.payload.command_id === "wanted");
     client.emit("ack", ackEvent("other"));

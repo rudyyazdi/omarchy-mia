@@ -30,6 +30,7 @@ const isEventOf =
 /**
  * Programmatic Mia client used by the terminal UI, the acceptance harness and the promptfoo provider.
  * Every command gets a unique message_id; resends reuse it (the server deduplicates).
+ * Deadlines use unref'd AbortSignal timers: the connection, not a pending wait, keeps the process alive.
  */
 export class MiaClient extends EventEmitter {
   readonly clientId: string;

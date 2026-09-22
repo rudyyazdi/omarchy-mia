@@ -69,6 +69,19 @@ const layerOverrides = LAYERS.flatMap((layer, index) =>
       ],
 );
 
+const RESTRICTED_SYNTAX = [
+  {
+    selector: "FunctionDeclaration",
+    message: `Use an arrow function assigned to a const. ${BYPASS_NOTE}`,
+  },
+  {
+    selector:
+      "FunctionExpression:not(MethodDefinition > FunctionExpression):not(Property[method=true] > FunctionExpression)",
+    message: `Use an arrow function. ${BYPASS_NOTE}`,
+  },
+  { selector: "SwitchStatement", message: `Use match() from ts-pattern. ${BYPASS_NOTE}` },
+];
+
 export default tseslint.config(
   {
     ignores: [
@@ -95,25 +108,27 @@ export default tseslint.config(
       "func-style": ["error", "expression"],
       "prefer-arrow-callback": "error",
       "id-length": ["error", { min: 2, exceptions: ["_"], properties: "never" }],
-      "no-restricted-syntax": [
-        "error",
-        {
-          selector: "FunctionDeclaration",
-          message: `Use an arrow function assigned to a const. ${BYPASS_NOTE}`,
-        },
-        {
-          selector:
-            "FunctionExpression:not(MethodDefinition > FunctionExpression):not(Property[method=true] > FunctionExpression)",
-          message: `Use an arrow function. ${BYPASS_NOTE}`,
-        },
-        { selector: "SwitchStatement", message: `Use match() from ts-pattern. ${BYPASS_NOTE}` },
-      ],
+      "no-restricted-syntax": ["error", ...RESTRICTED_SYNTAX],
       "@typescript-eslint/no-non-null-assertion": "error",
       "@typescript-eslint/consistent-type-assertions": ["error", { assertionStyle: "never" }],
       "@typescript-eslint/consistent-type-definitions": "off",
       "@typescript-eslint/no-unused-vars": [
         "error",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
+      ],
+    },
+  },
+  {
+    files: ["packages/**/*.ts", "apps/**/*.ts", "fixtures/**/*.ts"],
+    ignores: ["**/*.test.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        ...RESTRICTED_SYNTAX,
+        {
+          selector: 'NewExpression[callee.name="Promise"]',
+          message: `Use Promise.withResolvers, AbortSignal.timeout or once(). ${BYPASS_NOTE}`,
+        },
       ],
     },
   },
