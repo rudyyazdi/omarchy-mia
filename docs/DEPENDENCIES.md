@@ -1,18 +1,10 @@
 # Dependency direction
 
-Imports point down the table. Nothing imports up, and nothing imports a sibling in its own layer.
+Imports point down the layers: nothing imports a layer above itself, and nothing imports a sibling in its own layer, so a module's dependencies can be read off its position alone.
 
-| Layer | Workspaces                                            | May import          |
-| ----- | ----------------------------------------------------- | ------------------- |
-| 0     | `@mia/protocol`                                       | Node and npm only   |
-| 1     | `@mia/records`, `@mia/mcp-http`                       | layer 0             |
-| 2     | `@mia/agent-adapter`, `@mia/controlled-mcp` (fixture) | layers 0 to 1       |
-| 3     | `apps/*`, `tools/*`                                   | layers 0 to 2       |
-| 4     | `tests/*`                                             | anything            |
+Which workspace sits in which layer is the `LAYERS` list in [`eslint.config.js`](../eslint.config.js). That list is the source: `npm run lint` turns it into `no-restricted-imports` overrides and fails on an upward or cross-workspace import, while a table here could only ever agree with it by hand.
 
 Layers 3 and 4 are entry points: only tests may import an app, and nothing imports a test or a tool.
-
-The `LAYERS` list in `eslint.config.js` encodes this table as `no-restricted-imports` overrides, so `npm run lint` fails on an upward or cross-workspace import; change the table and that list together.
 
 ## When to split
 
