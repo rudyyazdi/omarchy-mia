@@ -125,6 +125,7 @@ describe("verifyExport input validation", () => {
       });
       expect(result.problems).toHaveLength(1);
       expect(result.problems[0]).toContain("manifest.json invalid:");
+      expect(result.problems[0]).not.toContain("\n");
     },
   );
 
@@ -152,6 +153,16 @@ describe("verifyExport input validation", () => {
       expect(verifyExport(directory).problems).toContain("unparsable record in tasks");
     },
   );
+
+  it("rejects unknown capture status instead of skipping retained-object verification", () => {
+    replaceRecords(
+      "records/artifacts.jsonl",
+      `${JSON.stringify({ id: "artifact", capture_status: "retaind", object_digest: null })}\n`,
+    );
+    const result = verifyExport(directory);
+    expect(result.ok).toBe(false);
+    expect(result.problems).toContain("unparsable record in artifacts");
+  });
 
   it.each([
     {

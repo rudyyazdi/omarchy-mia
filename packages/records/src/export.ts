@@ -14,9 +14,9 @@ import { sha256Hex } from "@mia/protocol";
 import { z } from "zod";
 import { parseJson, type Catalog } from "./catalog.ts";
 import { ObjectStore } from "./objects.ts";
-import { snapshotConversation } from "./queries.ts";
+import { snapshotConversation, UnresolvedReferenceSchema } from "./queries.ts";
 import { renderReport } from "./report.ts";
-import { EXPORT_TABLES, SCHEMA_VERSION, type ExportTable } from "./schema.ts";
+import { CaptureStatusSchema, EXPORT_TABLES, SCHEMA_VERSION, type ExportTable } from "./schema.ts";
 
 export const EXPORT_VERSION = 1;
 
@@ -44,9 +44,7 @@ export const ExportManifestSchema = ManifestVersionsSchema.extend({
     external_only: z.number(),
     pending: z.number(),
   }),
-  unresolved_references: z.array(
-    z.object({ table: z.string(), id: z.string(), reason: z.string() }),
-  ),
+  unresolved_references: z.array(UnresolvedReferenceSchema),
   ongoing_tasks: z.array(z.string()),
   redaction: z.string(),
   files: z.record(z.string(), ExportedFileSchema),
@@ -218,6 +216,9 @@ const failedVerification = (problem: string): VerificationResult => ({
   checked_objects: 0,
 });
 
+const invalidManifest = (error: z.ZodError): VerificationResult =>
+  failedVerification(`manifest.json invalid: ${z.prettifyError(error).replaceAll("\n", "; ")}`);
+
 const RecordIdSchema = z.object({ id: z.string() });
 
 /** Verify an export offline: file checksums, object digests, referential integrity, report safety. */
@@ -233,19 +234,18 @@ export const verifyExport = (dir: string): VerificationResult => {
   }
   // Other versions may have different manifest and row shapes; inspect only the header first.
   const versions = ManifestVersionsSchema.safeParse(manifestJson);
-  if (!versions.success)
-    return failedVerification(`manifest.json invalid: ${versions.error.message}`);
-  for (const [name, expected] of Object.entries({
-    export_version: EXPORT_VERSION,
-    schema_version: SCHEMA_VERSION,
-  })) {
-    const actual =
-      name === "export_version" ? versions.data.export_version : versions.data.schema_version;
-    if (actual !== expected)
-      return failedVerification(`${name} ${actual} is not supported (expected ${expected})`);
-  }
+  if (!versions.success) return invalidManifest(versions.error);
+  const { export_version: exportVersion, schema_version: schemaVersion } = versions.data;
+  if (exportVersion !== EXPORT_VERSION)
+    return failedVerification(
+      `export_version ${exportVersion} is not supported (expected ${EXPORT_VERSION})`,
+    );
+  if (schemaVersion !== SCHEMA_VERSION)
+    return failedVerification(
+      `schema_version ${schemaVersion} is not supported (expected ${SCHEMA_VERSION})`,
+    );
   const parsed = ExportManifestSchema.safeParse(manifestJson);
-  if (!parsed.success) return failedVerification(`manifest.json invalid: ${parsed.error.message}`);
+  if (!parsed.success) return invalidManifest(parsed.error);
   const manifest = parsed.data;
   let checkedFiles = 0;
   for (const [rel, expected] of Object.entries(manifest.files)) {
@@ -287,7 +287,7 @@ export const verifyExport = (dir: string): VerificationResult => {
     artifacts: readTable(
       "artifacts",
       RecordIdSchema.extend({
-        capture_status: z.string(),
+        capture_status: CaptureStatusSchema,
         object_digest: z.string().nullable(),
       }),
     ),
