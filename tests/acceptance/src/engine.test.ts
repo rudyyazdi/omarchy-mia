@@ -1,6 +1,6 @@
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { ConfigurationError, validateRuntimeConfig } from "@mia/agent-adapter";
 import { ObjectStore } from "@mia/records";
 import type { MiaClient } from "@mia/text-client";
@@ -8,25 +8,17 @@ import { ScriptedRuntime, type ScriptedTurn } from "./scripted-runtime.ts";
 import {
   must,
   mustString,
-  startTestServer,
   testProfile,
   tick,
+  useScriptedSession,
   type TestServer,
 } from "./harness.ts";
 
 let runtime: ScriptedRuntime;
 let ts: TestServer;
 let client: MiaClient;
-
-beforeEach(async () => {
-  runtime = new ScriptedRuntime();
-  ts = await startTestServer(runtime);
-  client = await ts.connect("client-A");
-  await client.sendDiagnostics();
-  await client.startConversation();
-});
-afterEach(async () => {
-  await ts.close();
+const restartSession = useScriptedSession((session) => {
+  ({ runtime, server: ts, client } = session);
 });
 
 const submit = async (
@@ -48,6 +40,26 @@ const rows = <T = Record<string, unknown>>(sql: string, ...params: (string | num
     cat.close();
   }
 };
+
+/** Submit a turn whose one tool call is held at the approval gate: where the approval and interruption tests start. */
+const submitHeldCall = async (
+  text: string,
+  tool = "mcp__d1__change",
+  args: Record<string, unknown> = { delta: 1 },
+) => {
+  const { turn, taskId } = await submit(text);
+  turn.init();
+  const held = turn.request(tool, args, "toolu_1");
+  const requested = await client.waitFor("approval_requested");
+  return { turn, taskId, held, requested };
+};
+
+const decide = (taskId: string, approvalId: string, decision: "approve" | "reject") =>
+  client.decide({ taskId: taskId, approvalId: approvalId, decision: decision });
+
+/** Approval statuses in catalog order: how these tests show that nothing was authorised. */
+const approvalStatuses = (): string[] =>
+  rows<{ status: string }>("SELECT status FROM approvals").map((row) => row.status);
 
 describe("streaming and commands", () => {
   it("streams deltas in order before completion and deduplicates command ids", async () => {
@@ -129,14 +141,8 @@ describe("approval path", () => {
     expect(requested.payload.binding_revision).toBe(1);
     await tick();
     expect(turn.decisions).toHaveLength(0); // still held
-    expect(must(rows<{ status: string }>("SELECT status FROM approvals")[0]).status).toBe(
-      "pending",
-    );
-    const ack = await client.decide({
-      taskId: taskId,
-      approvalId: requested.payload.approval_id,
-      decision: "approve",
-    });
+    expect(approvalStatuses()).toEqual(["pending"]);
+    const ack = await decide(taskId, requested.payload.approval_id, "approve");
     expect(ack.disposition).toBe("accepted");
     expect(ack.result?.released).toBe(true);
     expect((await decision).behavior).toBe("allow");
@@ -146,11 +152,7 @@ describe("approval path", () => {
     );
     expect(types.indexOf("approval_resolved")).toBeLessThan(types.indexOf("tool_dispatched"));
     // a second decision on the same approval cannot reuse it
-    const reuse = await client.decide({
-      taskId: taskId,
-      approvalId: requested.payload.approval_id,
-      decision: "approve",
-    });
+    const reuse = await decide(taskId, requested.payload.approval_id, "approve");
     expect(reuse.disposition).toBe("rejected");
     expect(reuse.error?.code).toBe("invalid_state");
     turn.toolResult("toolu_1", JSON.stringify({ counter: 1 }));
@@ -162,11 +164,7 @@ describe("approval path", () => {
       (event) => event.payload.runtime_call_id === "toolu_2",
     );
     expect(requested2.payload.approval_id).not.toBe(requested.payload.approval_id);
-    await client.decide({
-      taskId: taskId,
-      approvalId: requested2.payload.approval_id,
-      decision: "reject",
-    });
+    await decide(taskId, requested2.payload.approval_id, "reject");
     const d2 = await second;
     expect(d2.behavior).toBe("deny");
     turn.toolResult("toolu_2", "denied", true);
@@ -201,17 +199,9 @@ describe("approval path", () => {
     );
     expect(requested2.payload.redacted_arguments).toEqual({ delta: 2 });
     // the old approval id cannot authorise the new binding
-    const stale = await client.decide({
-      taskId: taskId,
-      approvalId: requested1.payload.approval_id,
-      decision: "approve",
-    });
+    const stale = await decide(taskId, requested1.payload.approval_id, "approve");
     expect(stale.error?.code).toBe("invalid_state");
-    await client.decide({
-      taskId: taskId,
-      approvalId: requested2.payload.approval_id,
-      decision: "approve",
-    });
+    await decide(taskId, requested2.payload.approval_id, "approve");
     expect((await second).behavior).toBe("allow");
     turn.end();
     await client.waitFor("task_finished");
@@ -222,23 +212,11 @@ describe("approval path", () => {
   });
 
   it("rejects decisions with wrong task, wrong client, or foreign ids", async () => {
-    const { turn, taskId } = await submit("change");
-    turn.init();
-    const pending = turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
-    const requested = await client.waitFor("approval_requested");
-    expect(
-      (
-        await client.decide({
-          taskId: "task_wrong",
-          approvalId: requested.payload.approval_id,
-          decision: "approve",
-        })
-      ).error?.code,
-    ).toBe("not_found");
-    expect(
-      (await client.decide({ taskId: taskId, approvalId: "appr_foreign", decision: "approve" }))
-        .error?.code,
-    ).toBe("not_found");
+    const { turn, taskId, held, requested } = await submitHeldCall("change");
+    expect((await decide("task_wrong", requested.payload.approval_id, "approve")).error?.code).toBe(
+      "not_found",
+    );
+    expect((await decide(taskId, "appr_foreign", "approve")).error?.code).toBe("not_found");
     const other = await ts.connect("client-B");
     const foreign = await other.send("approval_decision", {
       conversation_id: must(client.conversationId, "conversation id"),
@@ -249,12 +227,8 @@ describe("approval path", () => {
     expect(foreign.error?.code).toBe("busy");
     await tick();
     expect(turn.decisions).toHaveLength(0);
-    await client.decide({
-      taskId: taskId,
-      approvalId: requested.payload.approval_id,
-      decision: "reject",
-    });
-    expect((await pending).behavior).toBe("deny");
+    await decide(taskId, requested.payload.approval_id, "reject");
+    expect((await held).behavior).toBe("deny");
     turn.end();
     await client.waitFor("task_finished");
   });
@@ -286,10 +260,7 @@ describe("approval path", () => {
   });
 
   it("keeps the call held when the decision cannot be persisted", async () => {
-    const { turn, taskId } = await submit("change");
-    turn.init();
-    const pending = turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
-    const requested = await client.waitFor("approval_requested");
+    const { turn, taskId, held, requested } = await submitHeldCall("change");
     const catalog = ts.server.catalog;
     const original = catalog.transaction.bind(catalog);
     let failed = false;
@@ -300,41 +271,26 @@ describe("approval path", () => {
       }
       return original(fn);
     };
-    const ack = await client.decide({
-      taskId: taskId,
-      approvalId: requested.payload.approval_id,
-      decision: "approve",
-    });
+    const ack = await decide(taskId, requested.payload.approval_id, "approve");
     expect(ack.disposition).toBe("rejected");
     expect(ack.error?.code).toBe("record_failure");
     await tick();
     expect(turn.decisions).toHaveLength(0);
-    expect(must(rows<{ status: string }>("SELECT status FROM approvals")[0]).status).toBe(
-      "pending",
-    );
-    const retry = await client.decide({
-      taskId: taskId,
-      approvalId: requested.payload.approval_id,
-      decision: "approve",
-    });
+    expect(approvalStatuses()).toEqual(["pending"]);
+    const retry = await decide(taskId, requested.payload.approval_id, "approve");
     expect(retry.disposition).toBe("accepted");
-    expect((await pending).behavior).toBe("allow");
+    expect((await held).behavior).toBe("allow");
     turn.end();
     await client.waitFor("task_finished");
   });
 
   it("treats disconnection as no decision and keeps the pending record", async () => {
-    const { turn, taskId } = await submit("change");
-    turn.init();
-    const pending = turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
-    const requested = await client.waitFor("approval_requested");
+    const { turn, taskId, held, requested } = await submitHeldCall("change");
     client.close();
     await tick();
     await tick();
     expect(turn.decisions).toHaveLength(0);
-    expect(must(rows<{ status: string }>("SELECT status FROM approvals")[0]).status).toBe(
-      "pending",
-    );
+    expect(approvalStatuses()).toEqual(["pending"]);
     expect(rows("SELECT id FROM events WHERE type = 'client_disconnected'")).toHaveLength(1);
     // the same client reconnecting can still decide
     const again = await ts.connect("client-A");
@@ -345,7 +301,7 @@ describe("approval path", () => {
       decision: "reject",
     });
     expect(ack.disposition).toBe("accepted");
-    expect((await pending).behavior).toBe("deny");
+    expect((await held).behavior).toBe("deny");
     turn.end();
     await again.waitFor("task_finished");
   });
@@ -353,19 +309,12 @@ describe("approval path", () => {
 
 describe("interruption path", () => {
   it("interrupt before release: gate closes, approval is stale, nothing dispatches", async () => {
-    const { turn, taskId } = await submit("change");
-    turn.init();
-    const pending = turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
-    const requested = await client.waitFor("approval_requested");
+    const { taskId, held, requested } = await submitHeldCall("change");
     const ack = await client.interrupt(taskId);
     expect(ack.disposition).toBe("accepted");
-    const decision = await pending;
+    const decision = await held;
     expect(decision.behavior).toBe("deny");
-    const late = await client.decide({
-      taskId: taskId,
-      approvalId: requested.payload.approval_id,
-      decision: "approve",
-    });
+    const late = await decide(taskId, requested.payload.approval_id, "approve");
     expect(late.error?.code).toBe("invalid_state");
     const outcome = await client.waitFor("interruption_outcome");
     expect(outcome.payload.task_status).toBe("interrupted");
@@ -377,16 +326,11 @@ describe("interruption path", () => {
   });
 
   it("release before interruption: the action is reported in flight with unknown outcome, and the next turn carries a note", async () => {
-    const { turn, taskId } = await submit("slow");
-    turn.init();
-    const pending = turn.request("mcp__d1__slow", { mode: "uncancellable" }, "toolu_1");
-    const requested = await client.waitFor("approval_requested");
-    await client.decide({
-      taskId: taskId,
-      approvalId: requested.payload.approval_id,
-      decision: "approve",
+    const { taskId, held, requested } = await submitHeldCall("slow", "mcp__d1__slow", {
+      mode: "uncancellable",
     });
-    expect((await pending).behavior).toBe("allow");
+    await decide(taskId, requested.payload.approval_id, "approve");
+    expect((await held).behavior).toBe("allow");
     await client.interrupt(taskId);
     const outcome = await client.waitFor("interruption_outcome");
     expect(outcome.payload.task_status).toBe("outcome_unknown");
@@ -409,9 +353,7 @@ describe("interruption path", () => {
   });
 
   it("blocks a policy-allowed action proposed after the gate closed", async () => {
-    await ts.close();
-    runtime = new ScriptedRuntime();
-    ts = await startTestServer(runtime, {
+    await restartSession({
       toolPolicy: {
         mcp__d1__read: "allow",
         mcp__d1__change: "allow",
@@ -419,18 +361,14 @@ describe("interruption path", () => {
         mcp__d1__forbidden: "deny",
       },
     });
-    client = await ts.connect("client-A");
-    await client.startConversation();
-    const { turn, taskId } = await submit("slow then change");
+    const submission = await submit("slow then change");
+    const turn = submission.turn;
+    const taskId = submission.taskId;
     turn.survivesInterrupt = true;
     turn.init();
     const slow = turn.request("mcp__d1__slow", { mode: "cancellable" }, "toolu_1");
     const requested = await client.waitFor("approval_requested");
-    await client.decide({
-      taskId: taskId,
-      approvalId: requested.payload.approval_id,
-      decision: "approve",
-    });
+    await decide(taskId, requested.payload.approval_id, "approve");
     expect((await slow).behavior).toBe("allow");
     await client.interrupt(taskId);
     const change = await turn.request("mcp__d1__change", { delta: 1 }, "toolu_2");
