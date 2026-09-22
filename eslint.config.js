@@ -5,6 +5,70 @@ import tseslint from "typescript-eslint";
 
 const BYPASS_NOTE = "Bypass with an eslint-disable-next-line comment that carries a `-- reason`.";
 
+// The layer table of docs/DEPENDENCIES.md, lowest layer first. A layer may import the layers
+// above it in this list, never one below it and never a sibling in its own layer. Editing this
+// list without editing the doc (or the reverse) leaves the two out of step.
+const LAYERS = [
+  { files: ["packages/protocol/**"], workspaces: ["@mia/protocol"], mayImportAnything: false },
+  {
+    files: ["packages/records/**", "packages/mcp-http/**"],
+    workspaces: ["@mia/records", "@mia/mcp-http"],
+    mayImportAnything: false,
+  },
+  {
+    files: ["packages/agent-adapter/**", "fixtures/controlled-mcp/**"],
+    workspaces: ["@mia/agent-adapter", "@mia/controlled-mcp"],
+    mayImportAnything: false,
+  },
+  {
+    files: ["apps/*/**", "tools/*/**"],
+    workspaces: ["@mia/server", "@mia/text-client", "@mia/debug-cli", "@mia/probe"],
+    mayImportAnything: false,
+  },
+  // Layer 4: tests are the top entry point and forbid nothing, so they get no override.
+  {
+    files: ["tests/*/**"],
+    workspaces: ["@mia/acceptance", "@mia/fake-claude"],
+    mayImportAnything: true,
+  },
+];
+
+const forbidWorkspace = (name, reason) => ({
+  group: [name, `${name}/*`],
+  message: `${name} is ${reason}; imports only point down. See docs/DEPENDENCIES.md.`,
+});
+
+const FORBID_CROSS_WORKSPACE_RELATIVE = {
+  group: ["../../*", "../../**"],
+  message: "Cross-workspace relative import; import the package by name. See docs/DEPENDENCIES.md.",
+};
+
+const layerOverrides = LAYERS.flatMap((layer, index) =>
+  layer.mayImportAnything
+    ? []
+    : [
+        {
+          files: layer.files,
+          rules: {
+            "no-restricted-imports": [
+              "error",
+              {
+                patterns: [
+                  ...layer.workspaces.map((name) =>
+                    forbidWorkspace(name, "a sibling in the same layer"),
+                  ),
+                  ...LAYERS.slice(index + 1)
+                    .flatMap((higher) => higher.workspaces)
+                    .map((name) => forbidWorkspace(name, "a higher layer")),
+                  FORBID_CROSS_WORKSPACE_RELATIVE,
+                ],
+              },
+            ],
+          },
+        },
+      ],
+);
+
 export default tseslint.config(
   {
     ignores: [
@@ -53,4 +117,5 @@ export default tseslint.config(
       ],
     },
   },
+  ...layerOverrides,
 );
