@@ -78,6 +78,16 @@ interface TaskState {
   finished: Promise<void>;
 }
 
+/**
+ * What a task-scoped command is allowed to act on. `rejected` and `no_active_task` carry the answer
+ * to send back, so a caller that has nothing to add returns it unread; `approvalDecision` looks a
+ * resolved approval up before falling back to it.
+ */
+type AddressedTask =
+  | { kind: "active"; task: TaskState }
+  | { kind: "rejected"; result: CommandResult }
+  | { kind: "no_active_task"; result: CommandResult };
+
 interface ConversationState {
   id: string;
   runtimeConversationId: string;
@@ -533,10 +543,9 @@ export class Engine {
     ctx: CommandContext,
     payload: { conversation_id: string; task_id: string; approval_id: string; decision: Decision },
   ): CommandResult {
-    const guard = this.guard(ctx, payload.conversation_id);
-    if (guard) return guard;
-    const task = this.task;
-    if (!task || task.id !== payload.task_id) {
+    const addressed = this.addressTask(ctx, payload);
+    if (addressed.kind === "rejected") return addressed.result;
+    if (addressed.kind === "no_active_task") {
       const known = this.deps.catalog.get<{ status: string; task_id: string }>(
         "SELECT a.status, t.task_id FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id WHERE a.id = ?",
         payload.approval_id,
@@ -546,8 +555,9 @@ export class Engine {
           "invalid_state",
           `approval ${payload.approval_id} is ${known.status} and task ${payload.task_id} is no longer active; a decision cannot be reused`,
         );
-      return fail("not_found", `task ${payload.task_id} is not the active task`);
+      return addressed.result;
     }
+    const { task } = addressed;
     if (ctx.clientId !== task.clientId)
       return fail("unauthenticated", "decision must come from the client that owns the task");
     const call = task.pendingApprovals.get(payload.approval_id);
@@ -648,11 +658,9 @@ export class Engine {
     ctx: CommandContext,
     payload: { conversation_id: string; task_id: string },
   ): CommandResult {
-    const guard = this.guard(ctx, payload.conversation_id);
-    if (guard) return guard;
-    const task = this.task;
-    if (!task || task.id !== payload.task_id)
-      return fail("not_found", `task ${payload.task_id} is not the active task`);
+    const addressed = this.addressTask(ctx, payload);
+    if (addressed.kind !== "active") return addressed.result;
+    const { task } = addressed;
     if (task.status === "interrupting") return { ok: true, result: { already_interrupting: true } };
     if (task.status !== "running" && task.status !== "awaiting_approval")
       return fail("invalid_state", `task is ${task.status}`);
@@ -827,6 +835,22 @@ export class Engine {
     if (!this.activeConnectionId && !this.adoptConnection(ctx.connectionId, ctx.clientId))
       return fail("busy", "the conversation belongs to another client");
     return null;
+  }
+
+  /** The preamble every task-scoped command shares: guard the conversation, then address the one active task. */
+  private addressTask(
+    ctx: CommandContext,
+    payload: { conversation_id: string; task_id: string },
+  ): AddressedTask {
+    const guard = this.guard(ctx, payload.conversation_id);
+    if (guard) return { kind: "rejected", result: guard };
+    const task = this.task;
+    if (!task || task.id !== payload.task_id)
+      return {
+        kind: "no_active_task",
+        result: fail("not_found", `task ${payload.task_id} is not the active task`),
+      };
+    return { kind: "active", task };
   }
 
   private settle(call: ToolCallState, decision: PermissionDecision): void {

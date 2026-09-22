@@ -7,7 +7,6 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { setTimeout as sleep } from "node:timers/promises";
 import { Command } from "commander";
 import { match } from "ts-pattern";
 import { z } from "zod";
@@ -227,6 +226,34 @@ const runStep = async (opts: {
 const only = values.only ? new Set(values.only.split(",")) : null;
 const want = (name: string) => !only || only.has(name);
 
+/**
+ * The two interruption steps are the same experiment twice: same profile, everything allowed, kill
+ * the runtime the moment the fixture reports `entered`. Only the fixture mode and what the harness
+ * does after the kill differ, so those are the only arguments.
+ */
+const runInterruptStep = (args: {
+  mode: "cancellable" | "uncancellable";
+  sessionId: string;
+  afterKill: (entered: { call_id: string }, step: StepRecord) => Promise<void>;
+}): Promise<StepRecord> =>
+  runStep({
+    name: `interrupt-${args.mode}`,
+    config: baseConfig(),
+    sessionId: args.sessionId,
+    firstTurn: true,
+    turnIndex: 1,
+    prompt: `Call d1.slow with mode ${args.mode} exactly once. After it returns, call d1.change with delta 1 exactly once. Report the results.`,
+    decide: () => ({ behavior: "allow" }),
+    during: async (handle, step) => {
+      const entered = await harness.waitEntered(120_000);
+      step.notes.push(`slow entered ${entered.call_id} at ${new Date().toISOString()}`);
+      const killRequested = Date.now();
+      const outcome = await handle.interrupt();
+      step.notes.push(`interrupt -> ${outcome} after ${Date.now() - killRequested}ms`);
+      await args.afterKill(entered, step);
+    },
+  });
+
 // ---- Session 1: streaming, allowed tool, approval payload, effort precedence, follow-up, every-call, deny rule ----
 const s1 = randomUUID();
 if (want("stream-approve")) {
@@ -326,28 +353,14 @@ if (want("followup-everycall-deny")) {
 const s2 = randomUUID();
 if (want("interrupt-cancellable")) {
   await harness.reset();
-  const step = await runStep({
-    name: "interrupt-cancellable",
-    config: baseConfig(),
+  const step = await runInterruptStep({
+    mode: "cancellable",
     sessionId: s2,
-    firstTurn: true,
-    turnIndex: 1,
-    prompt:
-      "Call d1.slow with mode cancellable exactly once. After it returns, call d1.change with delta 1 exactly once. Report the results.",
-    decide: () => ({ behavior: "allow" }),
-    during: async (handle, step) => {
-      const entered = await harness.waitEntered(120_000);
-      step.notes.push(`slow entered ${entered.call_id} at ${new Date().toISOString()}`);
-      const t0 = Date.now();
-      const outcome = await handle.interrupt();
-      step.notes.push(`interrupt -> ${outcome} after ${Date.now() - t0}ms`);
-      // wait for the ledger to settle (cancelled entry) without sleeping arbitrarily long
-      for (let attempt = 0; attempt < 200; attempt++) {
-        const state = await harness.state();
-        if (state.ledger.some((entry) => entry.kind === "cancelled") || state.pending.length === 0)
-          break;
-        await sleep(25);
-      }
+    afterKill: async () => {
+      await harness.waitForState(
+        (state) =>
+          state.ledger.some((entry) => entry.kind === "cancelled") || !state.pending.length,
+      );
     },
   });
   const ledger = step.ledger_after?.ledger ?? [];
@@ -386,30 +399,16 @@ if (want("resume-after-kill")) {
 if (want("interrupt-uncancellable")) {
   await harness.reset();
   const s3 = randomUUID();
-  const step = await runStep({
-    name: "interrupt-uncancellable",
-    config: baseConfig(),
+  const step = await runInterruptStep({
+    mode: "uncancellable",
     sessionId: s3,
-    firstTurn: true,
-    turnIndex: 1,
-    prompt:
-      "Call d1.slow with mode uncancellable exactly once. After it returns, call d1.change with delta 1 exactly once. Report the results.",
-    decide: () => ({ behavior: "allow" }),
-    during: async (handle, step) => {
-      const entered = await harness.waitEntered(120_000);
-      step.notes.push(`slow entered ${entered.call_id}`);
-      const outcome = await handle.interrupt();
-      step.notes.push(`interrupt -> ${outcome}`);
+    afterKill: async (entered, step) => {
       const before = await harness.state();
       step.notes.push(
         `after kill, before release: counter=${before.counter} pending=${before.pending.length}`,
       );
       await harness.release(entered.call_id);
-      for (let attempt = 0; attempt < 200; attempt++) {
-        const state = await harness.state();
-        if (state.counter >= 1) break;
-        await sleep(25);
-      }
+      await harness.waitForState((state) => state.counter >= 1);
     },
   });
   const ledger = step.ledger_after?.ledger ?? [];

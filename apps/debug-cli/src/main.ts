@@ -98,7 +98,37 @@ const printConversation = (snapshot: ConversationSnapshot): void => {
     out(`unresolved references: ${JSON.stringify(snapshot.unresolved_references)}`);
 };
 
+const printArtifacts = (snapshot: ConversationSnapshot): void => {
+  for (const artifact of snapshot.tables.artifacts)
+    out(
+      `${artifact.id}  ${artifact.kind}  ${artifact.logical_name}  ${artifact.capture_status}  ${artifact.byte_size ?? "-"}B  ${artifact.object_digest ?? "no object"}${artifact.capture_reason ? `  (${artifact.capture_reason})` : ""}`,
+    );
+  out(
+    `links: ${snapshot.tables.artifact_links.length}, dependencies: ${snapshot.tables.artifact_dependencies.length}, objects: ${snapshot.tables.objects.length}`,
+  );
+};
+
 const debug = program.command("debug").allowExcessArguments();
+
+/** Register a subcommand that reads one conversation snapshot and renders it, as JSON on `--json`. */
+const snapshotCommand = (
+  name: string,
+  render: {
+    json: (snapshot: ConversationSnapshot) => unknown;
+    text: (snapshot: ConversationSnapshot) => void;
+  },
+): void => {
+  debug
+    .command(`${name} <conversation-id>`)
+    .allowExcessArguments()
+    .action((conversationId: string) =>
+      withCatalog(true, (catalog) => {
+        const snapshot = snapshotConversation(catalog, conversationId);
+        if (options().json) out(render.json(snapshot));
+        else render.text(snapshot);
+      }),
+    );
+};
 
 debug
   .command("conversations")
@@ -115,41 +145,17 @@ debug
     }),
   );
 
-debug
-  .command("conversation <conversation-id>")
-  .allowExcessArguments()
-  .action((conversationId: string) =>
-    withCatalog(true, (catalog) => {
-      const snapshot = snapshotConversation(catalog, conversationId);
-      if (options().json) out(snapshot);
-      else printConversation(snapshot);
-    }),
-  );
+snapshotCommand("conversation", { json: (snapshot) => snapshot, text: printConversation });
 
-debug
-  .command("artifacts <conversation-id>")
-  .allowExcessArguments()
-  .action((conversationId: string) =>
-    withCatalog(true, (catalog) => {
-      const snapshot = snapshotConversation(catalog, conversationId);
-      if (options().json) {
-        out({
-          artifacts: snapshot.tables.artifacts,
-          links: snapshot.tables.artifact_links,
-          dependencies: snapshot.tables.artifact_dependencies,
-          objects: snapshot.tables.objects,
-        });
-        return;
-      }
-      for (const artifact of snapshot.tables.artifacts)
-        out(
-          `${artifact.id}  ${artifact.kind}  ${artifact.logical_name}  ${artifact.capture_status}  ${artifact.byte_size ?? "-"}B  ${artifact.object_digest ?? "no object"}${artifact.capture_reason ? `  (${artifact.capture_reason})` : ""}`,
-        );
-      out(
-        `links: ${snapshot.tables.artifact_links.length}, dependencies: ${snapshot.tables.artifact_dependencies.length}, objects: ${snapshot.tables.objects.length}`,
-      );
-    }),
-  );
+snapshotCommand("artifacts", {
+  json: (snapshot) => ({
+    artifacts: snapshot.tables.artifacts,
+    links: snapshot.tables.artifact_links,
+    dependencies: snapshot.tables.artifact_dependencies,
+    objects: snapshot.tables.objects,
+  }),
+  text: printArtifacts,
+});
 
 debug
   .command("export <conversation-id>")
