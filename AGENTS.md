@@ -11,3 +11,5 @@ Style is enforced by `npm run check` (Prettier, ESLint, tsc, Vitest); CI runs th
 - Command-line entry points use commander; do not parse `process.argv` by hand.
 
 Design for single responsibility: give each module one clear purpose and explicit, typed interfaces. Prefer pure functions for decisions; push I/O to boundaries. Separate decisions, persistence, and effects. Favor extending behavior through stable contracts over modifying consumers; introduce abstractions for concrete needs, not speculative flexibility.
+
+Make invalid states unrepresentable with discriminated unions. Validate external data once at boundaries. Keep business rules independent of infrastructure. Make failure and partial-success behavior explicit. Test observable contracts and invariants, not implementation details. Keep dependencies directional and avoid exposing internal representations across module boundaries.
