@@ -8,6 +8,7 @@
   "ignore": [
     "**/node_modules/**",
     "**/dist/**",
+    ".claude/worktrees/**",
     ".mia-work/**",
     ".mia-state/**",
     "docs/D1/protocol-examples/**",
