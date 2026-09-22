@@ -1,6 +1,6 @@
 # This file:
 
-This file contains the guidlines for contributing to this codebase. It should not contain anything that is easy to lookup or it is likely to change. This file should be as short as possible, if a given statement should not be shortened in anyway without losing what it is conveying. A rule that tooling can check is enforced by `npm run check`, added in the same change that states it; prose here is for what tooling cannot check.
+This file contains the guidelines for contributing to this codebase. It should not contain anything that is easy to lookup or it is likely to change. This file should be as short as possible, if a given statement should not be shortened in anyway without losing what it is conveying. A rule that tooling can check is enforced by `npm run check`, added in the same change that states it; prose here is for what tooling cannot check.
 
 ## Style
 
