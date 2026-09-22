@@ -12,6 +12,8 @@ Imports point down the table. Nothing imports up, and nothing imports a sibling 
 
 Layers 3 and 4 are entry points: only tests may import an app, and nothing imports a test or a tool.
 
+The `LAYERS` list in `eslint.config.js` encodes this table as `no-restricted-imports` overrides, so `npm run lint` fails on an upward or cross-workspace import; change the table and that list together.
+
 ## When to split
 
 Split a module when it gains a second reason to change, when part of it needs a test the rest gets in the way of, or when a pure decision and the I/O around it share a file.
