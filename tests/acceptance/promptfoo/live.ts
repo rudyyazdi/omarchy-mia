@@ -146,15 +146,16 @@ const startProfile = async (name: string, index: number, run: ProfileRun): Promi
   profile.runtime.agentPromptFile = run.agentPromptPath;
   profile.runtime.model = run.model;
   const logs: string[] = [];
+  // Registered before the server starts, so a start that fails still leaves the lines explaining
+  // why. Deferred callbacks run last in, first out: the server closes before its log is written.
+  run.cleanup.defer(() =>
+    writeFileSync(join(run.outDir, `server-${index}.log`), logs.join("\n") + "\n"),
+  );
   const server = await startServer({
     profile,
     env: run.runtimeEnv,
     log: (message) => logs.push(`${new Date().toISOString()} ${message}`),
   });
-  // Deferred callbacks run last in, first out: the server closes before its log is written.
-  run.cleanup.defer(() =>
-    writeFileSync(join(run.outDir, `server-${index}.log`), logs.join("\n") + "\n"),
-  );
   run.cleanup.defer(() => server.close());
   log(`server ${name} at ${server.gateway.url}`);
   return server;
@@ -183,7 +184,10 @@ const PfOutputSchema = z.looseObject({
 });
 const RuntimeIdentitySchema = z.looseObject({ runtime_version: z.string().optional() });
 
-/** Runs the promptfoo eval and resolves to its exit code; aborting `signal` kills it. */
+/**
+ * Runs the promptfoo eval and resolves to its exit code. It rejects, and no record is written, when
+ * promptfoo cannot start or `signal` aborts (which kills it).
+ */
 const runPromptfoo = async (
   options: LiveOptions,
   pfEnv: NodeJS.ProcessEnv,
@@ -202,15 +206,19 @@ const runPromptfoo = async (
   ];
   if (options.scenarios) args.push("--filter-pattern", `^(${options.scenarios.join("|")})$`);
   log(`promptfoo ${args.join(" ")}`);
-  const { promise: promptfooExited, resolve: resolveExit } = Promise.withResolvers<number>();
+  const {
+    promise: promptfooExited,
+    resolve: resolveExit,
+    reject: rejectExit,
+  } = Promise.withResolvers<number>();
   const child = spawn(join(REPO_ROOT, "node_modules/.bin/promptfoo"), args, {
     cwd: join(REPO_ROOT, "tests/acceptance/promptfoo"),
     env: pfEnv,
     stdio: "inherit",
     signal,
   });
-  // An abort or a failed start emits "error" and then still "close", which settles the exit.
-  child.on("error", (error) => log(`promptfoo: ${errorMessage(error)}`));
+  // An abort or a failed start emits "error" before "close"; the first to fire settles the exit.
+  child.on("error", rejectExit);
   child.on("close", (code) => resolveExit(code ?? 1));
   const exitCode = await promptfooExited;
   log(`promptfoo exited ${exitCode}`);
@@ -306,11 +314,11 @@ const readRows = ({
           const target = join(outDir, "exports", `${conversationId}-${repeat}`);
           mkdirSync(join(outDir, "exports"), { recursive: true });
           try {
-            const exported = exportConversation(
+            const writable = opened.adopt(
               new Catalog(catalog.paths.root, { readonly: false }),
-              conversationId,
-              target,
+              (exporter) => exporter.close(),
             );
+            const exported = exportConversation(writable, conversationId, target);
             const verification = verifyExport(target);
             exportResult = {
               directory: target,
@@ -359,6 +367,7 @@ export const runLive = async (
   env: NodeJS.ProcessEnv,
   signal?: AbortSignal,
 ): Promise<number> => {
+  signal?.throwIfAborted();
   const requested = options.scenarios ?? ScenarioNameSchema.options;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outDir = resolve(options.out ?? join(REPO_ROOT, ".mia-state", "live", stamp));

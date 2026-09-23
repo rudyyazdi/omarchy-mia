@@ -1,5 +1,4 @@
 import { Command } from "commander";
-import { errorMessage } from "@mia/protocol";
 import { runLive, type LiveOptions } from "./live.ts";
 import { readScenarioList, type ScenarioName } from "./scenarios.ts";
 
@@ -27,7 +26,9 @@ program.parse();
 runLive(program.opts<LiveOptions>(), process.env).then(
   (code) => process.exit(code),
   (error: unknown) => {
-    console.error(`live: ${errorMessage(error)}`);
+    // The whole error, not just its message: a failed close during cleanup arrives as a
+    // SuppressedError whose message hides both the run's error and the close's.
+    console.error("live:", error);
     process.exit(1);
   },
 );
