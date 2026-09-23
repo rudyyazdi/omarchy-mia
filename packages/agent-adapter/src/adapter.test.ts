@@ -1,26 +1,23 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempDisposableSync, writeFileSync } from "node:fs";
-import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { probeStaticCapabilities, readHookEvidence, readRuntimeFile } from "./adapter.ts";
+import { hookEvidenceFrom, probeStaticCapabilities, readRuntimeFile } from "./adapter.ts";
 
 describe("readRuntimeFile", () => {
-  it("gives up on a read blocked in open() once its deadline aborts", async () => {
+  it("reports a FIFO as not a regular file without waiting for a writer, however many are read", async () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-runtime-file-"));
-    // Opening a FIFO for reading blocks until something opens it for writing.
-    const path = join(directory.path, "held.jsonl");
-    execFileSync("mkfifo", [path]);
-    const deadline = new AbortController();
-    const read = readRuntimeFile(path, { signal: deadline.signal });
-    deadline.abort(new DOMException("deadline", "TimeoutError"));
-    try {
-      expect(await read).toEqual({ status: "unreadable", reason: "timed out" });
-    } finally {
-      // Lets the abandoned open return, so it closes its descriptor instead of holding a worker thread.
-      await (await open(path, "w")).close();
-    }
+    // A blocking open of a FIFO waits for a writer, holding a libuv worker thread; there are 4 of them.
+    const fifo = join(directory.path, "hook-evidence.jsonl");
+    execFileSync("mkfifo", [fifo]);
+    const reads = await Promise.all(Array.from({ length: 5 }, () => readRuntimeFile(fifo)));
+    expect(reads).toEqual(
+      Array.from({ length: 5 }, () => ({ status: "unreadable", reason: "not a regular file" })),
+    );
+    const file = join(directory.path, "transcript.jsonl");
+    writeFileSync(file, "{}\n");
+    expect(await readRuntimeFile(file)).toEqual({ status: "read", bytes: Buffer.from("{}\n") });
   });
 
   it("reports why a read was abandoned before it started", async () => {
@@ -33,12 +30,20 @@ describe("readRuntimeFile", () => {
       reason: "abandoned at shutdown",
     });
   });
+
+  it("reports a read abandoned at its deadline as timed out", async () => {
+    const signal = AbortSignal.abort(new DOMException("deadline", "TimeoutError"));
+    expect(await readRuntimeFile("/nonexistent", { signal })).toEqual({
+      status: "unreadable",
+      reason: "timed out",
+    });
+  });
 });
 
-describe("readHookEvidence", () => {
+describe("hookEvidenceFrom", () => {
   it("returns no evidence when the hook never wrote a file", async () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-hooks-"));
-    expect(await readHookEvidence(join(directory.path, "absent.jsonl"))).toEqual({
+    expect(hookEvidenceFrom(await readRuntimeFile(join(directory.path, "absent.jsonl")))).toEqual({
       records: [],
       malformedLines: 0,
       readError: null,
@@ -49,7 +54,7 @@ describe("readHookEvidence", () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-hooks-"));
     const path = join(directory.path, "hook-evidence.jsonl");
     writeFileSync(path, '{"effort":"low"}\n42\n\n{"effort":"high"}\n{"effort":"me');
-    expect(await readHookEvidence(path)).toEqual({
+    expect(hookEvidenceFrom(await readRuntimeFile(path))).toEqual({
       records: [{ effort: "low" }, { effort: "high" }],
       malformedLines: 2,
       readError: null,
@@ -60,10 +65,10 @@ describe("readHookEvidence", () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-hooks-"));
     const path = join(directory.path, "hook-evidence.jsonl");
     mkdirSync(path);
-    expect(await readHookEvidence(path)).toEqual({
+    expect(hookEvidenceFrom(await readRuntimeFile(path))).toEqual({
       records: [],
       malformedLines: 0,
-      readError: expect.stringContaining("EISDIR"),
+      readError: "not a regular file",
     });
   });
 
@@ -71,7 +76,9 @@ describe("readHookEvidence", () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-hooks-"));
     const notADirectory = join(directory.path, "runtime");
     writeFileSync(notADirectory, "");
-    expect(await readHookEvidence(join(notADirectory, "hook-evidence.jsonl"))).toEqual({
+    expect(
+      hookEvidenceFrom(await readRuntimeFile(join(notADirectory, "hook-evidence.jsonl"))),
+    ).toEqual({
       records: [],
       malformedLines: 0,
       readError: expect.stringContaining("ENOTDIR"),

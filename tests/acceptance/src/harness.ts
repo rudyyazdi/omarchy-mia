@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach } from "vitest";
-import type { Profile } from "@mia/agent-adapter";
+import {
+  readRuntimeFile,
+  untilAborted,
+  type Profile,
+  type RuntimeFileReader,
+} from "@mia/agent-adapter";
 import { startServer, type MiaServer, type TurnRunner } from "@mia/server";
 import type { AckError, AckPayload } from "@mia/protocol";
 import { describeAck, MiaClient } from "@mia/text-client";
@@ -18,9 +23,19 @@ export interface TestServer {
   logs: readonly string[];
   /** Aborts the deadline of every turn-end evidence read in progress, as if it had timed out. */
   expireEvidenceReads(): void;
+  /**
+   * Holds the next turn-end evidence read of `path` until `release`, as a read blocked on a stale mount would be;
+   * `started` resolves once the engine has asked for it. Its deadline or shutdown still abandons it.
+   */
+  holdEvidenceRead(path: string): HeldRead;
   connect(clientId?: string): Promise<MiaClient>;
   catalog(): Catalog;
   close(): Promise<void>;
+}
+
+export interface HeldRead {
+  started: Promise<void>;
+  release(): void;
 }
 
 /** A test's own timeout bounds its waits; connecting gets a shorter deadline so a dead server fails fast. */
@@ -112,11 +127,27 @@ export const startTestServer = async (
   const logs: string[] = [];
   // Replaced on every expiry, so a read that starts afterwards gets a deadline of its own.
   let evidenceDeadline = new AbortController();
+  const holds = new Map<string, { started: () => void; released: Promise<void> }>();
+  // Reads for real once released, or with the aborted signal, so an abandoned read is reported as in production.
+  const readEvidence: RuntimeFileReader = async (path, options = {}) => {
+    const hold = holds.get(path);
+    if (hold) {
+      holds.delete(path);
+      hold.started();
+      await untilAborted(
+        () => hold.released,
+        options.signal,
+        () => undefined,
+      );
+    }
+    return readRuntimeFile(path, options);
+  };
   const server = await startServer({
     profile,
     ...(adapter ? { adapter } : {}),
     log: (message) => logs.push(message),
     evidenceReadDeadline: () => evidenceDeadline.signal,
+    readEvidence,
     env,
   });
   const clients: MiaClient[] = [];
@@ -128,6 +159,12 @@ export const startTestServer = async (
     expireEvidenceReads: () => {
       evidenceDeadline.abort(new DOMException("evidence read deadline", "TimeoutError"));
       evidenceDeadline = new AbortController();
+    },
+    holdEvidenceRead: (path) => {
+      const started = Promise.withResolvers<undefined>();
+      const released = Promise.withResolvers<undefined>();
+      holds.set(path, { started: () => started.resolve(undefined), released: released.promise });
+      return { started: started.promise, release: () => released.resolve(undefined) };
     },
     connect: async (clientId?: string) => {
       const client = new MiaClient({
