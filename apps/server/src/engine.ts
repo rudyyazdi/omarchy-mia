@@ -106,6 +106,11 @@ interface TaskState {
   finished: Promise<void>;
 }
 
+/** Pending approvals the task has besides `approvalId`: what is left once that one is resolved. */
+const otherPending = (task: TaskState, approvalId: string | null): number =>
+  task.pendingApprovals.size -
+  (approvalId !== null && task.pendingApprovals.has(approvalId) ? 1 : 0);
+
 /**
  * What a task-scoped command is allowed to act on. `rejected` and `no_active_task` carry the answer
  * to send back, so a caller that has nothing to add returns it unread; `approvalDecision` looks a
@@ -551,7 +556,7 @@ export class Engine {
       call,
       task,
       conversationEpoch: this.activeConversation.epoch,
-      otherPending: task.pendingApprovals.size - (call ? 1 : 0),
+      otherPending: otherPending(task, call ? payload.approval_id : null),
     });
     return match(outcome)
       .with({ kind: "not_owner" }, () =>
@@ -598,12 +603,8 @@ export class Engine {
         if (decided.release)
           this.recordDispatch(task, call, { via: "approval", causedBy: resolved.id });
         else this.recordCallChange(change);
-        if (decided.taskStatus !== task.status)
-          writer.updateTask(task.id, { status: decided.taskStatus });
-        this.onCommit(() => {
-          task.pendingApprovals.delete(approvalId);
-          task.status = decided.taskStatus;
-        });
+        this.recordTaskStatus(task, decided.taskStatus);
+        this.onCommit(() => task.pendingApprovals.delete(approvalId));
         this.afterCommit(() => this.notifyToolCall(task, call, change.notice));
         this.commitCallChange(call, change);
       });
@@ -1095,15 +1096,32 @@ export class Engine {
     last: ToolCallState,
     next: { toolIdentity: string; digest: string },
   ): void {
-    const superseded = supersedeBinding(last, next);
+    const superseded = supersedeBinding(last, next, {
+      status: task.status,
+      otherPending: otherPending(task, last.approvalId),
+    });
     if (!superseded) return;
-    const { approval, call } = superseded;
+    const { approval, call, taskStatus } = superseded;
     if (approval) {
       this.recordApprovalChange(task, approval);
       this.onCommit(() => task.pendingApprovals.delete(approval.approvalId));
     }
     this.recordCallChange(call);
     this.commitCallChange(last, call);
+    this.recordTaskStatus(task, taskStatus);
+  }
+
+  /**
+   * Record the task status a rule decided, and apply it once the transaction commits (inside tx). It compares
+   * against the committed status, so it runs before anything else in the transaction changes the task's status;
+   * a later change in the same transaction (a new revision asking for approval) is queued after it and wins.
+   */
+  private recordTaskStatus(task: TaskState, status: TaskStatus): void {
+    if (status === task.status) return;
+    this.deps.writer.updateTask(task.id, { status });
+    this.onCommit(() => {
+      task.status = status;
+    });
   }
 
   // ---------------------------------------------------------------- approval controller
@@ -1328,6 +1346,7 @@ export class Engine {
       call,
       approvalId,
       pending: approvalId !== null && task.pendingApprovals.has(approvalId),
+      task: { status: task.status, otherPending: otherPending(task, approvalId) },
     });
     if (expire) {
       try {
@@ -1335,6 +1354,7 @@ export class Engine {
           this.recordApprovalChange(task, expire.approval);
           this.recordCallChange(expire.call);
           this.commitCallChange(call, expire.call);
+          this.recordTaskStatus(task, expire.taskStatus);
           this.onCommit(() => {
             task.pendingApprovals.delete(expire.approval.approvalId);
             task.abandoned.push(call);

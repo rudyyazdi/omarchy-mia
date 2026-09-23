@@ -14,7 +14,9 @@ import {
   noteAfterTurn,
   statusAfterResult,
   supersedeBinding,
+  taskStatusAfterResolving,
   type CallFacts,
+  type PendingTask,
 } from "./transitions.ts";
 
 const call = (status: ToolCallStatus, id = "call_1"): CallFacts => ({
@@ -34,6 +36,21 @@ const approval = (
   conversationEpoch: 1,
   otherPending: 0,
   ...overrides,
+});
+
+/** A task whose only pending approval is the one being resolved. */
+const lastPending: PendingTask = { status: "awaiting_approval", otherPending: 0 };
+
+describe("taskStatusAfterResolving", () => {
+  it("resumes a task awaiting approval once none is left pending, and only then", () => {
+    expect(taskStatusAfterResolving("awaiting_approval", 0)).toBe("running");
+    expect(taskStatusAfterResolving("awaiting_approval", 1)).toBe("awaiting_approval");
+  });
+
+  it("leaves any other task status alone", () => {
+    const others: TaskStatus[] = ["running", "interrupting", "completed", "interrupted"];
+    for (const status of others) expect(taskStatusAfterResolving(status, 0)).toBe(status);
+  });
 });
 
 describe("decideApproval", () => {
@@ -148,6 +165,7 @@ describe("decideAbandonment", () => {
       call: call("awaiting_approval"),
       approvalId: "appr_1",
       pending: true,
+      task: lastPending,
     });
     expect(outcome.expire).toMatchObject({
       approval: { approvalId: "appr_1", status: "expired" },
@@ -156,11 +174,24 @@ describe("decideAbandonment", () => {
     expect(outcome.settle.behavior).toBe("deny");
   });
 
+  it("resumes the task when the abandoned approval was the last pending, and not while others are", () => {
+    const abandon = (task: PendingTask) =>
+      decideAbandonment({
+        call: call("awaiting_approval"),
+        approvalId: "appr_1",
+        pending: true,
+        task,
+      }).expire?.taskStatus;
+    expect(abandon(lastPending)).toBe("running");
+    expect(abandon({ status: "awaiting_approval", otherPending: 1 })).toBe("awaiting_approval");
+  });
+
   it("changes nothing for an approval already resolved, and still refuses the prompt", () => {
     const outcome = decideAbandonment({
       call: call("denied"),
       approvalId: "appr_1",
       pending: false,
+      task: { status: "running", otherPending: 0 },
     });
     expect(outcome.expire).toBeNull();
     expect(outcome.settle.behavior).toBe("deny");
@@ -263,21 +294,37 @@ describe("binding", () => {
       digest: "d1",
       approvalId,
     });
-    expect(supersedeBinding(revision("awaiting_approval", "appr_1"), next)).toMatchObject({
+    expect(
+      supersedeBinding(revision("awaiting_approval", "appr_1"), next, lastPending),
+    ).toMatchObject({
       approval: { approvalId: "appr_1", status: "invalidated", reason: "arguments changed" },
       call: { status: "invalidated", settle: { behavior: "deny" } },
     });
-    expect(supersedeBinding(revision("proposed", null), next)?.approval).toBeNull();
-    expect(supersedeBinding(revision("dispatched", null), next)).toBeNull();
+    expect(supersedeBinding(revision("proposed", null), next, lastPending)?.approval).toBeNull();
+    expect(supersedeBinding(revision("dispatched", null), next, lastPending)).toBeNull();
+  });
+
+  it("resumes the task when it supersedes the last pending approval, and not while others are pending", () => {
+    const held = { ...call("awaiting_approval"), digest: "d1", approvalId: "appr_1" };
+    expect(supersedeBinding(held, next, lastPending)?.taskStatus).toBe("running");
+    expect(
+      supersedeBinding(held, next, { status: "awaiting_approval", otherPending: 1 })?.taskStatus,
+    ).toBe("awaiting_approval");
+    const proposed = { ...call("proposed"), digest: "d1", approvalId: null };
+    expect(
+      supersedeBinding(proposed, next, { status: "running", otherPending: 0 })?.taskStatus,
+    ).toBe("running");
   });
 
   it("says whether the tool or the arguments changed", () => {
     const held = { ...call("awaiting_approval"), digest: "d1", approvalId: "appr_1" };
-    expect(supersedeBinding(held, { toolIdentity: "mcp__d1__read", digest: "d1" })).toMatchObject({
+    expect(
+      supersedeBinding(held, { toolIdentity: "mcp__d1__read", digest: "d1" }, lastPending),
+    ).toMatchObject({
       approval: { reason: "tool changed" },
       call: { settle: { message: expect.stringContaining("the tool changed") } },
     });
-    expect(supersedeBinding(held, next)).toMatchObject({
+    expect(supersedeBinding(held, next, lastPending)).toMatchObject({
       call: { settle: { message: expect.stringContaining("the arguments changed") } },
     });
   });

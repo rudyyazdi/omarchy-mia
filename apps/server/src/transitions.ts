@@ -59,6 +59,16 @@ const TERMINAL: ReadonlySet<ToolCallStatus> = new Set([
 const isHeld = (status: ToolCallStatus): boolean =>
   status === "proposed" || status === "awaiting_approval";
 
+/**
+ * A task waits on the user only while an approval is pending, so resolving its last one resumes it, whether
+ * the user decided, a new binding superseded it, or the runtime abandoned its prompt. Any status other than
+ * awaiting_approval (an interruption in progress, a finished task) is left as it is.
+ */
+export const taskStatusAfterResolving = (
+  status: TaskStatus,
+  remainingPending: number,
+): TaskStatus => (remainingPending === 0 && status === "awaiting_approval" ? "running" : status);
+
 const detailFor = (status: ToolCallStatus): string | undefined =>
   match(status)
     .with("unknown", () => "released; no result observed; effect unknown")
@@ -134,18 +144,29 @@ export const bindPermissionRequest = <Latest extends BindingKey & { status: Tool
   };
 };
 
+/** The task a resolved approval belongs to, as the rules that resolve one see it. */
+export interface PendingTask {
+  status: TaskStatus;
+  /** Pending approvals left once the one being resolved is gone. */
+  otherPending: number;
+}
+
 /**
  * A changed tool or arguments under the same runtime call id: a held earlier binding, and its pending
  * approval, can never release anything. Null when the earlier binding was already released or refused.
+ * Invalidating the task's last pending approval resumes the task; a new revision that asks again sets it
+ * back to awaiting_approval later in the same transaction.
  */
 export const supersedeBinding = (
   call: CallFacts & BindingKey & { approvalId: string | null },
   next: BindingKey,
-): { approval: ApprovalChange | null; call: CallChange } | null => {
+  task: PendingTask,
+): { approval: ApprovalChange | null; call: CallChange; taskStatus: TaskStatus } | null => {
   if (!isHeld(call.status)) return null;
   const changed = call.toolIdentity === next.toolIdentity ? "arguments" : "tool";
   const reason = `${changed} changed`;
   return {
+    taskStatus: taskStatusAfterResolving(task.status, task.otherPending),
     approval: call.approvalId
       ? { approvalId: call.approvalId, callId: call.id, status: "invalidated", reason }
       : null,
@@ -248,8 +269,7 @@ export const decideApproval = <Call extends CallFacts>(input: {
   if (!call || call.status !== "awaiting_approval") return { kind: "not_pending" };
   const approve = input.decision === "approve";
   const release = approve && task.gateOpen && task.epoch === input.conversationEpoch;
-  const taskStatus =
-    input.otherPending === 0 && task.status === "awaiting_approval" ? "running" : task.status;
+  const taskStatus = taskStatusAfterResolving(task.status, input.otherPending);
   const change = ((): Omit<CallChange, "callId"> => {
     if (release) return { status: "dispatched", settle: { behavior: "allow" } };
     if (approve)
@@ -333,14 +353,16 @@ export const decideInterruption = <Call extends CallFacts>(input: {
 
 /**
  * The runtime dropped a held prompt (process gone or turn aborted). A still-pending approval expires and
- * its call is invalidated; either way the call is refused, never released.
+ * its call is invalidated, which resumes the task if it was the last one pending; either way the call is
+ * refused, never released.
  */
 export const decideAbandonment = (input: {
   call: CallFacts;
   approvalId: string | null;
   pending: boolean;
+  task: PendingTask;
 }): {
-  expire: { approval: ApprovalChange; call: CallChange } | null;
+  expire: { approval: ApprovalChange; call: CallChange; taskStatus: TaskStatus } | null;
   settle: PermissionDecision;
 } => {
   const settle: PermissionDecision = {
@@ -350,6 +372,7 @@ export const decideAbandonment = (input: {
   if (!input.approvalId || !input.pending) return { expire: null, settle };
   return {
     expire: {
+      taskStatus: taskStatusAfterResolving(input.task.status, input.task.otherPending),
       approval: {
         approvalId: input.approvalId,
         callId: input.call.id,
