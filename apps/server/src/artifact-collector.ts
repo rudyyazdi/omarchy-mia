@@ -79,11 +79,10 @@ const resolvePolicy = async (
  * slip past the policy nor exceed the limit. Non-blocking open keeps a swapped-in FIFO from hanging.
  */
 const readAdmitted = async (
-  fs: CaptureFs,
-  admitted: { resolvedPath: string; policy: CapturePolicy },
+  { fs, policy }: { fs: CaptureFs; policy: CapturePolicy },
+  resolvedPath: string,
   declared: DeclaredArtifact,
 ): Promise<Capture> => {
-  const { resolvedPath, policy } = admitted;
   const handle = await fs.open(
     resolvedPath,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -131,7 +130,7 @@ export const createArtifactCollector =
     const eligibility = decideEligibility(await inspectPath(fs, declared.path), policy);
     if (eligibility.status !== "eligible") return eligibility;
     try {
-      return await readAdmitted(fs, { resolvedPath: eligibility.resolvedPath, policy }, declared);
+      return await readAdmitted({ fs, policy }, eligibility.resolvedPath, declared);
     } catch (error) {
       return { status: "failed", reason: `declared file unreadable: ${errorMessage(error)}` };
     }

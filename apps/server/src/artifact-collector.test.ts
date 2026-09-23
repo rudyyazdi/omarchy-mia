@@ -145,6 +145,38 @@ describe("collectArtifact", () => {
     });
   });
 
+  // Covers a regular file swapped for a FIFO after admission. Without O_NONBLOCK the open waits for a
+  // writer and this test hangs; the handle's own stat then refuses what the path stat admitted.
+  it("re-refuses a file that became a FIFO after admission without blocking on it", async () => {
+    using dirs = workspace();
+    const fifo = join(dirs.out, "swapped");
+    execFileSync("mkfifo", [fifo]);
+    const collect = createArtifactCollector({
+      realpath,
+      stat: async () => ({ isFile: () => true, size: 0 }), // as admitted, before the swap
+      open,
+    });
+    expect(await collect({ path: fifo }, [dirs.out])).toEqual({
+      status: "failed",
+      reason: "declared path is not a regular file",
+    });
+  });
+
+  it("does not follow a symlink swapped in after the path was resolved", async () => {
+    using dirs = workspace();
+    writeFileSync(join(dirs.out, "real.txt"), "D1");
+    const link = join(dirs.out, "link.txt");
+    symlinkSync(join(dirs.out, "real.txt"), link);
+    const collect = createArtifactCollector({
+      // As if the declared path was a regular file when resolved, then replaced by a symlink.
+      realpath: async (path) => (path === link ? path : realpath(path)),
+      stat,
+      open,
+    });
+    const capture = await collect({ path: link }, [dirs.out]);
+    expect(capture).toEqual({ status: "failed", reason: expect.stringContaining("ELOOP") });
+  });
+
   // Opening a FIFO blocks until a writer appears, so reading one would hang the server.
   it("fails a directory or FIFO inside the output directory without reading it", async () => {
     using dirs = workspace();
