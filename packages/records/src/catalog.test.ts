@@ -1,8 +1,9 @@
-import { mkdtempDisposableSync } from "node:fs";
+import { mkdtempDisposableSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { Catalog } from "./catalog.ts";
+import { RecordWriter } from "./writer.ts";
 import { SCHEMA_VERSION } from "./schema.ts";
 
 describe("read-only catalog", () => {
@@ -22,5 +23,64 @@ describe("read-only catalog", () => {
     const mismatch = `catalog schema version ${SCHEMA_VERSION + 1} does not match ${SCHEMA_VERSION}`;
     expect(() => new Catalog(directory.path, { readonly: true })).toThrow(mismatch);
     expect(() => new Catalog(directory.path)).toThrow(mismatch);
+  });
+});
+
+describe("savepoint", () => {
+  /** A catalog with one conversation to append events to, closed and removed when the test finishes. */
+  const openCatalog = () => {
+    const path = mkdtempSync(join(tmpdir(), "mia-catalog-"));
+    const catalog = new Catalog(path);
+    onTestFinished(() => {
+      catalog.close();
+      rmSync(path, { recursive: true, force: true });
+    });
+    const writer = new RecordWriter(catalog);
+    const conversation = writer.createConversation({
+      provenanceSetId: writer.createProvenanceSet("test"),
+      runtimeConversationId: "rt-1",
+    });
+    const append = (type: string) =>
+      writer.appendEvent({ conversationId: conversation.id, type, payload: {} });
+    const eventTypes = () =>
+      catalog
+        .all<{ type: string }>("SELECT type FROM events ORDER BY sequence")
+        .map((row) => row.type);
+    return { catalog, append, eventTypes };
+  };
+
+  it("undoes only a failed savepoint's writes and commits the rest of the transaction", () => {
+    const { catalog, append, eventTypes } = openCatalog();
+    catalog.transaction(() => {
+      append("before");
+      const undone = catalog.savepoint(() => {
+        append("undone");
+        throw new Error("simulated write failure");
+      });
+      expect(undone).toMatchObject({ ok: false, error: new Error("simulated write failure") });
+      expect(catalog.savepoint(() => append("kept")).ok).toBe(true);
+    });
+    expect(eventTypes()).toEqual(["before", "kept"]);
+  });
+
+  it("refuses to run outside a transaction", () => {
+    const { catalog } = openCatalog();
+    expect(() => catalog.savepoint(() => undefined)).toThrow("savepoint needs an open transaction");
+  });
+
+  it("throws when its failure ended the whole transaction, since nothing is left to commit", () => {
+    const { catalog, append, eventTypes } = openCatalog();
+    expect(() =>
+      catalog.transaction(() => {
+        append("before");
+        catalog.savepoint(() => {
+          // SQLite ends the transaction itself on some I/O errors; ROLLBACK stands in for one.
+          catalog.db.exec("ROLLBACK");
+          throw new Error("simulated disk I/O error");
+        });
+      }),
+    ).toThrow("simulated disk I/O error");
+    expect(catalog.db.isTransaction).toBe(false);
+    expect(eventTypes()).toEqual([]);
   });
 });

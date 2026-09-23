@@ -261,6 +261,39 @@ describe("streaming and commands", () => {
       },
     ]);
   });
+
+  /** Make linking a runtime transcript fail after its object and artifact rows are written, when `when` holds. */
+  const failTranscriptLinks = (when: string): void => {
+    ts.server.catalog.db.exec(`CREATE TRIGGER fail_transcript_link BEFORE INSERT ON artifact_links
+      WHEN NEW.relation = 'runtime_transcript' AND ${when}
+      BEGIN SELECT RAISE(ABORT, 'simulated link failure'); END`);
+  };
+  const countRows = (table: string): number => rows(`SELECT 1 FROM ${table}`).length;
+
+  it("undoes a transcript's partial rows when its retention fails midway, and records it failed", async () => {
+    let objectsBefore = 0;
+    const transcripts = await finishLosingTranscript(() => {
+      failTranscriptLinks(
+        "(SELECT capture_status FROM artifacts WHERE id = NEW.artifact_id) = 'retained'",
+      );
+      objectsBefore = countRows("objects");
+    });
+    expect(transcripts).toEqual([
+      {
+        capture_status: "failed",
+        capture_reason: expect.stringContaining("not retained: simulated link failure"),
+        object_digest: null,
+      },
+    ]);
+    expect(countRows("objects")).toBe(objectsBefore);
+    expect(rows("SELECT 1 FROM artifacts WHERE kind = 'runtime_transcript'")).toHaveLength(1);
+  });
+
+  it("records a turn finished when not even its failed transcript can be recorded", async () => {
+    const transcripts = await finishLosingTranscript(() => failTranscriptLinks("1"));
+    expect(transcripts).toEqual([]);
+    expect(rows("SELECT 1 FROM artifacts WHERE kind = 'runtime_transcript'")).toHaveLength(0);
+  });
 });
 
 describe("approval path", () => {

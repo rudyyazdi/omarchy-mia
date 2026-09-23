@@ -37,7 +37,7 @@ import {
   type RecordWriter,
   type ToolCallPolicy,
 } from "@mia/records";
-import { extractDeclaredArtifact } from "./artifact-capture.ts";
+import { captureFields, extractDeclaredArtifact, type Capture } from "./artifact-capture.ts";
 import { collectArtifact } from "./artifact-collector.ts";
 import type { Profile } from "./config.ts";
 import { createConversationProvenance } from "./provenance.ts";
@@ -176,9 +176,6 @@ interface TurnEvidence {
   originalPath: string | null;
   content: Exclude<RuntimeFileRead, { status: "absent" }>;
 }
-
-/** What a turn's evidence artifact holds: its bytes, or why they are missing. */
-type EvidenceCapture = { status: "retained"; bytes: Buffer } | { status: "failed"; reason: string };
 
 /** State changes and effects a transaction queues; neither runs unless it commits. */
 interface CommitQueue {
@@ -1523,34 +1520,33 @@ export class Engine {
   }
 
   /**
-   * Retain one piece of a finished turn's evidence, linked to its task (inside tx). Bytes that cannot be
-   * stored roll back to a savepoint and leave a failed artifact that says why, so an object write failure
-   * never takes down the task, action and execution updates committed with it.
+   * Retain one piece of a finished turn's evidence, linked to its task (inside tx). Each attempt runs in a
+   * savepoint: bytes that cannot be stored leave a failed artifact that says why, and if even that cannot be
+   * recorded the evidence is logged as lost. Either way the task, action and execution updates committed
+   * with it stand. A savepoint undoes rows only, so registerEvidence must queue no state change or effect.
    */
   private retainEvidence(task: TaskState, evidence: TurnEvidence): void {
-    const { content } = evidence;
-    if (content.status === "unreadable") {
-      this.registerEvidence(task, evidence, {
+    const capture = match(evidence.content)
+      .with({ status: "read" }, ({ bytes }): Capture => ({ status: "retained", bytes }))
+      .with({ status: "unreadable" }, ({ reason }): Capture => ({
         status: "failed",
-        reason: `unreadable: ${content.reason}`,
-      });
-      return;
-    }
-    const retained = this.deps.catalog.savepoint(() =>
-      this.registerEvidence(task, evidence, { status: "retained", bytes: content.bytes }),
+        reason: `unreadable: ${reason}`,
+      }))
+      .exhaustive();
+    const { catalog } = this.deps;
+    const first = catalog.savepoint(() => this.registerEvidence(task, evidence, capture));
+    if (first.ok) return;
+    const reason = `not retained: ${errorMessage(first.error)}`;
+    const fallback = catalog.savepoint(() =>
+      this.registerEvidence(task, evidence, { status: "failed", reason }),
     );
-    if (!retained.ok)
-      this.registerEvidence(task, evidence, {
-        status: "failed",
-        reason: `not retained: ${errorMessage(retained.error)}`,
-      });
+    if (!fallback.ok)
+      this.deps.log(
+        `${evidence.name} lost, ${reason}; not recorded: ${errorMessage(fallback.error)}`,
+      );
   }
 
-  private registerEvidence(
-    task: TaskState,
-    evidence: TurnEvidence,
-    capture: EvidenceCapture,
-  ): void {
+  private registerEvidence(task: TaskState, evidence: TurnEvidence, capture: Capture): void {
     const { writer } = this.deps;
     const artifact = writer.registerArtifact({
       kind: evidence.kind,
@@ -1558,13 +1554,7 @@ export class Engine {
       mimeType: "application/x-ndjson",
       producerExecutionId: task.executionId,
       originalPath: evidence.originalPath,
-      ...match(capture)
-        .with({ status: "retained" }, ({ bytes }) => ({ bytes }))
-        .with({ status: "failed" }, ({ status, reason }) => ({
-          captureStatus: status,
-          captureReason: reason,
-        }))
-        .exhaustive(),
+      ...captureFields(capture),
     });
     writer.linkArtifact({
       conversationId: this.activeConversation.id,
@@ -1592,13 +1582,8 @@ export class Engine {
       producerExecutionId: task.executionId,
       producerEventId: result.eventId,
       originalPath: declared.path,
-      ...(capture.status === "retained"
-        ? { bytes: capture.bytes }
-        : {
-            captureStatus: capture.status,
-            externalLocator: declared.path,
-            captureReason: capture.reason,
-          }),
+      externalLocator: capture.status === "retained" ? null : declared.path,
+      ...captureFields(capture),
     });
     writer.linkArtifact({
       conversationId,

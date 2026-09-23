@@ -35,46 +35,6 @@ describe("record writer", () => {
     expect(catalog.all("SELECT * FROM events")).toHaveLength(0);
   });
 
-  it("undoes only a failed savepoint's writes and commits the rest of the transaction", () => {
-    const prov = writer.createProvenanceSet("test");
-    const conv = writer.createConversation({
-      provenanceSetId: prov,
-      runtimeConversationId: "rt-1",
-    });
-    catalog.transaction(() => {
-      writer.appendEvent({ conversationId: conv.id, type: "before", payload: {} });
-      const undone = catalog.savepoint(() => {
-        writer.appendEvent({ conversationId: conv.id, type: "undone", payload: {} });
-        throw new Error("simulated write failure");
-      });
-      expect(undone).toMatchObject({ ok: false, error: new Error("simulated write failure") });
-      const kept = catalog.savepoint(() =>
-        writer.appendEvent({ conversationId: conv.id, type: "kept", payload: {} }),
-      );
-      expect(kept.ok).toBe(true);
-    });
-    const types = catalog.all<{ type: string }>("SELECT type FROM events ORDER BY sequence");
-    expect(types.map((row) => row.type)).toEqual(["before", "kept"]);
-  });
-
-  it("refuses a savepoint outside a transaction", () => {
-    expect(() => catalog.savepoint(() => undefined)).toThrow("savepoint needs an open transaction");
-  });
-
-  it("throws when a savepoint's failure ended the whole transaction, since nothing is left to commit", () => {
-    const prov = writer.createProvenanceSet("test");
-    expect(() =>
-      catalog.transaction(() =>
-        catalog.savepoint(() => {
-          // SQLite ends the transaction itself on some I/O errors; ROLLBACK stands in for one.
-          catalog.db.exec("ROLLBACK");
-          throw new Error("simulated disk I/O error");
-        }),
-      ),
-    ).toThrow("simulated disk I/O error");
-    expect(catalog.all("SELECT id FROM provenance_sets")).toEqual([{ id: prov }]);
-  });
-
   it("assigns a dense per-conversation sequence and redacts payloads", () => {
     const prov = writer.createProvenanceSet("test");
     const conv = writer.createConversation({
