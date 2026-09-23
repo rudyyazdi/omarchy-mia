@@ -17,7 +17,6 @@ This file contains the guidelines for contributing to this codebase. It holds no
 - Separate decisions, persistence, and effects.
 - Make commit and effect ordering explicit; keep in-memory state consistent with committed records. Define behavior for duplicate requests, late callbacks, cancellation, and failures after commit.
 - Favor extending behavior through stable contracts over modifying consumers; introduce abstractions for concrete needs, not speculative flexibility.
-- Treat persisted formats and public protocols as compatibility contracts; make migrations and incompatible-version handling explicit.
 - Make invalid states unrepresentable with discriminated unions. Each concept has one definition: a domain vocabulary (statuses, kinds, policies) is a union declared once and imported, never retyped as `string`; a helper has one home, never a second copy.
 - Validate external data once at boundaries.
 - Keep business rules independent of infrastructure.
