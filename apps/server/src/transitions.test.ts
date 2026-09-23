@@ -3,7 +3,7 @@ import type { TurnResult } from "@mia/agent-adapter";
 import type { TaskStatus, ToolCallStatus } from "@mia/protocol";
 import type { ToolCallPolicy } from "@mia/records";
 import {
-  bindsToLatest,
+  bindPermissionRequest,
   classifyActions,
   classifyTask,
   decideAbandonment,
@@ -202,22 +202,33 @@ describe("evaluatePermission", () => {
 });
 
 describe("binding", () => {
-  const latest: Parameters<typeof bindsToLatest>[0] = {
-    status: "awaiting_approval",
+  const latest: { status: ToolCallStatus; toolIdentity: string; digest: string } = {
+    status: "proposed",
     toolIdentity: "mcp__d1__change",
     digest: "d1",
   };
+  const same = { toolIdentity: "mcp__d1__change", digest: "d1" };
 
-  it("reuses the latest revision only while it is held with the same tool and arguments", () => {
-    expect(bindsToLatest(latest, { toolIdentity: "mcp__d1__change", digest: "d1" })).toBe(true);
-    expect(bindsToLatest(latest, { toolIdentity: "mcp__d1__change", digest: "d2" })).toBe(false);
-    expect(bindsToLatest(latest, { toolIdentity: "mcp__d1__read", digest: "d1" })).toBe(false);
+  it("reuses the latest revision only while it is proposed with the same tool and arguments", () => {
+    expect(bindPermissionRequest(latest, same)).toEqual({ kind: "reuse", call: latest });
+    expect(bindPermissionRequest(latest, { ...same, digest: "d2" })).toEqual({ kind: "propose" });
+    expect(bindPermissionRequest(latest, { ...same, toolIdentity: "mcp__d1__read" })).toEqual({
+      kind: "propose",
+    });
+    expect(bindPermissionRequest({ ...latest, status: "dispatched" }, same)).toEqual({
+      kind: "propose",
+    });
+    expect(bindPermissionRequest(undefined, same)).toEqual({ kind: "propose" });
+  });
+
+  it("refuses a request identical to one already awaiting approval, without a second approval", () => {
+    expect(bindPermissionRequest({ ...latest, status: "awaiting_approval" }, same)).toMatchObject({
+      kind: "duplicate",
+      settle: { behavior: "deny" },
+    });
     expect(
-      bindsToLatest(
-        { ...latest, status: "dispatched" },
-        { toolIdentity: "mcp__d1__change", digest: "d1" },
-      ),
-    ).toBe(false);
+      bindPermissionRequest({ ...latest, status: "awaiting_approval" }, { ...same, digest: "d2" }),
+    ).toEqual({ kind: "propose" });
   });
 
   it("invalidates a held binding and its approval, and leaves a released one alone", () => {

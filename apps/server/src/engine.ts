@@ -39,7 +39,7 @@ import { collectArtifact } from "./artifact-collector.ts";
 import type { Profile } from "./config.ts";
 import { createConversationProvenance } from "./provenance.ts";
 import {
-  bindsToLatest,
+  bindPermissionRequest,
   classifyActions,
   classifyTask,
   decideAbandonment,
@@ -1091,36 +1091,26 @@ export class Engine {
     task: TaskState,
     req: PermissionRequest,
   ): Promise<PermissionDecision> {
-    const conversation = this.conversation;
-    if (!conversation || this.task !== task)
+    if (!this.conversation || this.task !== task)
       return { behavior: "deny", message: "Mia has no active task for this call." };
     const opts = this.taskOpts(task);
     const runtimeCallId = req.toolUseId;
-    if (!runtimeCallId) {
-      try {
-        this.tx(() =>
-          this.emit(
-            {
-              type: "error",
-              payload: {
-                code: "runtime_failure",
-                message: `permission request for ${req.toolName} carried no runtime call id; rejected`,
-                conversation_id: conversation.id,
-                task_id: task.id,
-              },
-            },
-            opts,
-          ),
-        );
-      } catch (error) {
-        this.deps.log(`could not record an unbindable permission request: ${errorMessage(error)}`);
-      }
-      return {
-        behavior: "deny",
-        message: "Mia cannot bind this call to a runtime call id; rejected.",
-      };
-    }
+    if (!runtimeCallId)
+      return this.refuseRequest(task, {
+        detail: `permission request for ${req.toolName} carried no runtime call id; rejected`,
+        settle: {
+          behavior: "deny",
+          message: "Mia cannot bind this call to a runtime call id; rejected.",
+        },
+      });
     const digest = canonicalDigest(req.input);
+    const last = task.calls.get(runtimeCallId)?.at(-1);
+    const binding = bindPermissionRequest(last, { toolIdentity: req.toolName, digest });
+    if (binding.kind === "duplicate")
+      return this.refuseRequest(task, {
+        detail: `permission request for ${req.toolName} (${runtimeCallId}) ${binding.detail}; denied`,
+        settle: binding.settle,
+      });
     // Policy is exactly what the profile says. After an interruption the next turn's Mia note tells the model which
     // effects are unknown; deciding whether a repeat is safe is the model's job, not a reason to re-prompt an allowed tool.
     const policy = this.deps.profile.runtime.toolPolicy[req.toolName] ?? "unlisted";
@@ -1132,10 +1122,9 @@ export class Engine {
     let call: ToolCallState;
     try {
       call = this.tx(() => {
-        const last = task.calls.get(runtimeCallId)?.at(-1);
         let bound: ToolCallState;
-        if (last && bindsToLatest(last, { toolIdentity: req.toolName, digest })) {
-          bound = last;
+        if (binding.kind === "reuse") {
+          bound = binding.call;
         } else {
           if (last) this.supersede(task, last);
           const proposal = this.record(
@@ -1194,6 +1183,35 @@ export class Engine {
         return promise;
       })
       .exhaustive();
+  }
+
+  /**
+   * Refuse a permission request that binds to no new call: nothing is proposed or approved, and the runtime
+   * gets the refusal even if recording it fails.
+   */
+  private refuseRequest(
+    task: TaskState,
+    refusal: { detail: string; settle: PermissionDecision },
+  ): PermissionDecision {
+    try {
+      this.tx(() =>
+        this.emit(
+          {
+            type: "error",
+            payload: {
+              code: "runtime_failure",
+              message: refusal.detail,
+              conversation_id: this.activeConversation.id,
+              task_id: task.id,
+            },
+          },
+          this.taskOpts(task),
+        ),
+      );
+    } catch (error) {
+      this.deps.log(`could not record a refused permission request: ${errorMessage(error)}`);
+    }
+    return refusal.settle;
   }
 
   /** Record what the permission rule decided for a bound call (inside tx). */
