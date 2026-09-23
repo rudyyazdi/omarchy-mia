@@ -16,9 +16,12 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "mia-mcp-http-"));
 });
 afterEach(async () => {
-  await handle?.close();
-  handle = undefined;
-  await rm(dir, { recursive: true, force: true });
+  try {
+    await handle?.close();
+  } finally {
+    handle = undefined;
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 const post = (url: string, body: unknown, signal?: AbortSignal) =>
@@ -47,6 +50,7 @@ const holdRequest = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { nam
 /**
  * Serves one tool, `hold`, that keeps its response open until the connection closes. `entered`
  * resolves with the request's context once the tool is running; `contexts` has every request's.
+ * The server is also stored in `handle`, so `afterEach` closes it even when the test fails.
  */
 const startHoldingServer = async () => {
   const entered = Promise.withResolvers<McpRequestContext>();
@@ -135,25 +139,36 @@ describe("MCP HTTP server", () => {
     expect(posted.status).toBe(404);
     expect(await posted.json()).toEqual({ error: "not found" });
 
-    const fetched = await fetch(new URL("/", server.url));
-    expect(fetched.status).toBe(404);
-    await fetched.body?.cancel();
+    for (const path of ["/", "/mcpx", "/mcp/extra"]) {
+      const fetched = await post(new URL(path, server.url).href, initializeRequest());
+      expect(fetched.status, path).toBe(404);
+      await fetched.body?.cancel();
+    }
 
     expect(contexts).toEqual([]);
   });
 
   it("refuses a POST body over 4 MiB and keeps serving", async () => {
     const { handle: server, contexts } = await startHoldingServer();
+    const limit = 4 * 1024 * 1024;
+    // Valid initialize requests padded to exactly the limit and one byte past it, so only the
+    // size limit decides between a 200 and a refusal.
+    const padding = limit - JSON.stringify(initializeRequest("")).length;
 
-    // A valid initialize request, so only the size limit stands between it and a 200.
-    const oversized = post(server.url, initializeRequest("x".repeat(4 * 1024 * 1024))).then(
+    const atLimit = await post(server.url, initializeRequest("x".repeat(padding)));
+    expect(atLimit.status).toBe(200);
+    await atLimit.body?.cancel();
+    expect(contexts).toHaveLength(1);
+
+    const oversized = post(server.url, initializeRequest("x".repeat(padding + 1))).then(
       async (response) => ({ status: response.status, body: await response.text() }),
     );
+    // 500 is today's answer, not a considered one: #89.
     await expect(oversized).resolves.toEqual({
       status: 500,
       body: JSON.stringify({ error: "request body too large" }),
     });
-    expect(contexts).toEqual([]);
+    expect(contexts).toHaveLength(1);
 
     const recovered = await initialize(server.url);
     expect(recovered.status).toBe(200);
@@ -164,9 +179,7 @@ describe("MCP HTTP server", () => {
     const { handle: server, entered } = await startHoldingServer();
     const client = new AbortController();
 
-    const call = post(server.url, holdRequest, client.signal).then(async (response) =>
-      response.text(),
-    );
+    const call = post(server.url, holdRequest, client.signal).then((response) => response.text());
     const ctx = await entered;
     const aborted = once(ctx.connectionClosed, "abort");
     client.abort();
@@ -182,7 +195,8 @@ describe("MCP HTTP server", () => {
     const initialized = await initialize(server.url);
     expect(initialized.status).toBe(200);
     await initialized.text();
-    // Closing the server closes the kept-alive connection, so the response's close has fired.
+    // The response's close has already fired; closing the server also closes the kept-alive
+    // socket, which must not abort a request that completed on it.
     await server.close();
     handle = undefined;
 
@@ -193,13 +207,15 @@ describe("MCP HTTP server", () => {
   it("closes with a request still open", async () => {
     const { handle: server, entered } = await startHoldingServer();
 
-    const call = post(server.url, holdRequest).then(async (response) => response.text());
+    const call = post(server.url, holdRequest).then((response) => response.text());
+    const refused = expect(call).rejects.toThrow();
     const ctx = await entered;
+    const aborted = once(ctx.connectionClosed, "abort");
 
     await server.close();
     handle = undefined;
 
-    await expect(call).rejects.toThrow();
-    expect(ctx.connectionClosed.aborted).toBe(true);
+    await refused;
+    await aborted;
   });
 });
