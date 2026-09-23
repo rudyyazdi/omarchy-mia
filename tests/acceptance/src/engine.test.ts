@@ -572,6 +572,31 @@ describe("approval path", () => {
     );
   });
 
+  it.each(["constructor", "__proto__"])(
+    "denies and records a request for %s as unlisted, not as an inherited policy",
+    async (tool) => {
+      const { turn } = await submit("inherited name");
+      turn.init();
+      const decision = await turn.request(tool, {}, "toolu_i");
+      expect(decision).toMatchObject({
+        behavior: "deny",
+        message: `Mia denied ${tool}: it is not part of the configured policy.`,
+      });
+      const error = await client.waitFor("error");
+      expect(error.payload.code).toBe("configuration_error");
+      turn.end();
+      await client.waitFor("task_finished");
+      expect(rows("SELECT tool_identity, policy, status, detail FROM tool_calls")).toEqual([
+        {
+          tool_identity: tool,
+          policy: "unlisted",
+          status: "denied",
+          detail: "tool not listed in toolPolicy",
+        },
+      ]);
+    },
+  );
+
   it("keeps the call held when the decision cannot be persisted", async () => {
     const { turn, taskId, held, requested } = await submitHeldCall("change");
     failNextCommit();

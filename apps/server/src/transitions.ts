@@ -5,9 +5,10 @@ import type {
   Decision,
   EventPayload,
   TaskStatus,
+  ToolCallPolicy,
   ToolCallStatus,
 } from "@mia/protocol";
-import type { ExecutionStatus, ToolCallPolicy } from "@mia/records";
+import type { ExecutionStatus } from "@mia/records";
 
 /**
  * Task and tool-call rules as pure functions over plain data. Each returns what should change; the engine

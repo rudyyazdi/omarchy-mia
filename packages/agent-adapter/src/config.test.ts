@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { REDACTED, redactValue } from "@mia/protocol";
-import { ConfigurationError, validateRuntimeConfig, type RuntimeConfig } from "./config.ts";
+import {
+  ConfigurationError,
+  policyFor,
+  validateRuntimeConfig,
+  type RuntimeConfig,
+} from "./config.ts";
 
 const validRuntime = (): RuntimeConfig => ({
   kind: "claude-code",
@@ -15,6 +20,19 @@ const validRuntime = (): RuntimeConfig => ({
   outputDirectories: [],
   env: {},
   extraSettings: {},
+});
+
+describe("policyFor", () => {
+  it("returns the listed policy for a listed tool", () => {
+    expect(policyFor(validRuntime(), "mcp__fixture__read")).toBe("allow");
+  });
+
+  it.each(["mcp__fixture__write", "constructor", "toString", "hasOwnProperty", "__proto__"])(
+    "returns unlisted for %s, which the profile does not list",
+    (identity) => {
+      expect(policyFor(validRuntime(), identity)).toBe("unlisted");
+    },
+  );
 });
 
 describe("validateRuntimeConfig", () => {

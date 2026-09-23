@@ -16,6 +16,8 @@ export type Decision = z.infer<typeof DecisionSchema>;
 
 export const ToolPolicySchema = z.enum(["allow", "ask", "deny"]);
 export type ToolPolicy = z.infer<typeof ToolPolicySchema>;
+/** Missing configuration stays distinct from an explicit deny in the persisted policy audit. */
+export type ToolCallPolicy = ToolPolicy | "unlisted";
 
 export const ApprovalStatusSchema = z.enum([
   "pending",

@@ -18,6 +18,7 @@ export type {
   ServerEventOf,
   ServerEventType,
   TaskStatus,
+  ToolCallPolicy,
   ToolCallStatus,
   ToolPolicy,
 } from "./messages.ts";
