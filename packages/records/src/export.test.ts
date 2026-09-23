@@ -16,7 +16,7 @@ import { dirname, join } from "node:path";
 import { sha256Hex } from "@mia/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Catalog } from "./catalog.ts";
-import { exportConversation, verifyExport, type ExportManifest } from "./export.ts";
+import { exportConversationSync, verifyExportSync, type ExportManifest } from "./export.ts";
 import { EXPORT_TABLES, SCHEMA_VERSION } from "./schema.ts";
 import { RecordWriter } from "./writer.ts";
 
@@ -67,13 +67,13 @@ const createExport = (root: string) => {
       relation: "event_payload",
       eventId: event.id,
     });
-    return exportConversation(catalog, conversation.id, join(root, "export"));
+    return exportConversationSync(catalog, conversation.id, join(root, "export"));
   } finally {
     catalog.close();
   }
 };
 
-describe("verifyExport input validation", () => {
+describe("verifyExportSync input validation", () => {
   let root: string;
   let directory: string;
   let manifest: ExportManifest;
@@ -109,7 +109,7 @@ describe("verifyExport input validation", () => {
   const verifyWithObservedReads = () => {
     vi.mocked(readFileSync).mockClear();
     vi.mocked(readdirSync).mockClear();
-    const result = verifyExport(directory);
+    const result = verifyExportSync(directory);
     return {
       result,
       reads: vi.mocked(readFileSync).mock.calls.map(([path]) => path),
@@ -120,7 +120,7 @@ describe("verifyExport input validation", () => {
   it("verifies a valid export including digest and composite-key rows without id columns", () => {
     expect(manifest.record_counts.objects).toBe(2);
     expect(manifest.record_counts.artifact_dependencies).toBe(1);
-    expect(verifyExport(directory)).toMatchObject({
+    expect(verifyExportSync(directory)).toMatchObject({
       ok: true,
       complete: true,
       problems: [],
@@ -144,7 +144,7 @@ describe("verifyExport input validation", () => {
     ({ problem, ...versions }) => {
       writeManifest(versions);
       writeFileSync(join(directory, "events.jsonl"), "not JSON");
-      expect(verifyExport(directory)).toEqual({
+      expect(verifyExportSync(directory)).toEqual({
         ok: false,
         complete: false,
         problems: [problem],
@@ -160,7 +160,7 @@ describe("verifyExport input validation", () => {
       writeManifest(
         Object.fromEntries(Object.entries(manifest).filter(([name]) => name !== field)),
       );
-      const result = verifyExport(directory);
+      const result = verifyExportSync(directory);
       expect(result).toMatchObject({
         ok: false,
         complete: false,
@@ -175,7 +175,7 @@ describe("verifyExport input validation", () => {
 
   it.each(["{", "null", '"x"', "[]"])("reports invalid manifest JSON %s", (contents) => {
     writeFileSync(join(directory, "manifest.json"), contents);
-    const result = verifyExport(directory);
+    const result = verifyExportSync(directory);
     expect(result.ok).toBe(false);
     expect(result.problems).toHaveLength(1);
     expect(result.problems[0]).toContain("manifest.json invalid:");
@@ -184,7 +184,7 @@ describe("verifyExport input validation", () => {
   it.each(EXPORT_TABLES)("rejects primitive rows in %s even when checksums match", (table) => {
     const file = table === "events" ? "events.jsonl" : `records/${table}.jsonl`;
     replaceRecords(file, '"x"\n');
-    const result = verifyExport(directory);
+    const result = verifyExportSync(directory);
     expect(result.ok).toBe(false);
     expect(result.problems).toContain(`unparsable record in ${table}`);
     expect(result.problems).not.toContain(`checksum mismatch: ${file}`);
@@ -194,7 +194,7 @@ describe("verifyExport input validation", () => {
     "rejects malformed or missing record identities: %s",
     (line) => {
       replaceRecords("records/tasks.jsonl", `${line}\n`);
-      expect(verifyExport(directory).problems).toContain("unparsable record in tasks");
+      expect(verifyExportSync(directory).problems).toContain("unparsable record in tasks");
     },
   );
 
@@ -203,7 +203,7 @@ describe("verifyExport input validation", () => {
       "records/artifacts.jsonl",
       `${JSON.stringify({ id: "artifact", capture_status: "retaind", object_digest: null })}\n`,
     );
-    const result = verifyExport(directory);
+    const result = verifyExportSync(directory);
     expect(result.ok).toBe(false);
     expect(result.problems).toContain("unparsable record in artifacts");
   });
@@ -227,7 +227,7 @@ describe("verifyExport input validation", () => {
     },
   ])("validates verifier fields and actual keys in $table", ({ file, table, row }) => {
     replaceRecords(file, `${JSON.stringify(row)}\n`);
-    const result = verifyExport(directory);
+    const result = verifyExportSync(directory);
     expect(result.ok).toBe(false);
     expect(result.problems).toContain(`unparsable record in ${table}`);
   });
@@ -235,14 +235,14 @@ describe("verifyExport input validation", () => {
   it("still reports checksum tampering", () => {
     const file = "events.jsonl";
     writeFileSync(join(directory, file), `${readFileSync(join(directory, file), "utf8")}\n`);
-    expect(verifyExport(directory).problems).toContain(`checksum mismatch: ${file}`);
+    expect(verifyExportSync(directory).problems).toContain(`checksum mismatch: ${file}`);
   });
 
   it.each(["stray.txt", "constructor", "toString", "hasOwnProperty", "__proto__"])(
     "reports an unlisted file named %s",
     (name) => {
       writeFileSync(join(directory, name), "stray");
-      expect(verifyExport(directory)).toMatchObject({
+      expect(verifyExportSync(directory)).toMatchObject({
         ok: false,
         problems: [`unlisted file: ${name}`],
       });
@@ -260,7 +260,7 @@ describe("verifyExport input validation", () => {
       });
       writeManifest({ ...manifest, files });
       if (present) writeFileSync(join(directory, "__proto__"), "wrong checksum");
-      expect(verifyExport(directory)).toEqual({
+      expect(verifyExportSync(directory)).toEqual({
         ok: false,
         complete: false,
         problems: ["manifest.json invalid: reserved file name __proto__"],
@@ -389,29 +389,29 @@ describe("verifyExport input validation", () => {
 
   it("reports missing files", () => {
     rmSync(join(directory, "events.jsonl"));
-    expect(verifyExport(directory).problems).toContain("file missing: events.jsonl");
+    expect(verifyExportSync(directory).problems).toContain("file missing: events.jsonl");
   });
 
   it("returns filesystem failures through problems", () => {
     vi.mocked(readFileSync).mockImplementationOnce(() => {
       throw new Error("read denied");
     });
-    expect(verifyExport(directory).problems).toContain("file unreadable: manifest.json");
+    expect(verifyExportSync(directory).problems).toContain("file unreadable: manifest.json");
     vi.mocked(lstatSync).mockImplementationOnce(() => {
       throw new Error("stat denied");
     });
-    expect(verifyExport(directory).problems).toContain("export directory unreadable");
+    expect(verifyExportSync(directory).problems).toContain("export directory unreadable");
     vi.mocked(readdirSync).mockImplementationOnce(() => {
       throw new Error("inventory denied");
     });
-    expect(verifyExport(directory).problems).toContain("directory unreadable: .");
+    expect(verifyExportSync(directory).problems).toContain("directory unreadable: .");
   });
 
   it("verifies listed regular files in nested directories", () => {
     const name = "extra/nested/evidence.txt";
     mkdirSync(dirname(join(directory, name)), { recursive: true });
     replaceRecords(name, "evidence");
-    expect(verifyExport(directory).ok).toBe(true);
+    expect(verifyExportSync(directory).ok).toBe(true);
   });
 
   it("checks unsupported versions before reading or traversing other entries", () => {

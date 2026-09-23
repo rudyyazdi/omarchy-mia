@@ -13,7 +13,7 @@ import { sha256Hex } from "@mia/protocol";
 import { match } from "ts-pattern";
 import { z } from "zod";
 import { parseJson, type Catalog } from "./catalog.ts";
-import { ExportFiles } from "./export-files.ts";
+import { ExportFiles, type ExportReadResult } from "./export-files.ts";
 import { ObjectStore } from "./objects.ts";
 import { snapshotConversation, UnresolvedReferenceSchema } from "./queries.ts";
 import { renderReport } from "./report.ts";
@@ -76,11 +76,19 @@ const tableFile = (table: ExportTable): string =>
 const toJsonl = (rows: unknown[]): string =>
   rows.map((row) => JSON.stringify(row)).join("\n") + (rows.length ? "\n" : "");
 
+/** Write one export file, creating its directory, and return the checksum the manifest lists for it. */
+const writeExportFileSync = (path: string, contents: string): ExportedFile => {
+  const buf = Buffer.from(contents, "utf8");
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, buf, { mode: 0o600 });
+  return { sha256: sha256Hex(buf), bytes: buf.byteLength };
+};
+
 /**
  * Export one conversation into a self-contained directory: records, events, report, referenced objects, manifest.
  * Written to <out>.partial and renamed only after verification passes; a failed export is left labelled partial.
  */
-export const exportConversation = (
+export const exportConversationSync = (
   catalog: Catalog,
   conversationId: string,
   outDir: string,
@@ -92,22 +100,16 @@ export const exportConversation = (
   const snapshot = snapshotConversation(catalog, conversationId);
   const store = new ObjectStore(catalog.paths);
   const files: Record<string, ExportedFile> = {};
-  const write = (rel: string, bytes: Uint8Array | string) => {
-    const buf = typeof bytes === "string" ? Buffer.from(bytes, "utf8") : Buffer.from(bytes);
-    const path = join(staging, rel);
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, buf, { mode: 0o600 });
-    files[rel] = { sha256: sha256Hex(buf), bytes: buf.byteLength };
-  };
 
   const counts: Record<string, number> = {};
   for (const table of EXPORT_TABLES) {
     const rows = snapshot.tables[table];
     counts[table] = rows.length;
-    write(tableFile(table), toJsonl(rows));
+    const rel = tableFile(table);
+    files[rel] = writeExportFileSync(join(staging, rel), toJsonl(rows));
   }
-  write(
-    "conversation.json",
+  files["conversation.json"] = writeExportFileSync(
+    join(staging, "conversation.json"),
     JSON.stringify(
       {
         conversation: snapshot.tables.conversations[0],
@@ -152,7 +154,10 @@ export const exportConversation = (
     files[rel] = { sha256: digest, bytes: copied.byteLength };
     included++;
   }
-  write("report.html", renderReport(snapshot, { objectStatus }));
+  files["report.html"] = writeExportFileSync(
+    join(staging, "report.html"),
+    renderReport(snapshot, { objectStatus }),
+  );
 
   const artifacts = snapshot.tables.artifacts;
   // A Map, not an object: a stored type such as `__proto__` must count like any other, not reach the prototype.
@@ -195,7 +200,7 @@ export const exportConversation = (
   };
   const manifest: ExportManifest = { ...manifestWithoutFiles, files };
   writeFileSync(join(staging, "manifest.json"), JSON.stringify(manifest, null, 2), { mode: 0o600 });
-  const verification = verifyExport(staging);
+  const verification = verifyExportSync(staging);
   if (!verification.ok) {
     writeFileSync(
       join(staging, "VERIFICATION-FAILED.txt"),
@@ -247,16 +252,18 @@ const listsReservedFileName = (manifestJson: unknown): boolean => {
 const RecordIdSchema = z.object({ id: z.string() }) satisfies z.ZodType<Pick<TaskRow, "id">>;
 
 /** Verify an export offline: file checksums, object digests, referential integrity, report safety. */
-export const verifyExport = (dir: string): VerificationResult => {
+export const verifyExportSync = (dir: string): VerificationResult => {
   const problems: string[] = [];
   let files: ExportFiles;
   try {
-    files = new ExportFiles(dir);
+    files = ExportFiles.openSync(dir);
   } catch {
     return failedVerification("export directory unreadable");
   }
-  const readFile = (name: string, missingProblem: string | null = `file missing: ${name}`) =>
-    match(files.read(name))
+  // Records a failed read as a problem; `missingProblem` null means an absent file is not one. The reads stay
+  // in this function's body, where lint can see they run synchronously, and only their results pass through here.
+  const bytesOf = (read: ExportReadResult, missingProblem: string | null): Buffer | null =>
+    match(read)
       .with({ status: "read" }, ({ bytes }) => bytes)
       .with({ status: "missing" }, () => {
         if (missingProblem) problems.push(missingProblem);
@@ -267,7 +274,7 @@ export const verifyExport = (dir: string): VerificationResult => {
         return null;
       })
       .exhaustive();
-  const manifestBytes = readFile("manifest.json", "manifest.json missing");
+  const manifestBytes = bytesOf(files.readSync("manifest.json"), "manifest.json missing");
   if (!manifestBytes) return failedVerification(problems[0] ?? "manifest.json unreadable");
   let manifestJson: unknown;
   try {
@@ -294,22 +301,25 @@ export const verifyExport = (dir: string): VerificationResult => {
   const manifest = parsed.data;
   let checkedFiles = 0;
   for (const [rel, expected] of Object.entries(manifest.files)) {
-    const bytes = readFile(rel);
+    const bytes = bytesOf(files.readSync(rel), `file missing: ${rel}`);
     if (!bytes) continue;
     if (bytes.byteLength !== expected.bytes || sha256Hex(bytes) !== expected.sha256)
       problems.push(`checksum mismatch: ${rel}`);
     checkedFiles++;
   }
   // Every file present must be listed (except manifest itself).
-  const inventory = files.inventory();
+  const inventory = files.inventorySync();
   problems.push(...inventory.problems);
   for (const rel of inventory.files) {
     if (rel !== "manifest.json" && !Object.hasOwn(manifest.files, rel))
       problems.push(`unlisted file: ${rel}`);
   }
+  const tableBytes = new Map<ExportTable, Buffer | null>();
+  for (const table of EXPORT_TABLES)
+    tableBytes.set(table, bytesOf(files.readSync(tableFile(table)), null));
   // Validate only row identities and fields used below, not the full catalog schemas.
   const readTable = <Row>(table: ExportTable, schema: z.ZodType<Row>): Row[] => {
-    const bytes = readFile(tableFile(table), null);
+    const bytes = tableBytes.get(table);
     const rows: Row[] = [];
     if (bytes) {
       for (const line of bytes.toString("utf8").split("\n").filter(Boolean)) {
@@ -441,15 +451,15 @@ export const verifyExport = (dir: string): VerificationResult => {
     const name = `objects/sha256/${digest.slice(0, 2)}/${digest}`;
     const declaredUnavailable =
       manifest.objects.missing.includes(digest) || manifest.objects.corrupt.includes(digest);
-    const bytes = readFile(
-      name,
+    const bytes = bytesOf(
+      files.readSync(name),
       declaredUnavailable ? null : `object bytes missing and not declared: ${digest}`,
     );
     if (!bytes) continue;
     if (sha256Hex(bytes) !== digest) problems.push(`object corrupt: ${digest}`);
     checkedObjects++;
   }
-  const report = readFile("report.html", "report.html missing")?.toString("utf8");
+  const report = bytesOf(files.readSync("report.html"), "report.html missing")?.toString("utf8");
   if (report === "") problems.push("report.html missing");
   if (report) {
     if (/<script\b/i.test(report)) problems.push("report contains a script tag");
@@ -468,7 +478,7 @@ export const verifyExport = (dir: string): VerificationResult => {
 };
 
 /** Find objects on disk that no catalog row references, and catalog objects whose bytes are missing/corrupt. */
-export const reconcileObjects = (
+export const reconcileObjectsSync = (
   catalog: Catalog,
 ): {
   orphans: string[];

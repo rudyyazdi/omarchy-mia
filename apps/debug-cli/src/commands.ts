@@ -2,12 +2,12 @@ import { resolve } from "node:path";
 import {
   Catalog,
   diagnosticsViews,
-  exportConversation,
+  exportConversationSync,
   listConversations,
-  reconcileObjects,
+  reconcileObjectsSync,
   snapshotConversation,
   taskViews,
-  verifyExport,
+  verifyExportSync,
   type ConversationSnapshot,
 } from "@mia/records";
 import {
@@ -99,15 +99,15 @@ export const exportToDirectory = (
   conversationId: string,
 ): void =>
   withCatalog(options, (catalog) =>
-    out(formatExport(exportConversation(catalog, conversationId, resolve(options.output)))),
+    out(formatExport(exportConversationSync(catalog, conversationId, resolve(options.output)))),
   );
 
 /** Prints the verification result and reports whether the export verified. */
 export const verifyExportDirectory = (exportDirectory: string): boolean => {
-  const result = verifyExport(resolve(exportDirectory));
+  const result = verifyExportSync(resolve(exportDirectory));
   out(result);
   return result.ok;
 };
 
 export const reconcile = (options: GlobalOptions): void =>
-  withCatalog(options, (catalog) => out(reconcileObjects(catalog)));
+  withCatalog(options, (catalog) => out(reconcileObjectsSync(catalog)));

@@ -20,5 +20,5 @@ export type {
   DiagnosticsView,
   TaskView,
 } from "./queries.ts";
-export { exportConversation, reconcileObjects, verifyExport } from "./export.ts";
+export { exportConversationSync, reconcileObjectsSync, verifyExportSync } from "./export.ts";
 export type { ExportManifest } from "./export.ts";

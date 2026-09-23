@@ -21,12 +21,17 @@ const invalidPath = (name: string): boolean =>
 export class ExportFiles {
   readonly #root: string;
 
-  constructor(directory: string) {
-    this.#root = realpathSync(directory);
-    if (!lstatSync(this.#root).isDirectory()) throw new Error("export root is not a directory");
+  private constructor(root: string) {
+    this.#root = root;
   }
 
-  read(name: string): ExportReadResult {
+  static openSync(directory: string): ExportFiles {
+    const root = realpathSync(directory);
+    if (!lstatSync(root).isDirectory()) throw new Error("export root is not a directory");
+    return new ExportFiles(root);
+  }
+
+  readSync(name: string): ExportReadResult {
     if (invalidPath(name)) return { status: "invalid", problem: `invalid file path: ${name}` };
     try {
       let path = this.#root;
@@ -50,7 +55,7 @@ export class ExportFiles {
     }
   }
 
-  inventory(): { files: string[]; problems: string[] } {
+  inventorySync(): { files: string[]; problems: string[] } {
     const files: string[] = [];
     const problems: string[] = [];
     const pending = [""];
