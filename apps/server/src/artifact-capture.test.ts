@@ -1,6 +1,11 @@
 import { sha256Hex } from "@mia/protocol";
 import { describe, expect, it } from "vitest";
-import { decideEligibility, extractDeclaredArtifact, verifyContent } from "./artifact-capture.ts";
+import {
+  checkDeclaredPath,
+  decideEligibility,
+  extractDeclaredArtifact,
+  verifyContent,
+} from "./artifact-capture.ts";
 
 const policy = { resolvedOutputDirectories: ["/work/out"] };
 
@@ -28,6 +33,22 @@ describe("extractDeclaredArtifact", () => {
       extractDeclaredArtifact({ text: JSON.stringify({ artifact: { path: "/x" } }) }),
     ).toBeNull();
   });
+});
+
+describe("checkDeclaredPath", () => {
+  it("accepts an absolute path", () => {
+    expect(checkDeclaredPath({ path: "/work/out/a.txt" })).toBeNull();
+  });
+
+  it.each(["a.txt", "out/a.txt", "./a.txt", "../a.txt", ""])(
+    "refuses the relative path %j",
+    (path) => {
+      expect(checkDeclaredPath({ path })).toEqual({
+        status: "failed",
+        reason: "declared path must be absolute",
+      });
+    },
+  );
 });
 
 describe("decideEligibility", () => {
