@@ -1,6 +1,20 @@
-export * from "./config.ts";
-export * from "./bridge.ts";
-export * from "./launch.ts";
-export * from "./adapter.ts";
-export * from "./runtime-events.ts";
-export * from "./budget.ts";
+export { ConfigurationError, RuntimeConfigSchema, validateRuntimeConfig } from "./config.ts";
+export type { RuntimeConfig } from "./config.ts";
+export { ApprovalBridge } from "./bridge.ts";
+export type { PermissionDecision, PermissionHandler, PermissionRequest } from "./bridge.ts";
+export { prepareLaunch } from "./launch.ts";
+export {
+  ADAPTER_VERSION,
+  ClaudeCodeAdapter,
+  probeStaticCapabilities,
+  readHookEvidence,
+} from "./adapter.ts";
+export type {
+  RuntimeCancellation,
+  StaticCapabilities,
+  TurnHandle,
+  TurnOptions,
+  TurnResult,
+} from "./adapter.ts";
+export type { RuntimeEvent, RuntimeInit, TurnSummary } from "./runtime-events.ts";
+export { LiveCallBudget } from "./budget.ts";

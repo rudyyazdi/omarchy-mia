@@ -1,8 +1,6 @@
 import { z } from "zod";
 import type { ApprovalStatus, TaskStatus, ToolCallStatus, ToolPolicy } from "@mia/protocol";
 
-export type { ApprovalStatus } from "@mia/protocol";
-
 export const SCHEMA_VERSION = 1;
 
 /** Logical records from docs/D1/CONVERSATION-RECORDS.md. Foreign keys are enforced per connection (see catalog.ts). */

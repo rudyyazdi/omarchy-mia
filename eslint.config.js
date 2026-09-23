@@ -83,6 +83,21 @@ const RESTRICTED_SYNTAX = [
   { selector: "SwitchStatement", message: `Use match() from ts-pattern. ${BYPASS_NOTE}` },
 ];
 
+// Source files outside tests: everything above, plus the rules that only apply to shipped code.
+const SOURCE_RESTRICTED_SYNTAX = [
+  ...RESTRICTED_SYNTAX,
+  {
+    selector: 'NewExpression[callee.name="Promise"]',
+    message: `Use Promise.withResolvers, AbortSignal.timeout or once(). ${BYPASS_NOTE}`,
+  },
+];
+
+// Enforces AGENTS.md, Design: `export *` makes every helper a module exports public contract.
+const NO_EXPORT_ALL = {
+  selector: "ExportAllDeclaration",
+  message: `A workspace's index.ts lists its contract export by export; replace \`export *\` with the names other workspaces import. ${BYPASS_NOTE}`,
+};
+
 export default tseslint.config(
   {
     ignores: [
@@ -134,16 +149,22 @@ export default tseslint.config(
   {
     files: ["packages/**/*.ts", "apps/**/*.ts", "fixtures/**/*.ts", "tools/**/*.ts"],
     ignores: ["**/*.test.ts"],
-    rules: {
-      "no-restricted-syntax": [
-        "error",
-        ...RESTRICTED_SYNTAX,
-        {
-          selector: 'NewExpression[callee.name="Promise"]',
-          message: `Use Promise.withResolvers, AbortSignal.timeout or once(). ${BYPASS_NOTE}`,
-        },
-      ],
-    },
+    rules: { "no-restricted-syntax": ["error", ...SOURCE_RESTRICTED_SYNTAX] },
+  },
+  {
+    // Workspace entry points. Each repeats its list above because a later no-restricted-syntax
+    // entry replaces an earlier one.
+    files: [
+      "packages/*/src/index.ts",
+      "apps/*/src/index.ts",
+      "fixtures/*/src/index.ts",
+      "tools/*/src/index.ts",
+    ],
+    rules: { "no-restricted-syntax": ["error", ...SOURCE_RESTRICTED_SYNTAX, NO_EXPORT_ALL] },
+  },
+  {
+    files: ["tests/*/src/index.ts"],
+    rules: { "no-restricted-syntax": ["error", ...RESTRICTED_SYNTAX, NO_EXPORT_ALL] },
   },
   {
     // Keeps entry points small; the rule is in AGENTS.md, Node.
