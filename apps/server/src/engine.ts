@@ -40,6 +40,7 @@ import type { Profile } from "./config.ts";
 import { createConversationProvenance } from "./provenance.ts";
 import {
   bindPermissionRequest,
+  bindStreamProposal,
   classifyActions,
   classifyTask,
   decideAbandonment,
@@ -943,11 +944,15 @@ export class Engine {
               opts,
             );
             const last = task.calls.get(proposed.runtimeCallId)?.at(-1);
-            if (last && last.digest === digest) {
-              this.deps.writer.updateToolCall(last.id, { proposalEventId: proposal.id });
+            const binding = bindStreamProposal(last, {
+              toolIdentity: proposed.toolIdentity,
+              digest,
+            });
+            if (binding.kind === "attach") {
+              this.deps.writer.updateToolCall(binding.call.id, { proposalEventId: proposal.id });
               return;
             }
-            if (last) this.supersede(task, last);
+            if (last) this.supersede(task, last, { toolIdentity: proposed.toolIdentity, digest });
             const policy =
               this.deps.profile.runtime.toolPolicy[proposed.toolIdentity] ?? "unlisted";
             const state = this.proposeCall(task, {
@@ -1073,8 +1078,12 @@ export class Engine {
   }
 
   /** Invalidate a held earlier binding and any pending approval it carries (inside tx). */
-  private supersede(task: TaskState, last: ToolCallState): void {
-    const superseded = supersedeBinding(last);
+  private supersede(
+    task: TaskState,
+    last: ToolCallState,
+    next: { toolIdentity: string; digest: string },
+  ): void {
+    const superseded = supersedeBinding(last, next);
     if (!superseded) return;
     const { approval, call } = superseded;
     if (approval) {
@@ -1126,7 +1135,7 @@ export class Engine {
         if (binding.kind === "reuse") {
           bound = binding.call;
         } else {
-          if (last) this.supersede(task, last);
+          if (last) this.supersede(task, last, { toolIdentity: req.toolName, digest });
           const proposal = this.record(
             "tool_proposed",
             {

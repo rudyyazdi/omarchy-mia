@@ -237,6 +237,31 @@ describe("approval path", () => {
     expect(revisions.map((row) => row.status)).toEqual(["invalidated", "unknown"]);
   });
 
+  it("invalidates an approval when the stream proposes a different tool with the same arguments under its call id", async () => {
+    const { turn, taskId, held, requested } = await submitHeldCall("change");
+    // The stream event commits synchronously, so the records show the new revision before any delivery.
+    turn.propose("toolu_1", "mcp__d1__read", { delta: 1 });
+    expect(
+      rows<{ binding_revision: number; tool_identity: string; status: string }>(
+        "SELECT binding_revision, tool_identity, status FROM tool_calls WHERE runtime_call_id = 'toolu_1' ORDER BY binding_revision",
+      ),
+    ).toEqual([
+      { binding_revision: 1, tool_identity: "mcp__d1__change", status: "invalidated" },
+      { binding_revision: 2, tool_identity: "mcp__d1__read", status: "proposed" },
+    ]);
+    expect(approvalStatuses()).toEqual(["invalidated"]);
+    const invalidated = await client.waitFor(
+      "approval_resolved",
+      (event) => event.payload.approval_id === requested.payload.approval_id,
+    );
+    expect(invalidated.payload).toMatchObject({ status: "invalidated", reason: "tool changed" });
+    expect((await held).behavior).toBe("deny");
+    const stale = await decide(taskId, requested.payload.approval_id, "approve");
+    expect(stale.error?.code).toBe("invalid_state");
+    turn.end();
+    await client.waitFor("task_finished");
+  });
+
   it("refuses a repeated request for a call already awaiting approval and keeps one approval", async () => {
     const { turn, taskId, held, requested } = await submitHeldCall("change");
     // The approvals table's unique key would also refuse a second approval, but only as a record failure

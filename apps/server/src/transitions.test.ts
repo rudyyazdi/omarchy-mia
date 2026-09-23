@@ -4,6 +4,7 @@ import type { TaskStatus, ToolCallStatus } from "@mia/protocol";
 import type { ToolCallPolicy } from "@mia/records";
 import {
   bindPermissionRequest,
+  bindStreamProposal,
   classifyActions,
   classifyTask,
   decideAbandonment,
@@ -209,6 +210,7 @@ describe("binding", () => {
   };
   const held: typeof latest = { ...latest, status: "awaiting_approval" };
   const same = { toolIdentity: "mcp__d1__change", digest: "d1" };
+  const next = { ...same, digest: "d2" };
 
   it("reuses the latest revision only while it is proposed with the same tool and arguments", () => {
     expect(bindPermissionRequest(latest, same)).toEqual({ kind: "reuse", call: latest });
@@ -233,13 +235,51 @@ describe("binding", () => {
     });
   });
 
+  it("attaches a stream proposal to the latest revision only when tool and arguments both match", () => {
+    expect(bindStreamProposal(latest, same)).toEqual({ kind: "attach", call: latest });
+    expect(bindStreamProposal(held, same)).toEqual({ kind: "attach", call: held });
+    expect(bindStreamProposal(latest, { ...same, digest: "d2" })).toEqual({ kind: "propose" });
+    expect(bindStreamProposal(held, { ...same, toolIdentity: "mcp__d1__read" })).toEqual({
+      kind: "propose",
+    });
+    expect(bindStreamProposal(undefined, same)).toEqual({ kind: "propose" });
+  });
+
+  it.each<ToolCallStatus>(["dispatched", "denied", "invalidated", "blocked_gate"])(
+    "attaches a matching stream proposal to a %s call, since the request can come first",
+    (status) => {
+      const settled: typeof latest = { ...latest, status };
+      expect(bindStreamProposal(settled, same)).toEqual({ kind: "attach", call: settled });
+      expect(bindStreamProposal(settled, { ...same, digest: "d2" })).toEqual({ kind: "propose" });
+      expect(bindStreamProposal(settled, { ...same, toolIdentity: "mcp__d1__read" })).toEqual({
+        kind: "propose",
+      });
+    },
+  );
+
   it("invalidates a held binding and its approval, and leaves a released one alone", () => {
-    expect(supersedeBinding({ ...call("awaiting_approval"), approvalId: "appr_1" })).toMatchObject({
-      approval: { approvalId: "appr_1", status: "invalidated" },
+    const revision = (status: ToolCallStatus, approvalId: string | null) => ({
+      ...call(status),
+      digest: "d1",
+      approvalId,
+    });
+    expect(supersedeBinding(revision("awaiting_approval", "appr_1"), next)).toMatchObject({
+      approval: { approvalId: "appr_1", status: "invalidated", reason: "arguments changed" },
       call: { status: "invalidated", settle: { behavior: "deny" } },
     });
-    expect(supersedeBinding({ ...call("proposed"), approvalId: null })?.approval).toBeNull();
-    expect(supersedeBinding({ ...call("dispatched"), approvalId: null })).toBeNull();
+    expect(supersedeBinding(revision("proposed", null), next)?.approval).toBeNull();
+    expect(supersedeBinding(revision("dispatched", null), next)).toBeNull();
+  });
+
+  it("says whether the tool or the arguments changed", () => {
+    const held = { ...call("awaiting_approval"), digest: "d1", approvalId: "appr_1" };
+    expect(supersedeBinding(held, { toolIdentity: "mcp__d1__read", digest: "d1" })).toMatchObject({
+      approval: { reason: "tool changed" },
+      call: { settle: { message: expect.stringContaining("the tool changed") } },
+    });
+    expect(supersedeBinding(held, next)).toMatchObject({
+      call: { settle: { message: expect.stringContaining("the arguments changed") } },
+    });
   });
 });
 

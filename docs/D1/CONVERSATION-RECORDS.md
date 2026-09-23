@@ -108,7 +108,7 @@ Normalized events and affected state rows commit together. Events describe the e
 | `commands(client_connection_id, client_command_id)` | Unique | D1 command deduplication inside an authenticated connection lifetime. D3 extends this to durable retry identity across reconnects. |
 | `tool_calls(execution_id, runtime_call_id, binding_revision)` | Unique | Preserve immutable argument bindings under a runtime call ID; the probe establishes ID scope. Only the current revision can be released. |
 | `tool_calls(task_id, proposal_event_id)` | Index | List calls and uncertain outcomes for a task. |
-| `approvals(tool_call_id, execution_epoch)` | Unique | One decision lifecycle for each immutable call binding in an epoch. Changed arguments create a new binding at the next revision, supersede the old binding, invalidate its pending approval and require a fresh decision. Never mutate approved arguments or release a superseded revision. |
+| `approvals(tool_call_id, execution_epoch)` | Unique | One decision lifecycle for each immutable call binding in an epoch. A changed tool or changed arguments create a new binding at the next revision, supersede the old binding, invalidate its pending approval and require a fresh decision. Never mutate approved arguments or release a superseded revision. |
 | `approvals(status, id)` where status is pending | Partial index | Enumerate unresolved approval requests. |
 | `client_connections(client_id, connected_at, id)` | Index | Connection history and build changes. |
 | `diagnostics(conversation_id, client_id, received_at, id)` | Index | Latest and historical diagnostic state by client in a conversation. |
