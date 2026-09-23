@@ -374,18 +374,49 @@ export type RuntimeFileRead =
   | { status: "read"; bytes: Buffer }
   | { status: "unreadable"; reason: string };
 
+/** Why an abandoned read is unreadable: an `AbortSignal.timeout` deadline reads as `timed out`. */
+const abortReason = (reason: unknown): string =>
+  reason instanceof DOMException && reason.name === "TimeoutError"
+    ? "timed out"
+    : errorMessage(reason);
+
+const readOrReport = async (
+  path: string,
+  signal: AbortSignal | undefined,
+): Promise<RuntimeFileRead> => {
+  try {
+    return { status: "read", bytes: await readFile(path, { signal }) };
+  } catch (error) {
+    if (signal?.aborted) return { status: "unreadable", reason: abortReason(signal.reason) };
+    if (error instanceof Error && "code" in error && error.code === "ENOENT")
+      return { status: "absent" };
+    return { status: "unreadable", reason: errorMessage(error) };
+  }
+};
+
 /**
  * Reads a runtime-written file without throwing, because a throw after the turn would keep it from being
  * recorded as finished. Only a missing file is absent; any other failure (EACCES, EISDIR, ENOTDIR) is reported.
  * Asynchronous because the server reads at turn end while it serves other connections.
+ *
+ * When `signal` aborts the read is unreadable at once, even if the `open()` or `read()` under it is blocked (a
+ * FIFO, a stale mount): `readFile`'s own signal is only checked between those calls. The abandoned read keeps
+ * its descriptor until the blocked call returns, and then closes it.
  */
-export const readRuntimeFile = async (path: string): Promise<RuntimeFileRead> => {
+export const readRuntimeFile = async (
+  path: string,
+  { signal }: { signal?: AbortSignal } = {},
+): Promise<RuntimeFileRead> => {
+  const read = readOrReport(path, signal);
+  if (!signal) return read;
+  const abandoned = Promise.withResolvers<RuntimeFileRead>();
+  const onAbort = () =>
+    abandoned.resolve({ status: "unreadable", reason: abortReason(signal.reason) });
+  signal.addEventListener("abort", onAbort, { once: true });
   try {
-    return { status: "read", bytes: await readFile(path) };
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT")
-      return { status: "absent" };
-    return { status: "unreadable", reason: errorMessage(error) };
+    return await Promise.race([read, abandoned.promise]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
   }
 };
 
@@ -402,8 +433,11 @@ const parseHookEvidence = (text: string): HookEvidence => {
 };
 
 /** Evidence is best-effort: a malformed line is skipped, and an unreadable file is reported rather than thrown. */
-export const readHookEvidence = async (path: string): Promise<HookEvidence> =>
-  match(await readRuntimeFile(path))
+export const readHookEvidence = async (
+  path: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<HookEvidence> =>
+  match(await readRuntimeFile(path, options))
     .with({ status: "absent" }, () => parseHookEvidence(""))
     .with({ status: "unreadable" }, ({ reason }) => ({
       ...parseHookEvidence(""),

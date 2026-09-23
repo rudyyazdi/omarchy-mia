@@ -73,6 +73,18 @@ const taskStatus = (taskId: string): TaskStatus =>
   must(rows<{ status: TaskStatus }>("SELECT status FROM tasks WHERE id = ?", taskId)[0], "task row")
     .status;
 
+/** The effort evidence recorded with the task's execution. */
+const effortEvidence = (taskId: string): unknown =>
+  JSON.parse(
+    must(
+      rows<{ effort_evidence: string }>(
+        "SELECT effort_evidence FROM executions WHERE task_id = ?",
+        taskId,
+      )[0],
+      "execution row",
+    ).effort_evidence,
+  );
+
 /** The task is running again, in the records and in memory: a new submission is told to wait, not to decide. */
 const expectResumed = async (taskId: string): Promise<void> => {
   expect(taskStatus(taskId)).toBe("running");
@@ -329,13 +341,7 @@ describe("streaming and commands", () => {
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("completed");
     expect(taskStatus(taskId)).toBe("completed");
-    const execution = must(
-      rows<{ effort_evidence: string }>(
-        "SELECT effort_evidence FROM executions WHERE task_id = ?",
-        taskId,
-      )[0],
-    );
-    return JSON.parse(execution.effort_evidence);
+    return effortEvidence(taskId);
   };
 
   it("records a turn finished when its hook evidence ends in a truncated line", async () => {
@@ -408,13 +414,7 @@ describe("streaming and commands", () => {
     expect(taskStatus(taskId)).toBe("running");
     await held.release();
     expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
-    const execution = must(
-      rows<{ effort_evidence: string }>(
-        "SELECT effort_evidence FROM executions WHERE task_id = ?",
-        taskId,
-      )[0],
-    );
-    expect(JSON.parse(execution.effort_evidence)).toMatchObject({ values: ["medium"] });
+    expect(effortEvidence(taskId)).toMatchObject({ values: ["medium"] });
   });
 
   it("records a turn whose runtime exited as it ended, when an interruption arrives while it is recorded", async () => {
@@ -443,6 +443,29 @@ describe("streaming and commands", () => {
     expect(rows("SELECT status FROM tool_calls WHERE task_id = ?", taskId)).toEqual([
       { status: "blocked_gate" },
     ]);
+  });
+
+  it("records a turn finished without the evidence whose read outlives its deadline", async () => {
+    const { turn, taskId } = await submit("hello");
+    turn.init();
+    await endHoldingHookEvidence(turn, `${JSON.stringify({ effort: "medium" })}\n`);
+    ts.expireEvidenceReads();
+    expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
+    expect(taskStatus(taskId)).toBe("completed");
+    expect(effortEvidence(taskId)).toMatchObject({ values: [], read_error: "timed out" });
+  });
+
+  it("records a turn whose evidence read is still held when shutdown stops waiting", async () => {
+    const { turn, taskId } = await submit("hello");
+    turn.init();
+    await endHoldingHookEvidence(turn, "");
+    const turnWait = new AbortController();
+    const closing = ts.server.close(turnWait.signal);
+    turnWait.abort();
+    await closing;
+    expect(taskStatus(taskId)).toBe("completed");
+    expect(effortEvidence(taskId)).toMatchObject({ read_error: "abandoned at shutdown" });
+    expect(ts.logs).not.toContainEqual(expect.stringContaining("unrecorded"));
   });
 
   /** Ends a turn after `prepare` has set it up to lose its transcript; returns the transcript artifacts. */

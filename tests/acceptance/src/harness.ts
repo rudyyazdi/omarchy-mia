@@ -16,6 +16,8 @@ export interface TestServer {
   dir: string;
   /** What the server logged, in order: how a test observes a loss the records cannot hold. */
   logs: readonly string[];
+  /** Aborts the deadline of every turn-end evidence read in progress, as if it had timed out. */
+  expireEvidenceReads(): void;
   connect(clientId?: string): Promise<MiaClient>;
   catalog(): Catalog;
   close(): Promise<void>;
@@ -108,10 +110,13 @@ export const startTestServer = async (
   const dir = mkdtempSync(join(tmpdir(), "mia-acceptance-"));
   const profile = testProfile(dir, overrides);
   const logs: string[] = [];
+  // Replaced on every expiry, so a read that starts afterwards gets a deadline of its own.
+  let evidenceDeadline = new AbortController();
   const server = await startServer({
     profile,
     ...(adapter ? { adapter } : {}),
     log: (message) => logs.push(message),
+    evidenceReadDeadline: () => evidenceDeadline.signal,
     env,
   });
   const clients: MiaClient[] = [];
@@ -120,6 +125,10 @@ export const startTestServer = async (
     profile,
     dir,
     logs,
+    expireEvidenceReads: () => {
+      evidenceDeadline.abort(new DOMException("evidence read deadline", "TimeoutError"));
+      evidenceDeadline = new AbortController();
+    },
     connect: async (clientId?: string) => {
       const client = new MiaClient({
         url: server.gateway.url,
