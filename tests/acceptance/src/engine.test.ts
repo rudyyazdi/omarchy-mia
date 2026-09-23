@@ -153,6 +153,32 @@ describe("streaming and commands", () => {
     turn.end();
     await client.waitFor("task_finished");
   });
+
+  it("records a turn finished when its hook evidence ends in a truncated line", async () => {
+    const { turn, taskId } = await submit("hello");
+    turn.init();
+    writeFileSync(
+      join(turn.options.runtimeDir, "hook-evidence.jsonl"),
+      `${JSON.stringify({ effort: "medium" })}\n{"effort":"hi`,
+    );
+    turn.end();
+    const finished = await client.waitFor("task_finished");
+    expect(finished.payload.status).toBe("completed");
+    expect(
+      must(rows<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId)[0]).status,
+    ).toBe("completed");
+    const execution = must(
+      rows<{ effort_evidence: string }>(
+        "SELECT effort_evidence FROM executions WHERE task_id = ?",
+        taskId,
+      )[0],
+    );
+    expect(JSON.parse(execution.effort_evidence)).toMatchObject({
+      values: ["medium"],
+      samples: 1,
+      malformed_lines: 1,
+    });
+  });
 });
 
 describe("approval path", () => {

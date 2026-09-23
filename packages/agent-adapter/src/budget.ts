@@ -1,6 +1,13 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 
+/** `Number()` would turn a typo into NaN, and `used >= NaN` never stops a call, so only digits pass. */
+const parseCallCap = (text: string): number => {
+  if (!/^\d+$/.test(text))
+    throw new Error(`MIA_LIVE_CALL_CAP must be a non-negative integer (got "${text}")`);
+  return Number(text);
+};
+
 /**
  * Live model-call budget shared by the probe and the live acceptance lane.
  * One entry per Mia-submitted turn. The cap is a session guard, not a billing record.
@@ -14,7 +21,7 @@ export class LiveCallBudget {
   static fromEnv(defaultFile: string): LiveCallBudget {
     return new LiveCallBudget(
       process.env.MIA_LIVE_BUDGET_FILE ?? defaultFile,
-      Number(process.env.MIA_LIVE_CALL_CAP ?? "50"),
+      parseCallCap(process.env.MIA_LIVE_CALL_CAP ?? "50"),
     );
   }
 

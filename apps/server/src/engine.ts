@@ -1345,7 +1345,7 @@ export class Engine {
     const actions = classifyActions(calls, task.interrupted);
     const unknown = actions.some((action) => action.status === "unknown");
     const { status, error } = classifyTask({ interrupted: task.interrupted, result, unknown });
-    const hooks = readHookEvidence(result.hookEvidencePath);
+    const { records: hooks, malformedLines } = readHookEvidence(result.hookEvidencePath);
     const efforts = effortLevels(hooks);
     try {
       this.tx(() => {
@@ -1404,8 +1404,11 @@ export class Engine {
             source: "PreToolUse hook",
             values: efforts,
             samples: hooks.length,
+            malformed_lines: malformedLines,
             note:
-              hooks.length === 0 ? "no tool use in this turn; effective effort unreported" : null,
+              hooks.length === 0 && malformedLines === 0
+                ? "no tool use in this turn; effective effort unreported"
+                : null,
           },
         });
         if (task.interrupted)

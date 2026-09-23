@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { REDACTED, redactValue } from "@mia/protocol";
 import { ConfigurationError, validateRuntimeConfig, type RuntimeConfig } from "./config.ts";
 
 const validRuntime = (): RuntimeConfig => ({
@@ -45,15 +46,29 @@ describe("validateRuntimeConfig", () => {
       overrides: { builtinTools: ["Bash"] },
       message: 'builtinTools includes "Bash"',
     },
-    ...["TOKEN", "client_secret", "Password", "API_KEY", "Authorization"].map((key) => ({
-      name: `credential ${key}`,
-      overrides: { env: { [key]: "credential" } },
-      message: `found key ${key}`,
-    })),
   ];
   it.each(invalidCases)("rejects $name", ({ overrides, message }) => {
     const validate = () => validateRuntimeConfig({ ...validRuntime(), ...overrides });
     expect(validate).toThrow(ConfigurationError);
     expect(validate).toThrow(message);
+  });
+
+  // Each spelling the redaction pattern covers; a weaker env check once let SESSION_COOKIE through.
+  const redactedKeys = [
+    "TOKEN",
+    "client_secret",
+    "Password",
+    "DB_PASSWD",
+    "API_KEY",
+    "Authorization",
+    "AWS_CREDENTIALS",
+    "SESSION_COOKIE",
+    "PRIVATE_KEY",
+    "BEARER_HEADER",
+  ];
+  it.each(redactedKeys)("rejects %s, which redaction treats as sensitive", (key) => {
+    expect(redactValue({ [key]: "value" })).toEqual({ [key]: REDACTED });
+    const validate = () => validateRuntimeConfig({ ...validRuntime(), env: { [key]: "value" } });
+    expect(validate).toThrow(`found key ${key}`);
   });
 });

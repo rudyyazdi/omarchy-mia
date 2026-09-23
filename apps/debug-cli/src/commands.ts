@@ -36,13 +36,12 @@ const printLines = (lines: string[]) => {
   for (const line of lines) out(line);
 };
 
-/** Open the catalog for one command, read-only unless the command writes, and always close it. */
-const withCatalog = (
-  options: GlobalOptions,
-  readonly: boolean,
-  run: (catalog: Catalog) => void,
-): void => {
-  const catalog = new Catalog(resolve(options.state ?? defaultStateDir()), { readonly });
+/**
+ * Open the catalog read-only for one command and always close it. No command writes to it, and a
+ * writable open would create and migrate an empty catalog at a mistyped `--state`.
+ */
+const withCatalog = (options: GlobalOptions, run: (catalog: Catalog) => void): void => {
+  const catalog = new Catalog(resolve(options.state ?? defaultStateDir()), { readonly: true });
   try {
     run(catalog);
   } finally {
@@ -59,14 +58,14 @@ const showSnapshot = (
     text: (snapshot: ConversationSnapshot) => void;
   },
 ): void =>
-  withCatalog(options, true, (catalog) => {
+  withCatalog(options, (catalog) => {
     const snapshot = snapshotConversation(catalog, conversationId);
     if (options.json) out(render.json(snapshot));
     else render.text(snapshot);
   });
 
 export const showConversations = (options: GlobalOptions): void =>
-  withCatalog(options, true, (catalog) => {
+  withCatalog(options, (catalog) => {
     const list = listConversations(catalog);
     if (options.json) out(list);
     else printLines(formatConversationList(list));
@@ -97,7 +96,7 @@ export const exportToDirectory = (
   options: GlobalOptions & { output: string },
   conversationId: string,
 ): void =>
-  withCatalog(options, false, (catalog) =>
+  withCatalog(options, (catalog) =>
     out(formatExport(exportConversation(catalog, conversationId, resolve(options.output)))),
   );
 
@@ -109,4 +108,4 @@ export const verifyExportDirectory = (exportDirectory: string): boolean => {
 };
 
 export const reconcile = (options: GlobalOptions): void =>
-  withCatalog(options, false, (catalog) => out(reconcileObjects(catalog)));
+  withCatalog(options, (catalog) => out(reconcileObjects(catalog)));

@@ -13,6 +13,9 @@ const SENSITIVE_VALUE: RegExp[] = [
 
 export const REDACTED = "[REDACTED]";
 
+/** Whether a key names a credential: its value is redacted in records and refused in the runtime env. */
+export const isSensitiveKey = (key: string): boolean => SENSITIVE_KEY.test(key);
+
 /** Extra literal strings to redact (e.g. the local client secret) registered at runtime. */
 const registeredSecrets = new Set<string>();
 
@@ -32,7 +35,7 @@ const isTokenCount = (key: string, value: unknown): boolean =>
   typeof value === "number" && /tokens$/i.test(key);
 
 const walk = (value: unknown, key: string | undefined): unknown => {
-  if (key !== undefined && SENSITIVE_KEY.test(key) && !isTokenCount(key, value)) return REDACTED;
+  if (key !== undefined && isSensitiveKey(key) && !isTokenCount(key, value)) return REDACTED;
   if (typeof value === "string") return redactString(value);
   if (Array.isArray(value)) return value.map((item) => walk(item, undefined));
   if (isRecord(value)) {

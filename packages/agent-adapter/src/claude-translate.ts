@@ -35,7 +35,7 @@ export class ClaudeTranslator {
     return match(message)
       .with({ type: "system" }, (systemMessage): RuntimeEvent[] => {
         if (systemMessage.subtype !== "init") return [];
-        // The union parsed InitMessageSchema first, so a system/init message that reached here satisfies it.
+        // OtherSystemMessageSchema refuses subtype init, so a system/init message that parsed satisfies InitMessageSchema.
         const parsedInit = InitMessageSchema.safeParse(systemMessage);
         return parsedInit.success
           ? [{ type: "runtime_init", init: initOf(parsedInit.data), at: now() }]

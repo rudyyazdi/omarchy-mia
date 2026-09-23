@@ -181,7 +181,7 @@ export class ProbeContext {
     step.turn = await handle.result;
     process.stdout.write("\n");
     step.ledger_after = await harness.state();
-    step.hook_evidence = readHookEvidence(step.turn.hookEvidencePath);
+    step.hook_evidence = readHookEvidence(step.turn.hookEvidencePath).records;
     this.records.push(step);
     this.save(`step-${spec.turnIndex}-${spec.name}`, step);
     return step;

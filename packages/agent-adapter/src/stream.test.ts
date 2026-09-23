@@ -39,16 +39,19 @@ describe("runtime stream framing", () => {
     });
   });
 
-  it.each(['{"type":"assistant"}', '{"type":"result","session_id":12}', "null", "{}"])(
-    "rejects malformed runtime messages: %s",
-    (raw) => {
-      expect(parseStreamLine(raw)).toEqual({
-        ok: false,
-        raw,
-        error: expect.stringContaining("malformed runtime message:"),
-      });
-    },
-  );
+  it.each([
+    '{"type":"assistant"}',
+    '{"type":"result","session_id":12}',
+    '{"type":"system","subtype":"init","session_id":"session","model":"m","mcp_servers":[]}',
+    "null",
+    "{}",
+  ])("rejects malformed runtime messages: %s", (raw) => {
+    expect(parseStreamLine(raw)).toEqual({
+      ok: false,
+      raw,
+      error: expect.stringContaining("malformed runtime message:"),
+    });
+  });
   it("distinguishes blank lines from invalid JSON", () => {
     expect(parseStreamLine(" \r\n")).toBeNull();
     expect(parseStreamLine(" { ")).toEqual({

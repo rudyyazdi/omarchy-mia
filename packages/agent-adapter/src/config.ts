@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ToolPolicySchema } from "@mia/protocol";
+import { isSensitiveKey, ToolPolicySchema } from "@mia/protocol";
 
 export { ToolPolicySchema, type ToolPolicy } from "@mia/protocol";
 
@@ -95,9 +95,8 @@ export const validateRuntimeConfig = (config: RuntimeConfig): void => {
       `builtinTools includes "${tool}", but D1 has no enforceable approval boundary for built-in tools; remove it or add a proven adapter boundary`,
     );
   }
-  const secretLike = /(token|secret|password|api[-_]?key|authorization)/i;
   for (const key of Object.keys(config.env)) {
-    if (secretLike.test(key))
+    if (isSensitiveKey(key))
       throw new ConfigurationError(`env must not carry credentials (found key ${key})`);
   }
 };
