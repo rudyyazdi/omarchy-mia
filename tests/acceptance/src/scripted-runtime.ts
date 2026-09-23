@@ -1,5 +1,5 @@
 import type {
-  AdapterEvent,
+  RuntimeEvent,
   PermissionDecision,
   PermissionRequest,
   RuntimeCancellation,
@@ -34,7 +34,7 @@ export class ScriptedTurn {
     mkdirSync(options.runtimeDir, { recursive: true });
   }
 
-  emit(event: AdapterEvent): void {
+  emit(event: RuntimeEvent): void {
     this.options.onEvent(event);
   }
 
@@ -46,13 +46,8 @@ export class ScriptedTurn {
     this.emit({
       type: "runtime_init",
       init: {
-        type: "system",
-        subtype: "init",
-        session_id: this.options.runtimeConversationId,
         model,
-        tools: [],
-        mcp_servers: [],
-        permissionMode: "default",
+        evidence: { scripted: "init", session: this.options.runtimeConversationId, model },
       },
       at: new Date().toISOString(),
     });
@@ -120,14 +115,13 @@ export class ScriptedTurn {
     if (this.interrupted) runtimeCancellation = this.survivesInterrupt ? "unknown" : "forced_kill";
     const result: TurnResult = {
       status: this.interrupted && !this.survivesInterrupt ? "killed" : status,
-      result:
+      summary:
         status === "completed" && !this.interrupted
           ? {
-              type: "result",
-              subtype: "success",
-              is_error: false,
-              session_id: this.options.runtimeConversationId,
+              isError: false,
+              outcome: "success",
               usage: { input_tokens: 1, output_tokens: 1 },
+              evidence: { scripted: "result", session: this.options.runtimeConversationId },
             }
           : null,
       exit,

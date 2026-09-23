@@ -1,5 +1,5 @@
 import type {
-  AdapterEvent,
+  RuntimeEvent,
   PermissionDecision,
   PermissionRequest,
   RuntimeConfig,
@@ -21,7 +21,7 @@ export interface StepRecord {
   session_id: string;
   first_turn: boolean;
   prompt: string;
-  events: AdapterEvent[];
+  events: RuntimeEvent[];
   permission_requests: {
     /** The runtime's raw permission payload, snake_case as it arrived. */
     request: unknown;
