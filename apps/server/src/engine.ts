@@ -568,11 +568,12 @@ export class Engine {
       )
       .with({ kind: "not_pending" }, () => {
         const known = this.deps.catalog.get<{ status: ApprovalStatus }>(
-          "SELECT status FROM approvals WHERE id = ?",
+          "SELECT a.status FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id WHERE a.id = ? AND t.task_id = ?",
           payload.approval_id,
+          task.id,
         );
-        // A row still pending here lost its in-memory hold without the records saying so (its abandonment
-        // could not be recorded): the call was refused and can no longer be released.
+        // A row still pending here is no longer held in memory, for example because its abandonment could not
+        // be recorded: Mia never released its call and no decision can now.
         if (known?.status === "pending")
           return fail(
             "invalid_state",
@@ -1359,24 +1360,25 @@ export class Engine {
       task: { status: task.status, otherPending: otherPending(task, approvalId) },
     });
     if (expire) {
+      const applyExpiry = (): void => {
+        call.status = expire.call.status;
+        task.status = expire.taskStatus;
+        task.pendingApprovals.delete(expire.approval.approvalId);
+        task.abandoned.push(call);
+      };
       try {
         this.tx(() => {
           this.recordApprovalChange(task, expire.approval);
           this.recordCallChange(expire.call);
-          this.commitCallChange(call, expire.call);
-          this.recordTaskStatus(task, expire.taskStatus);
-          this.onCommit(() => {
-            task.pendingApprovals.delete(expire.approval.approvalId);
-            task.abandoned.push(call);
-          });
+          this.deps.writer.updateTask(task.id, { status: expire.taskStatus });
+          this.onCommit(applyExpiry);
         });
       } catch (error) {
         this.deps.log(`could not record abandoned approval: ${String(error)}`);
-        // The runtime is denied below whatever the records say, so no later decision may release this call:
-        // it leaves the pending approvals (a decision finds it not pending) but stays held, so finishTurn
-        // records it invalidated and expires its approval. Until then the catalog still says pending.
-        task.pendingApprovals.delete(expire.approval.approvalId);
-        task.abandoned.push(call);
+        // The runtime is denied below whatever the records say, so memory takes the expiry anyway: a later
+        // decision finds nothing pending and cannot release the call. The catalog keeps the approval pending
+        // until finishTurn records the call's final status and expires every approval still pending.
+        applyExpiry();
       }
     }
     resolve(settle);
@@ -1403,11 +1405,14 @@ export class Engine {
             status: action.status,
             detail: action.detail,
           });
-        // Every call still awaiting approval, not only the pending ones: one whose abandonment failed to
-        // record left the pending approvals but still has a pending row.
-        for (const call of calls)
-          if (call.status === "awaiting_approval" && call.approvalId)
-            writer.updateApproval(call.approvalId, { status: "expired", reason: "task ended" });
+        // Every approval the records still hold pending, not only the ones in memory: an abandonment whose
+        // commit failed left memory without its approval and the catalog with a pending row.
+        const stillPending = this.deps.catalog.all<{ id: string }>(
+          "SELECT a.id FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id WHERE t.task_id = ? AND a.status = 'pending'",
+          task.id,
+        );
+        for (const approval of stillPending)
+          writer.updateApproval(approval.id, { status: "expired", reason: "task ended" });
         const retain = (artifact: {
           kind: ArtifactKind;
           name: string;
