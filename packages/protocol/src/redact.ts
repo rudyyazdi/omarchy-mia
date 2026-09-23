@@ -27,8 +27,12 @@ export const redactString = (text: string): string => {
   return out;
 };
 
+/** A number under a `…tokens` key is a count (`input_tokens`, `inputTokens`), not a credential. */
+const isTokenCount = (key: string, value: unknown): boolean =>
+  typeof value === "number" && /tokens$/i.test(key);
+
 const walk = (value: unknown, key: string | undefined): unknown => {
-  if (key !== undefined && SENSITIVE_KEY.test(key)) return REDACTED;
+  if (key !== undefined && SENSITIVE_KEY.test(key) && !isTokenCount(key, value)) return REDACTED;
   if (typeof value === "string") return redactString(value);
   if (Array.isArray(value)) return value.map((item) => walk(item, undefined));
   if (isRecord(value)) {
@@ -41,8 +45,8 @@ const walk = (value: unknown, key: string | undefined): unknown => {
 };
 
 /**
- * Recursively redact a JSON-like value. Keys that look sensitive are replaced whole;
- * strings are scanned for secret-shaped values. Returns a new value; input is not mutated. The shape is
+ * Recursively redact a JSON-like value. Keys that look sensitive are replaced whole, except a number
+ * under a `…tokens` key, which is a count; strings are scanned for secret-shaped values. Returns a new value; input is not mutated. The shape is
  * not preserved (a sensitive key replaces its whole subtree), so the result is unknown.
  */
 export const redactValue = (value: unknown): unknown => walk(value, undefined);

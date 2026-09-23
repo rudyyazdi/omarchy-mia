@@ -131,7 +131,7 @@ describe("records, report and export", () => {
         .flatMap((execution) => (execution.usage ? [execution.usage] : []))
         .map((usage): unknown => JSON.parse(usage)),
     ).toContainEqual({
-      usage: expect.any(Object),
+      usage: { input_tokens: 1, output_tokens: 1 },
       total_cost_usd: 0,
       duration_ms: 5,
       num_turns: 1,
