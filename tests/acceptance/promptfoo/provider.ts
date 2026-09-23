@@ -48,6 +48,7 @@ export default class MiaScenarioProvider {
         error: `harness environment missing (${urlVar}, ${secretVar}, MIA_FIXTURE_HARNESS_URL)`,
       };
     const budget = LiveCallBudget.fromEnv(
+      process.env,
       resolve(process.env.MIA_REPO_ROOT ?? ".", ".mia-state/live-calls.jsonl"),
     );
     const clientId = `pf_${scenarioName}_${Date.now().toString(36)}`;

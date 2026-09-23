@@ -44,13 +44,13 @@ export class ProbeContext {
     },
   ) {}
 
-  static async start(options: ProbeOptions): Promise<ProbeContext> {
+  static async start(options: ProbeOptions, env: NodeJS.ProcessEnv): Promise<ProbeContext> {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const out = resolve(options.out, stamp);
     mkdirSync(out, { recursive: true, mode: 0o700 });
     const examples = resolve(options.examples);
     mkdirSync(examples, { recursive: true });
-    const budget = LiveCallBudget.fromEnv(resolve(".mia-state/live-calls.jsonl"));
+    const budget = LiveCallBudget.fromEnv(env, resolve(".mia-state/live-calls.jsonl"));
     const fixtureDir = join(out, "fixture");
     const fixture = await startFixture({ dir: fixtureDir });
     const harness = new FixtureHarness(fixture.harnessUrl);

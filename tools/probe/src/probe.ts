@@ -55,10 +55,11 @@ const freezeExamples = (context: ProbeContext, staticReport: StaticCapabilities)
 /**
  * D1 capability probe: proves, against the real installed runtime, the behaviours the adapter relies on.
  * Every live turn is counted against the shared live-call budget. Evidence lands in an out directory;
- * redacted protocol examples are frozen under the examples directory.
+ * redacted protocol examples are frozen under the examples directory. `env` supplies the live-call
+ * budget's overrides.
  */
-export const runProbe = async (options: ProbeOptions): Promise<never> => {
-  const context = await ProbeContext.start(options);
+export const runProbe = async (options: ProbeOptions, env: NodeJS.ProcessEnv): Promise<never> => {
+  const context = await ProbeContext.start(options, env);
   const staticReport = probeStaticCapabilities(context.baseConfig());
   context.save("static-capabilities", staticReport);
   log("static:", JSON.stringify(staticReport, null, 1));

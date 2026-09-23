@@ -22,10 +22,11 @@ export class LiveCallBudget {
       throw new Error(`live call cap must be a non-negative integer (got ${cap})`);
   }
 
-  static fromEnv(defaultFile: string): LiveCallBudget {
+  /** The caller passes its environment in, so this module reads no global state. */
+  static fromEnv(env: NodeJS.ProcessEnv, defaultFile: string): LiveCallBudget {
     return new LiveCallBudget(
-      process.env.MIA_LIVE_BUDGET_FILE ?? defaultFile,
-      parseCallCap(process.env.MIA_LIVE_CALL_CAP ?? "50"),
+      env.MIA_LIVE_BUDGET_FILE ?? defaultFile,
+      parseCallCap(env.MIA_LIVE_CALL_CAP ?? "50"),
     );
   }
 
