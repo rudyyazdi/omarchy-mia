@@ -80,6 +80,59 @@ const run = async (
   return { result, events, requests };
 };
 
+/** Stream-json lines a runtime writes: its init, one text delta, and its result. */
+const INIT_LINE = {
+  type: "system",
+  subtype: "init",
+  session_id: "inline",
+  model: "scripted-model",
+  tools: [],
+  mcp_servers: [],
+};
+const textLine = (text: string) => ({
+  type: "stream_event",
+  event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+  session_id: "inline",
+});
+const RESULT_LINE = {
+  type: "result",
+  subtype: "success",
+  is_error: false,
+  duration_ms: 1,
+  num_turns: 1,
+  result: "done",
+  session_id: "inline",
+  total_cost_usd: 0,
+  usage: { input_tokens: 1, output_tokens: 1 },
+};
+
+/** An adapter whose runtime is a node script running `body`. */
+const inlineRuntime = (name: string, body: string): ClaudeCodeAdapter => {
+  const runtime = join(dir, `${name}.mjs`);
+  writeFileSync(runtime, `#!/usr/bin/env node\n${body}\n`, { mode: 0o755 });
+  return new ClaudeCodeAdapter(
+    testProfile(dir, { executable: runtime }).runtime,
+    bridge,
+    FAKE_RUNTIME_ENV,
+  );
+};
+
+/** The text a runtime writes for `lines`, one JSON object per line. */
+const streamOf = (lines: unknown[]): string =>
+  lines.map((line) => `${JSON.stringify(line)}\n`).join("");
+
+/** Handlers that hold the runtime_init event until `release`; `started` resolves once it is being handled. */
+const holdInit = () => {
+  const started = Promise.withResolvers<undefined>();
+  const released = Promise.withResolvers<undefined>();
+  const onEvent = async (event: RuntimeEvent): Promise<void> => {
+    if (event.type !== "runtime_init") return;
+    started.resolve(undefined);
+    await released.promise;
+  };
+  return { started: started.promise, release: () => released.resolve(undefined), onEvent };
+};
+
 describe("real adapter against a fake runtime process", () => {
   it("parses the stream, routes permission through the bridge with tool_use_id, and records results", async () => {
     await harness.reset();
@@ -172,73 +225,57 @@ describe("real adapter against a fake runtime process", () => {
 
   it("hands over no later stdout event while one is still being handled", async () => {
     // One write of every line, so the adapter reads them in a single chunk and only its waiting orders them.
-    const runtime = join(dir, "burst-runtime.mjs");
-    const lines = [
-      {
-        type: "system",
-        subtype: "init",
-        session_id: "burst",
-        model: "scripted-model",
-        tools: [],
-        mcp_servers: [],
-      },
-      {
-        type: "stream_event",
-        event: {
-          type: "content_block_delta",
-          index: 0,
-          delta: { type: "text_delta", text: "one" },
-        },
-        session_id: "burst",
-      },
-      {
-        type: "result",
-        subtype: "success",
-        is_error: false,
-        duration_ms: 1,
-        num_turns: 1,
-        result: "done",
-        session_id: "burst",
-        total_cost_usd: 0,
-        usage: { input_tokens: 1, output_tokens: 1 },
-      },
-    ];
-    const output = lines.map((line) => `${JSON.stringify(line)}\n`).join("");
-    writeFileSync(
-      runtime,
-      `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(output)});\n`,
-      {
-        mode: 0o755,
-      },
+    const output = streamOf([INIT_LINE, textLine("one"), RESULT_LINE]);
+    const adapterUnderTest = inlineRuntime(
+      "burst-runtime",
+      `process.stdout.write(${JSON.stringify(output)});`,
     );
-    const initStarted = Promise.withResolvers<undefined>();
-    const initRelease = Promise.withResolvers<undefined>();
+    const init = holdInit();
     let released = false;
     const heldBack: string[] = [];
     const handedOver: string[] = [];
-    const burst = new ClaudeCodeAdapter(
-      testProfile(dir, { executable: runtime }).runtime,
-      bridge,
-      FAKE_RUNTIME_ENV,
-    );
-    const handle = burst.submitTurn(
+    const handle = adapterUnderTest.submitTurn(
       turnOptions("", {
         permissionHandler: async () => ({ behavior: "deny", message: "unused" }),
         onEvent: async (event) => {
           (released ? handedOver : heldBack).push(event.type);
-          if (event.type !== "runtime_init") return;
-          initStarted.resolve(undefined);
-          await initRelease.promise;
+          await init.onEvent(event);
         },
       }),
     );
     // A turn that ends without an init fails the assertions below instead of waiting forever.
-    await Promise.race([initStarted.promise, handle.result]);
+    await Promise.race([init.started, handle.result]);
     released = true;
-    initRelease.resolve(undefined);
+    init.release();
     expect((await handle.result).status).toBe("completed");
     expect(heldBack).toEqual(["runtime_started", "runtime_init"]);
     expect(handedOver).toEqual(["text_delta", "turn_result", "runtime_exit"]);
+  });
+
+  it("sees an interrupted runtime die while an event is still being handled", async () => {
+    // More output than the pipe and the stream buffers hold, so stdout cannot reach its end while init is held.
+    const output = streamOf([
+      INIT_LINE,
+      ...Array.from({ length: 300 }, () => textLine("x".repeat(1000))),
+    ]);
+    const adapterUnderTest = inlineRuntime(
+      "noisy-runtime",
+      `process.stdout.write(${JSON.stringify(output)});\nsetInterval(() => undefined, 60_000);`,
+    );
+    const init = holdInit();
+    const handle = adapterUnderTest.submitTurn(
+      turnOptions("", {
+        permissionHandler: async () => ({ behavior: "deny", message: "unused" }),
+        onEvent: init.onEvent,
+      }),
+    );
+    await Promise.race([init.started, handle.result]);
+    expect(await handle.interrupt()).toBe("forced_kill");
+    init.release();
+    expect(await handle.result).toMatchObject({
+      status: "killed",
+      runtimeCancellation: "forced_kill",
+    });
   });
 
   it("reports an event handler that rejects and still ends the turn, as failed", async () => {

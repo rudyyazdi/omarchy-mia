@@ -25,6 +25,7 @@ import {
   testProfile,
   tick,
   useScriptedSession,
+  type HeldRead,
   type TestServer,
 } from "./harness.ts";
 
@@ -137,14 +138,18 @@ const writeOutputFile = (name: string, text: string): string => {
 };
 
 /** Submit one artifact call and approve it, with `result.txt` written where its output may be retained from. */
-const approvedArtifactCall = async (): Promise<{ file: string; turn: ScriptedTurn }> => {
+const approvedArtifactCall = async (): Promise<{
+  file: string;
+  turn: ScriptedTurn;
+  taskId: string;
+}> => {
   const file = writeOutputFile("result.txt", "D1");
   const { turn, taskId, held, requested } = await submitHeldCall("artifact", "mcp__d1__artifact", {
     name: "result.txt",
   });
   await decide(taskId, requested.payload.approval_id, "approve");
   await held;
-  return { file, turn };
+  return { file, turn, taskId };
 };
 
 /** Hand over the approved call's result, declaring `file` as its output. */
@@ -1353,29 +1358,48 @@ describe("configuration and provenance", () => {
 
   /** Approve one artifact call, then hand over its result declaring `result.txt` while the capture is held. */
   const resultWithHeldCapture = async () => {
-    const { file, turn } = await approvedArtifactCall();
+    const { file, turn, taskId } = await approvedArtifactCall();
     const capture = ts.holdArtifactCapture(file);
     const handled = declareOutput(turn, file);
     await capture.started;
-    return { turn, capture, handled };
+    return { file, turn, taskId, capture, handled };
   };
 
-  it("answers commands while a declared tool output is captured, then records the result with it", async () => {
-    const { turn, capture, handled } = await resultWithHeldCapture();
-    expect((await client.heartbeat()).disposition).toBe("accepted");
-    expect(rows("SELECT 1 FROM events WHERE type = 'tool_result'")).toHaveLength(0);
+  /** Release the held capture; the call then completes with its output retained. */
+  const releaseIntoRetainedOutput = async (capture: HeldRead, handled: Promise<void>) => {
     capture.release();
     await handled;
     expect(rows("SELECT status FROM tool_calls")).toEqual([{ status: "completed" }]);
     expect(rows("SELECT capture_status FROM artifacts WHERE kind = 'tool_output'")).toEqual([
       { capture_status: "retained" },
     ]);
+  };
+
+  it("answers commands while a declared tool output is captured, then records the result with it", async () => {
+    const { turn, capture, handled } = await resultWithHeldCapture();
+    expect((await client.heartbeat()).disposition).toBe("accepted");
+    expect(rows("SELECT 1 FROM events WHERE type = 'tool_result'")).toHaveLength(0);
+    await releaseIntoRetainedOutput(capture, handled);
     turn.end();
     expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
   });
 
-  it("does not record a tool result whose output capture finishes after the runtime ended", async () => {
-    const { turn, capture, handled } = await resultWithHeldCapture();
+  it("records a result whose output is captured while its task is interrupted as completed", async () => {
+    const { turn, taskId, capture, handled } = await resultWithHeldCapture();
+    turn.survivesInterrupt = true;
+    expect((await client.interrupt(taskId)).disposition).toBe("accepted");
+    await releaseIntoRetainedOutput(capture, handled);
+    turn.end();
+    await client.waitFor("task_finished");
+    expect(rows("SELECT status FROM tool_calls")).toEqual([{ status: "completed" }]);
+  });
+
+  // The adapter ends a turn before its pending event settles only when it stops reading a runtime whose
+  // interruption did not end it: here the runtime survives the interrupt, and ending the turn stands for that.
+  it("does not record a tool result whose output capture finishes after a stuck runtime was abandoned", async () => {
+    const { file, turn, taskId, capture, handled } = await resultWithHeldCapture();
+    turn.survivesInterrupt = true;
+    expect((await client.interrupt(taskId)).disposition).toBe("accepted");
     turn.end();
     await client.waitFor("task_finished");
     const recorded = countRows("events");
@@ -1384,7 +1408,9 @@ describe("configuration and provenance", () => {
     expect(countRows("events")).toBe(recorded);
     expect(rows("SELECT 1 FROM events WHERE type = 'tool_result'")).toHaveLength(0);
     expect(rows("SELECT 1 FROM artifacts WHERE kind = 'tool_output'")).toHaveLength(0);
-    expect(ts.logs).toContainEqual(expect.stringContaining("arrived after its runtime ended"));
+    expect(ts.logs).toContainEqual(
+      expect.stringContaining(`tool_result (output ${file} captured) for task ${taskId}`),
+    );
   });
 
   it("records a non-retained capture with its reason, linked only to its tool call", async () => {

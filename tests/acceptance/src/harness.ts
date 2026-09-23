@@ -63,6 +63,15 @@ const holdOn = (holdsByPath: Map<string, PendingHold>, path: string): HeldRead =
   return { started: started.promise, release: () => released.resolve(undefined) };
 };
 
+/** Consumes the hold on `path`, if any, signalling at once that it was reached; resolves once it is released. */
+const reachHold = (holdsByPath: Map<string, PendingHold>, path: string): Promise<void> => {
+  const hold = holdsByPath.get(path);
+  if (!hold) return Promise.resolve();
+  holdsByPath.delete(path);
+  hold.started();
+  return hold.released;
+};
+
 /** A test's own timeout bounds its waits; connecting gets a shorter deadline so a dead server fails fast. */
 const CONNECT_TIMEOUT_MS = 10_000;
 /** How long closing waits for a turn the test left running; a scripted turn that survives interruption never ends. */
@@ -155,26 +164,17 @@ export const startTestServer = async (
   const holds = new Map<string, PendingHold>();
   // Reads for real once released, or with the aborted signal, so an abandoned read is reported as in production.
   const readEvidence: RuntimeFileReader = async (path, options = {}) => {
-    const hold = holds.get(path);
-    if (hold) {
-      holds.delete(path);
-      hold.started();
-      await untilAborted(
-        () => hold.released,
-        options.signal,
-        () => undefined,
-      );
-    }
+    const released = reachHold(holds, path);
+    await untilAborted(
+      () => released,
+      options.signal,
+      () => undefined,
+    );
     return readRuntimeFile(path, options);
   };
   const captureHolds = new Map<string, PendingHold>();
   const captureArtifact: ArtifactCollector = async (declared, outputDirectories) => {
-    const hold = captureHolds.get(declared.path);
-    if (hold) {
-      captureHolds.delete(declared.path);
-      hold.started();
-      await hold.released;
-    }
+    await reachHold(captureHolds, declared.path);
     return collectArtifact(declared, outputDirectories);
   };
   const server = await startServer({

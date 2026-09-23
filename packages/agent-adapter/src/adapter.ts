@@ -236,7 +236,10 @@ export class ClaudeCodeAdapter {
     const { options, launch, streamLogPath } = input;
     const now = () => new Date().toISOString();
     const emit = options.onEvent;
-    /** Hands over an event that nothing waits on; `onEvent` never rejects, so there is no failure to handle. */
+    /**
+     * Hands over an event that nothing waits on. `onEvent` must not reject, so nothing is left to handle; a handler
+     * that breaks that contract loses only this event, where on the stdout path its rejection stops the runtime.
+     */
     const report = (event: RuntimeEvent): void => {
       emit(event).catch(() => undefined);
     };
@@ -355,8 +358,12 @@ export class ClaudeCodeAdapter {
       report({ type: "runtime_stderr", text: redactString(chunk), at: now() }),
     );
 
-    /** Settles once the process is gone; interrupt() judges the kill by it. */
+    /**
+     * Settles once the process is gone; interrupt() judges the kill by it. On `exit`, not `close`: `close` also
+     * waits for stdout to end, which a slow event handler can hold back after the process has died.
+     */
     const processGone = Promise.withResolvers<undefined>();
+    child.once("exit", () => processGone.resolve(undefined));
     /** Settles when the turn may end: the process is gone and, unless it failed to spawn, stdout is drained. */
     const exitSettled = Promise.withResolvers<RuntimeExit>();
     // The turn ends only once every stdout line has been handled and retained, so a turn-end read sees them all.

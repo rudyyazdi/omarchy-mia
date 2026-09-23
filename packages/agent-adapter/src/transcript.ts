@@ -71,7 +71,8 @@ const transcriptSink = (file: string, reportFailure: (error: unknown) => void): 
  * settled. The tradeoff is ordering: a line's events are handled before its text is written, so a crash mid-turn
  * can leave the records with events whose transcript lines (up to the streams' buffers) were never written.
  *
- * Rejects if stdout fails, `handleLine` rejects, or `signal` aborts, and then stops reading; a transcript failure
+ * Rejects if stdout fails, `handleLine` rejects, or `signal` aborts, and then stops reading and hands over no further
+ * line, not even one already read; a transcript failure
  * is reported instead. When `handleLine` rejects, the text of the lines before it in the same chunk is dropped.
  */
 export const retainStdout = async (input: {
@@ -89,6 +90,8 @@ export const retainStdout = async (input: {
   const retain = async (lines: string[]): Promise<string | undefined> => {
     let text = "";
     for (const line of lines) {
+      // Lines already read but not yet handed over are dropped once reading stops, so none arrives after it.
+      input.signal?.throwIfAborted();
       const retained = await handleLine(line);
       if (retained !== null) text += `${retained}\n`;
     }

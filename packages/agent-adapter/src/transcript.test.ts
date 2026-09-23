@@ -146,7 +146,7 @@ describe("retainStdout", () => {
     expect(handled).toEqual(["one"]);
   });
 
-  it("stops reading once its signal aborts", async () => {
+  it("stops reading, and hands over no line it already read, once its signal aborts", async () => {
     const controller = new AbortController();
     const stdout = new PassThrough();
     const handled: string[] = [];
@@ -161,7 +161,7 @@ describe("retainStdout", () => {
       reportFailure: () => undefined,
       signal: controller.signal,
     });
-    stdout.write("one\n");
+    stdout.write("one\ntwo\nthree\n");
     await expect(read).rejects.toMatchObject({ name: "AbortError" });
     expect(handled).toEqual(["one"]);
     expect(stdout.destroyed).toBe(true);

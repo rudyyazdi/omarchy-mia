@@ -1028,8 +1028,9 @@ export class Engine {
    * outside the transaction, because the read can take long; every other event is recorded before this returns.
    * A failed result never completes its call, so the file it declares is not read.
    * The adapter hands over the next stdout event only once this settles, so events still commit in the order the
-   * runtime wrote them. A capture that finishes after the runtime has ended, which only a stuck runtime abandoned
-   * by an interruption allows, is dropped: the turn has already been recorded without it.
+   * runtime wrote them. The turn ends before the capture only when the adapter stops reading a runtime whose
+   * interruption did not end it; the result is then dropped with a log line, because the turn has already been
+   * recorded without it.
    */
   private async onRuntimeEvent(task: TaskState, event: RuntimeEvent): Promise<void> {
     const declared =
@@ -1046,21 +1047,26 @@ export class Engine {
         status: "failed",
         reason: `declared file unreadable: ${errorMessage(error)}`,
       }));
-    if (task.runtimeEnded) {
-      this.deps.log(
-        `tool result for task ${task.id} arrived after its runtime ended; not recorded`,
-      );
-      return;
-    }
     this.recordRuntimeEvent(task, event, { declared, capture });
   }
 
-  /** Records one runtime event, with the tool output its result declared already captured. */
+  /**
+   * Records one runtime event, with the tool output its result declared already captured. An event handled after
+   * the task's runtime ended is dropped: the runtime hands over its exit before the turn ends, so only an event
+   * left pending when a stuck runtime was abandoned gets here, and the turn was recorded without it.
+   */
   private recordRuntimeEvent(
     task: TaskState,
     event: RuntimeEvent,
     output: CapturedOutput | null,
   ): void {
+    if (task.runtimeEnded || this.task !== task) {
+      const captured = output ? ` (output ${output.declared.path} captured)` : "";
+      this.deps.log(
+        `${event.type}${captured} for task ${task.id} handled after its runtime ended; not recorded`,
+      );
+      return;
+    }
     const conversation = this.conversation;
     if (!conversation) return;
     const opts = this.taskOpts(task);
