@@ -139,7 +139,14 @@ export const startMcpHttpServer = async (
           refused: true,
           limit_bytes: error.limitBytes,
         });
-        sendJsonRpcRefusal(res, { status: 413, message: "Request body too large." });
+        // readBody stopped reading mid-body, so the rest of it is still on the socket and the
+        // connection cannot carry another request: close it rather than leave a kept-alive
+        // client waiting on a socket nothing reads until the keep-alive timeout resets it.
+        sendJsonRpcRefusal(res, {
+          status: 413,
+          message: "Request body too large.",
+          headers: { connection: "close" },
+        });
         return;
       }
     }

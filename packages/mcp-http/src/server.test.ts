@@ -163,10 +163,15 @@ describe("MCP HTTP server", () => {
     expect(contexts).toHaveLength(1);
 
     const oversized = post(server.url, initializeRequestOfSize(bodyLimitBytes + 1)).then(
-      async (response) => ({ status: response.status, body: await response.text() }),
+      async (response) => ({
+        status: response.status,
+        connection: response.headers.get("connection"),
+        body: await response.text(),
+      }),
     );
     await expect(oversized).resolves.toEqual({
       status: 413,
+      connection: "close",
       body: JSON.stringify({
         jsonrpc: "2.0",
         error: { code: -32000, message: "Request body too large." },
@@ -196,7 +201,12 @@ describe("MCP HTTP server", () => {
       .split("\n")
       .map((line) => JSON.parse(line));
     expect(entries).toContainEqual(
-      expect.objectContaining({ ev: "request", http: "POST", refused: true }),
+      expect.objectContaining({
+        ev: "request",
+        http: "POST",
+        refused: true,
+        limit_bytes: bodyLimitBytes,
+      }),
     );
     expect(entries).not.toContainEqual(expect.objectContaining({ ev: "handler_error" }));
   });
