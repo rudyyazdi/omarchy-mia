@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-/** `Number()` would turn a typo into NaN, and `used >= NaN` never stops a call, so only digits pass. */
+/** Only digits pass: `Number()` would read "" as 0 and "1e3" as 1000. */
 const parseCallCap = (text: string): number => {
   if (!/^\d+$/.test(text))
     throw new Error(`MIA_LIVE_CALL_CAP must be a non-negative integer (got "${text}")`);
@@ -16,7 +16,11 @@ export class LiveCallBudget {
   constructor(
     readonly file: string,
     readonly cap: number,
-  ) {}
+  ) {
+    // NaN or Infinity would make `used >= cap` never stop a call.
+    if (!Number.isSafeInteger(cap) || cap < 0)
+      throw new Error(`live call cap must be a non-negative integer (got ${cap})`);
+  }
 
   static fromEnv(defaultFile: string): LiveCallBudget {
     return new LiveCallBudget(

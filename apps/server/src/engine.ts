@@ -176,6 +176,14 @@ const effortLevelOf = (hook: Record<string, unknown>): unknown => {
   return effort ?? hook.env_claude_effort;
 };
 
+/** Why the effort evidence holds no effort level, or null when the hook reported samples. */
+const effortNote = (samples: number, malformedLines: number): string | null => {
+  if (samples > 0) return null;
+  if (malformedLines > 0)
+    return `hook evidence unreadable (${malformedLines} malformed lines); effective effort unreported`;
+  return "no tool use in this turn; effective effort unreported";
+};
+
 /** Distinct effective-effort values reported by the PreToolUse hook. */
 const effortLevels = (hooks: Record<string, unknown>[]): string[] => {
   const levels = hooks.map(effortLevelOf);
@@ -1405,10 +1413,7 @@ export class Engine {
             values: efforts,
             samples: hooks.length,
             malformed_lines: malformedLines,
-            note:
-              hooks.length === 0 && malformedLines === 0
-                ? "no tool use in this turn; effective effort unreported"
-                : null,
+            note: effortNote(hooks.length, malformedLines),
           },
         });
         if (task.interrupted)

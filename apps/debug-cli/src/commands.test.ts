@@ -1,15 +1,16 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Catalog, RecordWriter } from "@mia/records";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { exportToDirectory, reconcile } from "./commands.ts";
 
 let root: string;
+let log: MockInstance<typeof console.log>;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "mia-debug-cli-"));
-  // The commands print their results; the tests read the filesystem instead.
-  vi.spyOn(console, "log").mockImplementation(() => undefined);
+  // Printing is how these commands report; the spy keeps it off the test output and lets tests read it.
+  log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -38,8 +39,14 @@ describe("debug commands open the catalog read-only", () => {
       return writer.createConversation({ provenanceSetId, runtimeConversationId: "runtime" }).id;
     });
     catalog.close();
+    // A writable open resets the database to 0600 and runs the migration; a read-only one does neither.
+    chmodSync(catalog.paths.database, 0o400);
     exportToDirectory(options(state), conversationId);
     expect(existsSync(join(root, "export", "manifest.json"))).toBe(true);
-    expect(() => reconcile(options(state))).not.toThrow();
+    reconcile(options(state));
+    expect(log).toHaveBeenLastCalledWith(
+      JSON.stringify({ orphans: [], missing: [], corrupt: [] }, null, 2),
+    );
+    expect(statSync(catalog.paths.database).mode & 0o777).toBe(0o400);
   });
 });

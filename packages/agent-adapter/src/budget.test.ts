@@ -41,13 +41,18 @@ describe("live call budget", () => {
     expect(LiveCallBudget.fromEnv("fallback")).toMatchObject({ file: "override", cap: 3 });
   });
 
-  it.each(["abc", "", "-1", "2.5", "1e3", " 3"])(
+  it.each(["abc", "", "-1", "2.5", "1e3", " 3", "99999999999999999999"])(
     "refuses a call cap that is not a non-negative integer: %j",
     (cap) => {
       vi.stubEnv("MIA_LIVE_CALL_CAP", cap);
-      expect(() => LiveCallBudget.fromEnv("fallback")).toThrow(
-        "MIA_LIVE_CALL_CAP must be a non-negative integer",
-      );
+      expect(() => LiveCallBudget.fromEnv("fallback")).toThrow("must be a non-negative integer");
+    },
+  );
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5])(
+    "refuses a constructed cap of %d",
+    (cap) => {
+      expect(() => new LiveCallBudget("file", cap)).toThrow("must be a non-negative integer");
     },
   );
 });

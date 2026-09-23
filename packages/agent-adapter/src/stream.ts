@@ -28,7 +28,9 @@ export const InitMessageSchema = base.extend({
  */
 export const OtherSystemMessageSchema = base.extend({
   type: z.literal("system"),
-  subtype: z.string().refine((subtype) => subtype !== "init"),
+  subtype: z.string().refine((subtype) => subtype !== "init", {
+    message: "an init message must satisfy InitMessageSchema",
+  }),
 });
 
 const contentBlock = z

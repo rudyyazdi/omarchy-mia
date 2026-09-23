@@ -149,6 +149,7 @@ export class ProbeContext {
       turn: null,
       ledger_after: null,
       hook_evidence: null,
+      hook_evidence_malformed_lines: null,
       notes: [],
       checks: {},
     };
@@ -181,7 +182,9 @@ export class ProbeContext {
     step.turn = await handle.result;
     process.stdout.write("\n");
     step.ledger_after = await harness.state();
-    step.hook_evidence = readHookEvidence(step.turn.hookEvidencePath).records;
+    const hooks = readHookEvidence(step.turn.hookEvidencePath);
+    step.hook_evidence = hooks.records;
+    step.hook_evidence_malformed_lines = hooks.malformedLines;
     this.records.push(step);
     this.save(`step-${spec.turnIndex}-${spec.name}`, step);
     return step;
