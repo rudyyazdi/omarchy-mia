@@ -42,6 +42,27 @@ const endWithError = (res: ServerResponse, error: unknown): void => {
   res.end(JSON.stringify({ error: errorMessage(error) }));
 };
 
+/** A JSON-RPC error body for a request refused before it reached the MCP transport. */
+const sendJsonRpcRefusal = (
+  res: ServerResponse,
+  refusal: { status: number; message: string; headers?: Record<string, string> },
+): void => {
+  res.writeHead(refusal.status, { ...refusal.headers, "content-type": "application/json" });
+  res.end(
+    JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: refusal.message }, id: null }),
+  );
+};
+
+/** The client sent more than the body limit: its mistake, answered with 413 rather than a 500. */
+class BodyTooLargeError extends Error {
+  override readonly name = "BodyTooLargeError";
+  constructor(readonly limitBytes: number) {
+    super("request body too large");
+  }
+}
+
+const MAX_MCP_BODY_BYTES = 4 * 1024 * 1024;
+
 const readBody = async (req: IncomingMessage, limitBytes: number): Promise<string> => {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -49,7 +70,7 @@ const readBody = async (req: IncomingMessage, limitBytes: number): Promise<strin
   for await (const chunk of stream) {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
     size += buf.length;
-    if (size > limitBytes) throw new Error("request body too large");
+    if (size > limitBytes) throw new BodyTooLargeError(limitBytes);
     chunks.push(buf);
   }
   return Buffer.concat(chunks).toString("utf8");
@@ -98,17 +119,30 @@ export const startMcpHttpServer = async (
       // idle standalone stream after ~2.5s and then treats the session as expired, re-sending any in-flight
       // tool call; refusing the stream removes that duplicate-execution trigger for Mia-owned servers.
       log({ ev: "request", req: reqNo, http: "GET", refused: true });
-      res.writeHead(405, { allow: "POST, DELETE", "content-type": "application/json" });
-      res.end(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: { code: -32000, message: "Method not allowed." },
-          id: null,
-        }),
-      );
+      sendJsonRpcRefusal(res, {
+        status: 405,
+        message: "Method not allowed.",
+        headers: { allow: "POST, DELETE" },
+      });
       return;
     }
-    const bodyText = req.method === "POST" ? await readBody(req, 4 * 1024 * 1024) : "";
+    let bodyText = "";
+    if (req.method === "POST") {
+      try {
+        bodyText = await readBody(req, MAX_MCP_BODY_BYTES);
+      } catch (error) {
+        if (!(error instanceof BodyTooLargeError)) throw error;
+        log({
+          ev: "request",
+          req: reqNo,
+          http: "POST",
+          refused: true,
+          limit_bytes: error.limitBytes,
+        });
+        sendJsonRpcRefusal(res, { status: 413, message: "Request body too large." });
+        return;
+      }
+    }
     let parsedBody: unknown = undefined;
     if (bodyText.length > 0) {
       try {

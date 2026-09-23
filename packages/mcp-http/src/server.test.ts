@@ -1,5 +1,5 @@
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -44,6 +44,12 @@ const initializeRequest = (clientName = "mcp-http-test") => ({
 });
 
 const initialize = (url: string) => post(url, initializeRequest());
+
+const bodyLimitBytes = 4 * 1024 * 1024;
+
+/** A valid initialize request whose JSON is exactly `bytes` long, so only its size can refuse it. */
+const initializeRequestOfSize = (bytes: number) =>
+  initializeRequest("x".repeat(bytes - JSON.stringify(initializeRequest("")).length));
 
 const holdRequest = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "hold" } };
 
@@ -150,29 +156,49 @@ describe("MCP HTTP server", () => {
 
   it("refuses a POST body over 4 MiB and keeps serving", async () => {
     const { handle: server, contexts } = await startHoldingServer();
-    const limit = 4 * 1024 * 1024;
-    // Valid initialize requests padded to exactly the limit and one byte past it, so only the
-    // size limit decides between a 200 and a refusal.
-    const padding = limit - JSON.stringify(initializeRequest("")).length;
 
-    const atLimit = await post(server.url, initializeRequest("x".repeat(padding)));
+    const atLimit = await post(server.url, initializeRequestOfSize(bodyLimitBytes));
     expect(atLimit.status).toBe(200);
     await atLimit.body?.cancel();
     expect(contexts).toHaveLength(1);
 
-    const oversized = post(server.url, initializeRequest("x".repeat(padding + 1))).then(
+    const oversized = post(server.url, initializeRequestOfSize(bodyLimitBytes + 1)).then(
       async (response) => ({ status: response.status, body: await response.text() }),
     );
-    // 500 is today's answer, not a considered one: #89.
     await expect(oversized).resolves.toEqual({
-      status: 500,
-      body: JSON.stringify({ error: "request body too large" }),
+      status: 413,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Request body too large." },
+        id: null,
+      }),
     });
     expect(contexts).toHaveLength(1);
 
     const recovered = await initialize(server.url);
     expect(recovered.status).toBe(200);
     await recovered.body?.cancel();
+  });
+
+  it("logs an oversized body as a refused request, not a handler error", async () => {
+    const logFile = join(dir, "requests.jsonl");
+    handle = await startMcpHttpServer({
+      logFile,
+      createServer: () => new McpServer({ name: "mcp-http-test", version: "0" }),
+    });
+
+    const oversized = await post(handle.url, initializeRequestOfSize(bodyLimitBytes + 1));
+    expect(oversized.status).toBe(413);
+    await oversized.body?.cancel();
+
+    const entries: unknown[] = (await readFile(logFile, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(entries).toContainEqual(
+      expect.objectContaining({ ev: "request", http: "POST", refused: true }),
+    );
+    expect(entries).not.toContainEqual(expect.objectContaining({ ev: "handler_error" }));
   });
 
   it("aborts connectionClosed when the client disconnects before the response", async () => {
