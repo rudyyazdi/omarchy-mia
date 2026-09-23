@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, appendFileSync, constants } from "node:fs";
+import { existsSync, constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { join } from "node:path";
 import { match } from "ts-pattern";
@@ -13,7 +13,8 @@ import { prepareLaunch, runtimeEnvironment, type LaunchPlan } from "./launch.ts"
 import { resolveExecutable } from "./resolve-executable.ts";
 import { ClaudeTranslator } from "./claude-translate.ts";
 import type { RuntimeEvent, RuntimeInit, TurnSummary } from "./runtime-events.ts";
-import { LineSplitter, parseStreamLine, redactLine } from "./stream.ts";
+import { parseStreamLine, redactLine } from "./stream.ts";
+import { retainStdout } from "./transcript.ts";
 
 export interface TurnOptions {
   text: string;
@@ -237,45 +238,76 @@ export class ClaudeCodeAdapter {
       emit(event);
     };
 
-    const splitter = new LineSplitter();
-    const consume = (lines: string[]) => {
-      for (const line of lines) {
-        const parsed = parseStreamLine(line);
-        if (!parsed) continue;
-        const retained = redactLine(parsed);
-        try {
-          appendFileSync(streamLogPath, retained + "\n", { mode: 0o600 });
-        } catch (error) {
-          emit({
-            type: "runtime_stderr",
-            text: `[mia] could not retain transcript line: ${errorMessage(error)}`,
-            at: now(),
-          });
-        }
-        if (parsed.ok)
-          for (const event of translator.translate(parsed.message, now)) handleEvent(event);
-        else
-          emit({
-            type: "malformed_event",
-            raw: retained.slice(0, 2000),
-            error: parsed.error,
-            at: now(),
-          });
+    /** Emits one stdout line's events and returns its redacted text for the transcript. */
+    const handleLine = (line: string): string | null => {
+      const parsed = parseStreamLine(line);
+      if (!parsed) return null;
+      const retained = redactLine(parsed);
+      if (parsed.ok)
+        for (const event of translator.translate(parsed.message, now)) handleEvent(event);
+      else
+        emit({
+          type: "malformed_event",
+          raw: retained.slice(0, 2000),
+          error: parsed.error,
+          at: now(),
+        });
+      return retained;
+    };
+    /** SIGKILLs the runtime's whole process group; see the note on interrupt below. */
+    const killRuntime = (): void => {
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
       }
     };
-    child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => consume(splitter.push(chunk)));
+    /** Aborted when a stuck runtime's turn is finished without it, so its output stops being read. */
+    const stopReading = new AbortController();
+    const stdoutRead = child.stdout
+      ? retainStdout({
+          stdout: child.stdout,
+          file: streamLogPath,
+          handleLine,
+          signal: stopReading.signal,
+          reportFailure: (error) =>
+            emit({
+              type: "runtime_stderr",
+              text: `[mia] could not retain the transcript: ${errorMessage(error)}`,
+              at: now(),
+            }),
+        }).catch((error: unknown) => {
+          if (stopReading.signal.aborted) return;
+          // A runtime whose output Mia no longer reads could keep acting unobserved, so it is stopped; the turn
+          // then ends as failed when the process closes.
+          killRuntime();
+          emit({
+            type: "runtime_stderr",
+            text: `[mia] stopped reading runtime output, so the runtime was stopped: ${errorMessage(error)}`,
+            at: now(),
+          });
+        })
+      : Promise.resolve();
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) =>
       emit({ type: "runtime_stderr", text: redactString(chunk), at: now() }),
     );
 
+    /** Settles once the process is gone; interrupt() judges the kill by it. */
+    const processGone = Promise.withResolvers<undefined>();
+    /** Settles when the turn may end: the process is gone and, unless it failed to spawn, stdout is drained. */
     const exitSettled = Promise.withResolvers<RuntimeExit>();
+    // The turn ends only once every stdout line has been handled and retained, so a turn-end read sees them all.
     child.once("close", (code, signal) => {
-      consume(splitter.flush());
-      exitSettled.resolve({ code, signal });
+      processGone.resolve(undefined);
+      const settle = () => exitSettled.resolve({ code, signal });
+      void stdoutRead.then(settle, settle);
     });
-    child.once("error", () => exitSettled.resolve({ code: null, signal: null }));
+    child.once("error", () => {
+      processGone.resolve(undefined);
+      exitSettled.resolve({ code: null, signal: null });
+    });
     const exited = exitSettled.promise;
 
     /** Settles (with no value) once a pending interrupt() has recorded its outcome. */
@@ -323,14 +355,9 @@ export class ClaudeCodeAdapter {
     const interrupt = async (): Promise<RuntimeCancellation> => {
       if (child.exitCode !== null || child.signalCode !== null) return runtimeCancellation;
       interrupted = true;
-      try {
-        if (child.pid) process.kill(-child.pid, "SIGKILL");
-        else child.kill("SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
+      killRuntime();
       const outcome = await withinDeadline(
-        exited.then(() => "exited" as const),
+        processGone.promise.then(() => "exited" as const),
         EXIT_WAIT_MS,
         "timeout" as const,
       );
@@ -338,6 +365,7 @@ export class ClaudeCodeAdapter {
       if (outcome === "timeout") {
         // Do not let a stuck process hold the task in "interrupting" forever: finish the turn and report uncertainty.
         child.unref();
+        stopReading.abort();
         exitSettled.resolve({ code: null, signal: null });
       }
       interruptSettled.resolve(undefined);
