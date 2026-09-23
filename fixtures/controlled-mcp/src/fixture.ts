@@ -6,13 +6,14 @@ import { join, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
 import {
+  endWithError,
   McpServer,
   readJsonBody,
   sendJson,
   startMcpHttpServer,
   type McpRequestContext,
 } from "@mia/mcp-http";
-import { errorMessage, sha256Hex } from "@mia/protocol";
+import { sha256Hex } from "@mia/protocol";
 import { Ledger, LedgerEntrySchema } from "./ledger.ts";
 
 export const PendingSlowCallSchema = z.object({
@@ -249,51 +250,51 @@ export const startFixture = async (options: FixtureOptions): Promise<FixtureHand
     })),
   });
 
-  const harnessServer: Server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    try {
-      const url = new URL(req.url ?? "/", `http://${host}`);
-      if (req.method === "GET" && url.pathname === "/state") return sendJson(res, 200, snapshot());
-      if (req.method === "POST" && url.pathname === "/reset") {
-        for (const call of pending.values()) call.release();
-        pending.clear();
-        ledger.reset();
-        return sendJson(res, 200, { ok: true });
-      }
-      if (req.method === "POST" && url.pathname === "/wait-entered") {
-        // Long-poll until a slow call has entered (or one is already pending and unreleased).
-        const existing = [...pending.values()].find((call) => !call.released && !call.cancelled);
-        if (existing) return sendJson(res, 200, { call_id: existing.call_id, mode: existing.mode });
-        const timeoutMs = Number(url.searchParams.get("timeout_ms") ?? "60000");
-        const { promise, resolve: entered } = Promise.withResolvers<PendingSlowCall | null>();
-        // Match the timer API's handling of invalid or out-of-range delays.
-        const delay = timeoutMs >= 1 && timeoutMs <= 2_147_483_647 ? Math.trunc(timeoutMs) : 1;
-        const deadline = AbortSignal.timeout(delay);
-        const onTimeout = () => entered(null);
-        deadline.addEventListener("abort", onTimeout, { once: true });
-        enteredWaiters.add(entered);
-        const call = await promise;
-        deadline.removeEventListener("abort", onTimeout);
-        enteredWaiters.delete(entered);
-        if (call) sendJson(res, 200, { call_id: call.call_id, mode: call.mode });
-        else sendJson(res, 408, { error: "no slow call entered before timeout" });
-        return;
-      }
-      if (req.method === "POST" && url.pathname === "/release") {
-        const body = ReleaseBodySchema.parse(await readJsonBody(req));
-        let targets: ControlledSlowCall[];
-        if (body.call_id) {
-          const named = pending.get(body.call_id);
-          targets = named ? [named] : [];
-        } else {
-          targets = [...pending.values()];
-        }
-        for (const call of targets) call.release();
-        return sendJson(res, 200, { released: targets.map((call) => call.call_id) });
-      }
-      sendJson(res, 404, { error: "unknown harness endpoint" });
-    } catch (error) {
-      sendJson(res, 500, { error: errorMessage(error) });
+  const handleHarnessRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const url = new URL(req.url ?? "/", `http://${host}`);
+    if (req.method === "GET" && url.pathname === "/state") return sendJson(res, 200, snapshot());
+    if (req.method === "POST" && url.pathname === "/reset") {
+      for (const call of pending.values()) call.release();
+      pending.clear();
+      ledger.reset();
+      return sendJson(res, 200, { ok: true });
     }
+    if (req.method === "POST" && url.pathname === "/wait-entered") {
+      // Long-poll until a slow call has entered (or one is already pending and unreleased).
+      const existing = [...pending.values()].find((call) => !call.released && !call.cancelled);
+      if (existing) return sendJson(res, 200, { call_id: existing.call_id, mode: existing.mode });
+      const timeoutMs = Number(url.searchParams.get("timeout_ms") ?? "60000");
+      const { promise, resolve: entered } = Promise.withResolvers<PendingSlowCall | null>();
+      // Match the timer API's handling of invalid or out-of-range delays.
+      const delay = timeoutMs >= 1 && timeoutMs <= 2_147_483_647 ? Math.trunc(timeoutMs) : 1;
+      const deadline = AbortSignal.timeout(delay);
+      const onTimeout = () => entered(null);
+      deadline.addEventListener("abort", onTimeout, { once: true });
+      enteredWaiters.add(entered);
+      const call = await promise;
+      deadline.removeEventListener("abort", onTimeout);
+      enteredWaiters.delete(entered);
+      if (call) sendJson(res, 200, { call_id: call.call_id, mode: call.mode });
+      else sendJson(res, 408, { error: "no slow call entered before timeout" });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/release") {
+      const body = ReleaseBodySchema.parse(await readJsonBody(req));
+      let targets: ControlledSlowCall[];
+      if (body.call_id) {
+        const named = pending.get(body.call_id);
+        targets = named ? [named] : [];
+      } else {
+        targets = [...pending.values()];
+      }
+      for (const call of targets) call.release();
+      return sendJson(res, 200, { released: targets.map((call) => call.call_id) });
+    }
+    sendJson(res, 404, { error: "unknown harness endpoint" });
+  };
+
+  const harnessServer: Server = createServer((req, res) => {
+    handleHarnessRequest(req, res).catch((error: unknown) => endWithError(res, error));
   });
   const listening = Promise.withResolvers<undefined>();
   harnessServer.once("error", listening.reject);

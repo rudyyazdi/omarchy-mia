@@ -12,9 +12,14 @@ const { config } = program.opts<{ config: string }>();
 
 try {
   const server = await startServer({ profilePath: config });
-  const shutdown = async () => {
-    await server.close();
-    process.exit(0);
+  const shutdown = () => {
+    server.close().then(
+      () => process.exit(0),
+      (error: unknown) => {
+        console.error(`mia-server: shutdown failed: ${errorMessage(error)}`);
+        process.exit(1);
+      },
+    );
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

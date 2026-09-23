@@ -147,6 +147,22 @@ export default tseslint.config(
     },
   },
   {
+    // Enforces AGENTS.md, Node: every promise is handled, and an async function is never passed
+    // where the caller ignores its result. Both need type information, so only TypeScript files.
+    files: ["**/*.ts"],
+    languageOptions: {
+      parserOptions: {
+        projectService: { allowDefaultProject: ["vitest.config.ts"] },
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    rules: {
+      "@typescript-eslint/no-misused-promises": ["error", { checksVoidReturn: true }],
+      // `void` is allowed only on a promise that cannot reject, which the rule cannot tell apart.
+      "@typescript-eslint/no-floating-promises": ["error", { ignoreVoid: false }],
+    },
+  },
+  {
     files: ["packages/**/*.ts", "apps/**/*.ts", "fixtures/**/*.ts", "tools/**/*.ts"],
     ignores: ["**/*.test.ts"],
     rules: { "no-restricted-syntax": ["error", ...SOURCE_RESTRICTED_SYNTAX] },

@@ -243,7 +243,7 @@ export const runTextClient = async (options: ConnectionOptions): Promise<void> =
   const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: "mia> " });
   session.terminal.attach(rl);
   rl.prompt();
-  rl.on("line", async (line) => {
+  const onLine = async (line: string): Promise<void> => {
     const text = line.trim();
     try {
       if (text === "") return;
@@ -253,6 +253,10 @@ export const runTextClient = async (options: ConnectionOptions): Promise<void> =
     } finally {
       session.terminal.prompt();
     }
+  };
+  // The .catch covers the terminal itself failing, which onLine cannot report through it.
+  rl.on("line", (line) => {
+    onLine(line).catch((error: unknown) => console.error(`✗ ${errorMessage(error)}`));
   });
   rl.on("close", quit);
 };
