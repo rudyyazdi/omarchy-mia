@@ -17,6 +17,9 @@ export interface TestServer {
   close(): Promise<void>;
 }
 
+/** A test's own timeout bounds its waits; connecting gets a shorter deadline so a dead server fails fast. */
+const CONNECT_TIMEOUT_MS = 10_000;
+
 export const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 
 /** Narrow an optional value the test has already established must exist; throws with a readable message otherwise. */
@@ -89,7 +92,7 @@ export const startTestServer = async (
         ...(clientId ? { clientId } : {}),
         build: { name: "test-client", version: "0", commit: null, dirty: null },
       });
-      await client.connect();
+      await client.connect({ signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS) });
       clients.push(client);
       return client;
     },

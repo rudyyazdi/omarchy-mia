@@ -1,5 +1,6 @@
 import { once } from "node:events";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { createServer, type Socket } from "node:net";
+import { describe, expect, it } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
 import { ackEvent } from "./ack-fixture.ts";
 import { MiaClient } from "./client.ts";
@@ -10,8 +11,6 @@ const makeClient = (url = "ws://127.0.0.1:1") =>
     secret: "test",
     build: { name: "test", version: "0", commit: null, dirty: false },
   });
-
-afterEach(() => vi.restoreAllMocks());
 
 /** Runs `test` with a client connected to a bare server, and tears both down even if it fails. */
 const withConnectedClient = async (
@@ -36,12 +35,32 @@ const withConnectedClient = async (
   }
 };
 
-describe("client deadlines", () => {
-  it("rejects an event wait on deadline and keeps independent predicates working", async () => {
+/** Runs `test` against a TCP server that accepts connections but never answers the WebSocket handshake. */
+const withSilentServer = async (test: (url: string) => Promise<void>): Promise<void> => {
+  const sockets = new Set<Socket>();
+  const server = createServer((socket) => sockets.add(socket));
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("no TCP address");
+  try {
+    await test(`ws://127.0.0.1:${address.port}`);
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    const closed = once(server, "close");
+    server.close();
+    await closed;
+  }
+};
+
+describe("client cancellation", () => {
+  it("rejects an event wait with its signal's reason and keeps independent predicates working", async () => {
     const client = makeClient();
-    const expired = client.waitFor("ack", () => true, 1);
-    const rejected = expect(expired).rejects.toThrow("timed out waiting for ack");
-    await rejected;
+    const deadline = new AbortController();
+    const expired = client.waitFor("ack", () => true, { signal: deadline.signal });
+    const reason = new Error("wait cancelled");
+    deadline.abort(reason);
+    await expect(expired).rejects.toBe(reason);
     const wanted = client.waitFor("ack", (event) => event.payload.command_id === "wanted");
     client.emit("ack", ackEvent("other"));
     const event = ackEvent("wanted");
@@ -49,25 +68,88 @@ describe("client deadlines", () => {
     await expect(wanted).resolves.toEqual(event);
   });
 
-  it("an acknowledged send's old deadline cannot expire a resend with the same id", () =>
+  it("rejects a wait whose signal is already aborted, unless the event already arrived", async () => {
+    const client = makeClient();
+    const reason = new Error("already cancelled");
+    const signal = AbortSignal.abort(reason);
+    await expect(client.waitFor("ack", () => true, { signal })).rejects.toBe(reason);
+    const event = ackEvent("seen");
+    client.events.push(event);
+    await expect(client.waitFor("ack", () => true, { signal })).resolves.toEqual(event);
+  });
+
+  it("an earlier send's signal cannot cancel a resend with the same id", () =>
     withConnectedClient(async (client, socket) => {
       const oldDeadline = new AbortController();
-      vi.spyOn(AbortSignal, "timeout").mockReturnValueOnce(oldDeadline.signal);
-      const first = client.send("start_conversation", {}, "same_id");
+      const first = client.send(
+        "start_conversation",
+        {},
+        { messageId: "same_id", signal: oldDeadline.signal },
+      );
       socket.send(JSON.stringify(ackEvent("same_id")));
       await expect(first).resolves.toMatchObject({ disposition: "accepted" });
-      const second = client.send("start_conversation", {}, "same_id");
+      const second = client.send("start_conversation", {}, { messageId: "same_id" });
       oldDeadline.abort();
       socket.send(JSON.stringify(ackEvent("same_id")));
       await expect(second).resolves.toMatchObject({ disposition: "accepted" });
     }));
 
+  it("rejects a send with its signal's reason, leaving a concurrent resend with the same id waiting", () =>
+    withConnectedClient(async (client, socket) => {
+      const deadline = new AbortController();
+      const first = client.send(
+        "start_conversation",
+        {},
+        { messageId: "same_id", signal: deadline.signal },
+      );
+      const second = client.send("start_conversation", {}, { messageId: "same_id" });
+      const reason = new Error("send cancelled");
+      deadline.abort(reason);
+      await expect(first).rejects.toBe(reason);
+      socket.send(JSON.stringify(ackEvent("same_id")));
+      await expect(second).resolves.toMatchObject({ disposition: "accepted" });
+    }));
+
+  it("does not send a command whose signal is already aborted", () =>
+    withConnectedClient(async (client, socket) => {
+      const received: string[] = [];
+      socket.on("message", (data) => received.push(data.toString("utf8")));
+      const reason = new Error("already cancelled");
+      const refused = client.send("start_conversation", {}, { signal: AbortSignal.abort(reason) });
+      await expect(refused).rejects.toBe(reason);
+      const sent = once(socket, "message");
+      const next = client.send("start_conversation", {}, { messageId: "next" });
+      await sent;
+      expect(received.map((text) => JSON.parse(text).message_id)).toEqual(["next"]);
+      socket.send(JSON.stringify(ackEvent("next")));
+      await next;
+    }));
+
   it("rejects a send still waiting for its ack as soon as the connection closes", () =>
     withConnectedClient(async (client, socket) => {
-      const pending = client.send("start_conversation", {}, "cmd_1");
+      const pending = client.send("start_conversation", {}, { messageId: "cmd_1" });
       socket.close();
       await expect(pending).rejects.toThrow(
         "connection closed before start_conversation (cmd_1) was acknowledged",
       );
+    }));
+
+  it("rejects a connect still waiting for the handshake with its signal's reason", () =>
+    withSilentServer(async (url) => {
+      const client = makeClient(url);
+      const deadline = new AbortController();
+      const connecting = client.connect({ signal: deadline.signal });
+      const reason = new Error("connect cancelled");
+      deadline.abort(reason);
+      await expect(connecting).rejects.toBe(reason);
+      expect(client.connectionState).toBe("disconnected");
+    }));
+
+  it("does not open a connection when the signal is already aborted", () =>
+    withSilentServer(async (url) => {
+      const client = makeClient(url);
+      const reason = new Error("already cancelled");
+      await expect(client.connect({ signal: AbortSignal.abort(reason) })).rejects.toBe(reason);
+      expect(client.connectionState).toBe("disconnected");
     }));
 });

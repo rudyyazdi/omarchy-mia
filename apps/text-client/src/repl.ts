@@ -10,6 +10,17 @@ import { MiaClient } from "./client.ts";
 /** Where to connect: read from a server profile, or given directly. */
 export type ConnectionOptions = { config: string } | { url: string; secretFile: string };
 
+/**
+ * Each call builds a fresh deadline for one step, so how long a step may take is main.ts's to decide and a test can
+ * hand in a signal it aborts itself.
+ */
+export interface TextClientDeadlines {
+  /** Bounds opening the connection. */
+  connect: () => AbortSignal;
+  /** Bounds the wait for one command's acknowledgement. */
+  ack: () => AbortSignal;
+}
+
 /** The streams the person types into and reads from; main.ts passes process.stdin and process.stdout. */
 export interface TextClientIo {
   input: NodeJS.ReadableStream;
@@ -96,6 +107,7 @@ class Terminal {
 
 interface Session {
   client: MiaClient;
+  deadlines: TextClientDeadlines;
   terminal: Terminal;
   currentTask: string | null;
   pendingApprovals: Map<string, EventPayload<"approval_requested">>;
@@ -167,6 +179,7 @@ const renderEvents = (session: Session): void => {
 const handleLine = async (session: Session, text: string, quit: () => void): Promise<void> => {
   const { client } = session;
   const out = (line: string) => session.terminal.out(line);
+  const acknowledged = () => ({ signal: session.deadlines.ack() });
   const [cmd = "", ...rest] = text.startsWith("/") ? text.split(/\s+/) : [];
   const decideApproval = async (decision: "approve" | "reject") => {
     const id = rest[0];
@@ -181,6 +194,7 @@ const handleLine = async (session: Session, text: string, quit: () => void): Pro
       taskId: pending.task_id,
       approvalId: id,
       decision: decision,
+      ...acknowledged(),
     });
     out(
       `decision ${ack.disposition}${ack.error ? `: ${ack.error.code}: ${ack.error.message}` : ""}`,
@@ -188,7 +202,7 @@ const handleLine = async (session: Session, text: string, quit: () => void): Pro
   };
   await match(cmd)
     .with("", async () => {
-      const ack = await client.submitText(text);
+      const ack = await client.submitText(text, acknowledged());
       if (ack.disposition !== "accepted")
         out(
           `submit ${ack.disposition}${ack.error ? `: ${ack.error.code}: ${ack.error.message}` : ""}`,
@@ -201,14 +215,14 @@ const handleLine = async (session: Session, text: string, quit: () => void): Pro
         out("no running task");
         return;
       }
-      const ack = await client.interrupt(session.currentTask);
+      const ack = await client.interrupt(session.currentTask, acknowledged());
       out(`interrupt ${ack.disposition}${ack.error ? `: ${ack.error.message}` : ""}`);
     })
     .with("/approve", () => decideApproval("approve"))
     .with("/reject", () => decideApproval("reject"))
     .with("/diag", async () => {
       out(JSON.stringify(client.diagnostics(), null, 2));
-      await client.sendDiagnostics();
+      await client.sendDiagnostics(acknowledged());
     })
     .with(P.string, () => {
       // A mistyped command must not become a task for the agent.
@@ -219,11 +233,11 @@ const handleLine = async (session: Session, text: string, quit: () => void): Pro
     .exhaustive();
 };
 
-const startSession = async (client: MiaClient): Promise<string> => {
-  await client.connect();
+const startSession = async ({ client, deadlines }: Session): Promise<string> => {
+  await client.connect({ signal: deadlines.connect() });
   try {
-    await client.sendDiagnostics();
-    return await client.startConversation();
+    await client.sendDiagnostics({ signal: deadlines.ack() });
+    return await client.startConversation({ signal: deadlines.ack() });
   } catch (error) {
     client.close();
     throw error;
@@ -239,6 +253,7 @@ const startSession = async (client: MiaClient): Promise<string> => {
 export const runTextClient = async (
   options: ConnectionOptions,
   io: TextClientIo,
+  deadlines: TextClientDeadlines,
 ): Promise<void> => {
   const { url, secretFile } = resolveConnection(options);
   if (!existsSync(secretFile))
@@ -254,6 +269,7 @@ export const runTextClient = async (
   });
   const session: Session = {
     client,
+    deadlines,
     terminal: new Terminal(io.output),
     currentTask: null,
     pendingApprovals: new Map(),
@@ -264,12 +280,15 @@ export const runTextClient = async (
   const closed = Promise.withResolvers<undefined>();
   client.once("disconnected", () => closed.resolve(undefined));
 
-  const conversationId = await startSession(client);
+  const conversationId = await startSession(session);
   out(`connected to ${url}; conversation ${conversationId}`);
   out("type text to submit a task; /approve <id>, /reject <id>, /interrupt, /diag, /quit");
   const rl = createInterface({ input: io.input, output: io.output, prompt: "mia> " });
   session.terminal.attach(rl);
-  const heartbeat = setInterval(() => void client.heartbeat().catch(() => undefined), 15_000);
+  const heartbeat = setInterval(
+    () => void client.heartbeat({ signal: deadlines.ack() }).catch(() => undefined),
+    15_000,
+  );
   heartbeat.unref();
   // Ends the session at once, dropping lines read but not yet handled; safe to repeat. /quit and the connection
   // closing call it. The input ending does not: the lines it already delivered are handled first.

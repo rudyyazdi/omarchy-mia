@@ -10,6 +10,8 @@ import type { ServerEvent } from "@mia/protocol";
 
 export interface ScenarioContext {
   client: MiaClient;
+  /** The scenario's deadline, built by the provider; every client command and wait listens for it. */
+  signal: AbortSignal;
   harness: FixtureHarness;
   reconnect: () => Promise<MiaClient>;
   budget: (label: string) => void;
@@ -140,7 +142,7 @@ const runTask = async (
 }> => {
   const { client } = ctx;
   ctx.budget(task.text.slice(0, 40));
-  const ack = await client.submitText(task.text);
+  const ack = await client.submitText(task.text, { signal: ctx.signal });
   if (ack.disposition !== "accepted")
     throw new Error(`submit rejected: ${ack.error?.code} ${ack.error?.message}`);
   const taskId = taskIdOf(ack);
@@ -165,6 +167,7 @@ const runTask = async (
       taskId: taskId,
       approvalId: event.payload.approval_id,
       decision: choice,
+      signal: ctx.signal,
     });
     if (decided.disposition !== "accepted")
       decisions.push({
@@ -183,7 +186,9 @@ const runTask = async (
   // Awaiting both together keeps a `during` rejection handled even when the wait fails first.
   const [finished] = await Promise.all([
     Promise.race([
-      client.waitFor("task_finished", (event) => event.payload.task_id === taskId, 600_000),
+      client.waitFor("task_finished", (event) => event.payload.task_id === taskId, {
+        signal: ctx.signal,
+      }),
       decisionFailed.promise,
     ]),
     task.during ? task.during(taskId) : Promise.resolve(),
@@ -271,7 +276,7 @@ const interruptAtEntered = async ({
 }: TaskContext): Promise<{ call_id: string }> => {
   const entered = await ctx.harness.waitEntered(300_000);
   notes.push(`entered ${entered.call_id} (${entered.mode})`);
-  const ack = await ctx.client.interrupt(taskId);
+  const ack = await ctx.client.interrupt(taskId, { signal: ctx.signal });
   notes.push(`interrupt ack ${ack.disposition}`);
   return entered;
 };
@@ -321,12 +326,12 @@ export const SCENARIOS: Scenario[] = [
     async run(ctx) {
       const notes: string[] = [];
       ctx.budget("silence-disconnect");
-      const ack = await ctx.client.submitText(CHANGE_ONCE);
+      const ack = await ctx.client.submitText(CHANGE_ONCE, { signal: ctx.signal });
       const taskId = taskIdOf(ack);
       const requested = await ctx.client.waitFor(
         "approval_requested",
         (event) => event.payload.task_id === taskId,
-        300_000,
+        { signal: ctx.signal },
       );
       const approvalId = requested.payload.approval_id;
       const commitsAtRequest = commitCount(await ctx.harness.state());
@@ -339,12 +344,13 @@ export const SCENARIOS: Scenario[] = [
         taskId: taskId,
         approvalId: approvalId,
         decision: "reject",
+        signal: ctx.signal,
       });
       notes.push(`decision after reconnect: ${decided.disposition} ${decided.error?.code ?? ""}`);
       const finished = await again.waitFor(
         "task_finished",
         (event) => event.payload.task_id === taskId,
-        300_000,
+        { signal: ctx.signal },
       );
       again.close();
       return {
@@ -390,7 +396,7 @@ export const SCENARIOS: Scenario[] = [
           await ctx.client.waitFor(
             "interruption_outcome",
             (event) => event.payload.task_id === taskId,
-            120_000,
+            { signal: ctx.signal },
           );
           notes.push(`commits before release: ${commitCount(await ctx.harness.state())}`);
           await ctx.harness.release(entered.call_id);

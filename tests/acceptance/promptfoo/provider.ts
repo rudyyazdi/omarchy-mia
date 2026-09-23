@@ -9,6 +9,9 @@ import { errorMessage } from "@mia/protocol";
 import { MiaClient } from "@mia/text-client";
 import { readScenarioName, runScenario, scenarioFor, type ScenarioContext } from "./scenarios.ts";
 
+/** How long one scenario may run: its longest scenarios wait up to ten minutes for each of two tasks. */
+const SCENARIO_TIMEOUT_MS = 20 * 60_000;
+
 interface ProviderOptions {
   id?: string;
   config?: { promptVersion?: string };
@@ -52,6 +55,7 @@ export default class MiaScenarioProvider {
       resolve(process.env.MIA_REPO_ROOT ?? ".", ".mia-state/live-calls.jsonl"),
     );
     const clientId = `pf_${scenarioName}_${Date.now().toString(36)}`;
+    const signal = AbortSignal.timeout(SCENARIO_TIMEOUT_MS);
     const connect = async () => {
       const connected = new MiaClient({
         url,
@@ -59,16 +63,17 @@ export default class MiaScenarioProvider {
         clientId,
         build: { name: "promptfoo-provider", version: "0.1.0", commit: null, dirty: null },
       });
-      await connected.connect();
+      await connected.connect({ signal });
       return connected;
     };
     const client = await connect();
     const extra: MiaClient[] = [];
     try {
-      await client.sendDiagnostics();
-      await client.startConversation();
+      await client.sendDiagnostics({ signal });
+      await client.startConversation({ signal });
       const ctx: ScenarioContext = {
         client,
+        signal,
         harness: new FixtureHarness(harnessUrl),
         reconnect: async () => {
           const reconnected = await connect();

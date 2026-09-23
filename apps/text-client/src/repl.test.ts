@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { ClientCommandSchema, type ClientCommand } from "@mia/protocol";
 import { ackEvent } from "./ack-fixture.ts";
-import { runTextClient, type TextClientIo } from "./repl.ts";
+import { runTextClient, type TextClientDeadlines, type TextClientIo } from "./repl.ts";
 
 /** How the fake server answers one command. */
 type Respond = (socket: WebSocket, command: ClientCommand) => void;
@@ -27,6 +27,17 @@ let session: Promise<void> | null;
 let io: TextClientIo & { input: PassThrough };
 let printed: string;
 let received: ClientCommand[];
+/** One controller per acknowledgement deadline the session asked for, in order; none expires on its own. */
+let ackDeadlines: AbortController[];
+
+const deadlines: TextClientDeadlines = {
+  connect: () => new AbortController().signal,
+  ack: () => {
+    const deadline = new AbortController();
+    ackDeadlines.push(deadline);
+    return deadline.signal;
+  },
+};
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "mia-repl-"));
@@ -34,6 +45,7 @@ beforeEach(async () => {
   server = null;
   session = null;
   received = [];
+  ackDeadlines = [];
   const output = new PassThrough().setEncoding("utf8");
   printed = "";
   output.on("data", (chunk: string) => (printed += chunk));
@@ -69,6 +81,7 @@ const start = async (respond: Respond = accept): Promise<WebSocketServer> => {
   session = runTextClient(
     { url: `ws://127.0.0.1:${address.port}`, secretFile: join(dir, "secret") },
     io,
+    deadlines,
   );
   return fake;
 };
@@ -99,6 +112,24 @@ describe("text client session", () => {
     await expect(session).resolves.toBeUndefined();
     expect(printed).toMatch(inFlightError);
     expect(printed.split("mia> ")).toHaveLength(2);
+  });
+
+  it("reports a command whose acknowledgement deadline passes, then handles the next line", async () => {
+    const held = Promise.withResolvers<undefined>();
+    await start(
+      onSubmit((socket, command) =>
+        command.type === "submit_text" && command.payload.text === "one"
+          ? held.resolve(undefined)
+          : accept(socket, command),
+      ),
+    );
+    io.input.write("one\n");
+    await held.promise;
+    ackDeadlines.at(-1)?.abort(new Error("ack deadline passed"));
+    io.input.end("two\n");
+    await expect(session).resolves.toBeUndefined();
+    expect(submitted()).toEqual(["one", "two"]);
+    expect(printed).toContain("✗ ack deadline passed\n");
   });
 
   it("/quit ends the session, drops the lines after it, and prompts no more", async () => {
@@ -139,7 +170,7 @@ describe("text client session", () => {
 
   it("rejects instead of exiting when the secret file is missing", async () => {
     await expect(
-      runTextClient({ url: "ws://127.0.0.1:1", secretFile: join(dir, "missing") }, io),
+      runTextClient({ url: "ws://127.0.0.1:1", secretFile: join(dir, "missing") }, io, deadlines),
     ).rejects.toThrow(/secret file .* not found/);
   });
 });
