@@ -426,23 +426,84 @@ const readOrReport = async (
   }
 };
 
+/** Starts one read of a runtime-written file; it never rejects, reporting every failure as a result instead. */
+type RuntimeFileReadStart = (
+  path: string,
+  signal: AbortSignal | undefined,
+) => Promise<RuntimeFileRead>;
+
+/**
+ * A reader that abandons a read the moment `signal` aborts (a read is never started under a signal that has
+ * already aborted), and refuses to start one while `maxStuckReads` abandoned reads have yet to return.
+ *
+ * The reader owns the abandoned reads: each one leaves the count when its `read` finally settles. A read that is
+ * already in flight when the count reaches the cap can still be abandoned, so the count can exceed the cap by the
+ * reads started concurrently with the last abandoned one.
+ */
+export const boundedRuntimeFileReader = ({
+  read,
+  maxStuckReads,
+}: {
+  read: RuntimeFileReadStart;
+  maxStuckReads: number;
+}): RuntimeFileReader => {
+  let stuckReads = 0;
+  const release = (): void => {
+    stuckReads -= 1;
+  };
+  return async (path, { signal } = {}) => {
+    // A signal that has already aborted reports its own reason, which `untilAborted` gives without starting.
+    if (!signal?.aborted && stuckReads >= maxStuckReads)
+      return { status: "unreadable", reason: "an earlier abandoned read is still blocked" };
+    let started: Promise<RuntimeFileRead> | null = null;
+    let settled = false;
+    const markSettled = (): void => {
+      settled = true;
+    };
+    return untilAborted(
+      () => {
+        started = read(path, signal);
+        // Neither handler can throw, so these chains never reject.
+        void started.then(markSettled, markSettled);
+        return started;
+      },
+      signal,
+      (reason) => {
+        // An abort landing after the read settled, before the race observed it, leaves nothing blocked to count.
+        if (started && !settled) {
+          stuckReads += 1;
+          void started.then(release, release);
+        }
+        return { status: "unreadable", reason: abortReason(reason) };
+      },
+    );
+  };
+};
+
+/**
+ * Abandoned reads the process lets stay blocked before it refuses to start another. The libuv worker pool (4
+ * threads by default) is per process, and every async fs call and `dns.lookup` queues behind it, so this keeps
+ * threads free when a turn's two concurrent evidence reads (transcript and hook evidence) are the last to stick.
+ */
+const MAX_STUCK_READS = 2;
+
 /**
  * Reads a runtime-written file without throwing, because a throw after the turn would keep it from being
  * recorded as finished. Only a missing file is absent; anything that is not a regular file (a directory, a
  * FIFO) and any other failure (EACCES, ENOTDIR) is reported. Asynchronous because the server reads at turn end
  * while it serves other connections.
  *
- * A read is never started under a signal that has already aborted, and is unreadable the moment `signal` aborts,
- * even if the `open()` or `read()` under it is blocked (a regular file on a stale mount): `readFile`'s own signal
- * is only checked between those calls. Nothing avoids that blocked call, so each such abandoned read keeps its
- * descriptor, and a libuv worker thread, until the kernel returns, and then closes the descriptor.
+ * A read is unreadable the moment `signal` aborts, even if the `open()` or `read()` under it is blocked (a
+ * regular file on a stale mount): `readFile`'s own signal is only checked between those calls. Nothing avoids
+ * that blocked call, so each such abandoned read keeps its descriptor, and a libuv worker thread, until the
+ * kernel returns, and then closes the descriptor. While `MAX_STUCK_READS` of them are still blocked, every read
+ * is unreadable without starting: a hung mount then costs later turns their evidence, even on a healthy path,
+ * instead of stalling the whole process.
  */
-export const readRuntimeFile: RuntimeFileReader = (path, { signal } = {}) =>
-  untilAborted(
-    () => readOrReport(path, signal),
-    signal,
-    (reason) => ({ status: "unreadable", reason: abortReason(reason) }),
-  );
+export const readRuntimeFile: RuntimeFileReader = boundedRuntimeFileReader({
+  read: readOrReport,
+  maxStuckReads: MAX_STUCK_READS,
+});
 
 /** Counts and skips malformed lines, such as the truncated last line of a turn killed mid-write. */
 const parseHookEvidence = (text: string): HookEvidence => {

@@ -3,7 +3,13 @@ import { existsSync, mkdirSync, mkdtempDisposableSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { hookEvidenceFrom, probeStaticCapabilities, readRuntimeFile } from "./adapter.ts";
+import {
+  boundedRuntimeFileReader,
+  hookEvidenceFrom,
+  probeStaticCapabilities,
+  readRuntimeFile,
+  type RuntimeFileRead,
+} from "./adapter.ts";
 
 describe("readRuntimeFile", () => {
   it("reports a FIFO as not a regular file without waiting for a writer, however many are read", async () => {
@@ -37,6 +43,91 @@ describe("readRuntimeFile", () => {
       status: "unreadable",
       reason: "timed out",
     });
+  });
+});
+
+describe("boundedRuntimeFileReader", () => {
+  const blocked = { status: "unreadable", reason: "an earlier abandoned read is still blocked" };
+
+  /** An injected read that settles only when the test settles it, recording every path it starts on. */
+  const heldReads = () => {
+    const started: string[] = [];
+    const pending: PromiseWithResolvers<RuntimeFileRead>[] = [];
+    const read = (path: string) => {
+      started.push(path);
+      const held = Promise.withResolvers<RuntimeFileRead>();
+      pending.push(held);
+      return held.promise;
+    };
+    return { started, pending, read };
+  };
+
+  const abandonRead = async (reader: ReturnType<typeof boundedRuntimeFileReader>, path: string) => {
+    const controller = new AbortController();
+    const result = reader(path, { signal: controller.signal });
+    controller.abort(new DOMException("deadline", "TimeoutError"));
+    expect(await result).toEqual({ status: "unreadable", reason: "timed out" });
+  };
+
+  it("refuses a read without starting it while the cap of abandoned reads is still blocked", async () => {
+    const reads = heldReads();
+    const reader = boundedRuntimeFileReader({ read: reads.read, maxStuckReads: 2 });
+    await abandonRead(reader, "first");
+    await abandonRead(reader, "second");
+    expect(await reader("third")).toEqual(blocked);
+    expect(await reader("fourth", { signal: new AbortController().signal })).toEqual(blocked);
+    expect(reads.started).toEqual(["first", "second"]);
+  });
+
+  it("frees an abandoned read's slot once it finally returns", async () => {
+    const reads = heldReads();
+    const reader = boundedRuntimeFileReader({ read: reads.read, maxStuckReads: 1 });
+    await abandonRead(reader, "stuck");
+    expect(await reader("refused")).toEqual(blocked);
+    const [stuck] = reads.pending;
+    if (!stuck) throw new Error("the stuck read never started");
+    stuck.resolve({ status: "absent" });
+    await stuck.promise;
+    const next = reader("next");
+    const [, pendingNext] = reads.pending;
+    if (!pendingNext) throw new Error("the next read never started");
+    pendingNext.resolve({ status: "read", bytes: Buffer.from("{}\n") });
+    expect(await next).toEqual({ status: "read", bytes: Buffer.from("{}\n") });
+    expect(reads.started).toEqual(["stuck", "next"]);
+  });
+
+  it("frees an abandoned read's slot when it finally rejects", async () => {
+    const reads = heldReads();
+    const reader = boundedRuntimeFileReader({ read: reads.read, maxStuckReads: 1 });
+    await abandonRead(reader, "stuck");
+    const [stuck] = reads.pending;
+    if (!stuck) throw new Error("the stuck read never started");
+    stuck.reject(new Error("EIO"));
+    await expect(stuck.promise).rejects.toThrow("EIO");
+    await abandonRead(reader, "next");
+    expect(reads.started).toEqual(["stuck", "next"]);
+  });
+
+  it("reports an already-aborted signal's own reason even at the cap", async () => {
+    const reads = heldReads();
+    const reader = boundedRuntimeFileReader({ read: reads.read, maxStuckReads: 1 });
+    await abandonRead(reader, "stuck");
+    const signal = AbortSignal.abort(new Error("abandoned at shutdown"));
+    expect(await reader("late", { signal })).toEqual({
+      status: "unreadable",
+      reason: "abandoned at shutdown",
+    });
+    expect(reads.started).toEqual(["stuck"]);
+  });
+
+  it("counts only abandoned reads, not reads that return in time", async () => {
+    const reads = heldReads();
+    const reader = boundedRuntimeFileReader({ read: reads.read, maxStuckReads: 1 });
+    const inFlight = [reader("first"), reader("second", { signal: new AbortController().signal })];
+    for (const held of reads.pending) held.resolve({ status: "absent" });
+    expect(await Promise.all(inFlight)).toEqual([{ status: "absent" }, { status: "absent" }]);
+    await abandonRead(reader, "third");
+    expect(reads.started).toEqual(["first", "second", "third"]);
   });
 });
 
