@@ -1458,7 +1458,7 @@ export class Engine {
     const art = writer.registerArtifact({
       kind: "tool_output",
       logicalName: declared.name ?? declared.path,
-      mimeType: declared.mime_type ?? "application/octet-stream",
+      mimeType: declared.mimeType ?? "application/octet-stream",
       producerExecutionId: task.executionId,
       producerEventId: result.eventId,
       originalPath: declared.path,

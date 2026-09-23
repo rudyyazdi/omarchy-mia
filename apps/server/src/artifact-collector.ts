@@ -1,4 +1,4 @@
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { errorMessage } from "@mia/protocol";
 import {
   decideEligibility,
@@ -12,7 +12,8 @@ import {
 /** A path that cannot be resolved (absent, dangling symlink, unreachable) counts as absent. */
 const inspectPath = (path: string): PathFacts => {
   try {
-    return { exists: true, resolvedPath: realpathSync(path) };
+    const resolvedPath = realpathSync(path);
+    return { exists: true, resolvedPath, regularFile: statSync(resolvedPath).isFile() };
   } catch {
     return { exists: false };
   }
@@ -29,7 +30,7 @@ const resolvePolicy = (outputDirectories: readonly string[]): CapturePolicy => (
 /**
  * Reads a declared file only after the pure policy has admitted its resolved path. The checks guard
  * against a declaration naming a file outside the output directories, not against the file being
- * replaced between resolution and read. A file that cannot be read is a failed capture, never a throw.
+ * replaced between resolution and read. A file that still cannot be read is a failed capture, never a throw.
  */
 export const collectArtifact = (
   declared: DeclaredArtifact,

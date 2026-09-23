@@ -10,10 +10,17 @@ const DeclaredArtifactSchema = z.object({
   mime_type: z.string().optional(),
 });
 const ArtifactDeclarationSchema = z.object({ artifact: DeclaredArtifactSchema });
-export type DeclaredArtifact = z.infer<typeof DeclaredArtifactSchema>;
+
+export interface DeclaredArtifact {
+  path: string;
+  sha256?: string;
+  name?: string;
+  mimeType?: string;
+}
 
 /** What the filesystem reported about a declared path; `resolvedPath` has every symlink followed. */
-export type PathFacts = { exists: false } | { exists: true; resolvedPath: string };
+export type PathFacts =
+  { exists: false } | { exists: true; resolvedPath: string; regularFile: boolean };
 
 /** Output directories with every symlink followed, so containment compares resolved paths. */
 export interface CapturePolicy {
@@ -27,7 +34,7 @@ export type NotRetained = {
 
 export type Eligibility = { status: "eligible"; resolvedPath: string } | NotRetained;
 
-export type Capture = { status: "retained"; bytes: Buffer } | NotRetained;
+export type Capture = { status: Extract<CaptureStatus, "retained">; bytes: Buffer } | NotRetained;
 
 /** Text blocks of a tool result: a bare string, or the `text` of every block that carries one. */
 const resultTexts = (content: unknown): string[] => {
@@ -49,30 +56,36 @@ export const extractDeclaredArtifact = (content: unknown): DeclaredArtifact | nu
       continue; // not JSON
     }
     const declaration = ArtifactDeclarationSchema.safeParse(parsed);
-    if (declaration.success) return declaration.data.artifact;
+    if (!declaration.success) continue;
+    const { path, sha256, name, mime_type: mimeType } = declaration.data.artifact;
+    return { path, sha256, name, mimeType };
   }
   return null;
 };
 
-/** Decides from facts alone whether a declared file may be read; nothing outside the output directories is. */
+const isInside = (path: string, directory: string): boolean =>
+  path.startsWith(directory.endsWith(sep) ? directory : directory + sep);
+
+/** Admits only a regular file whose resolved path lies strictly inside an output directory. */
 export const decideEligibility = (facts: PathFacts, policy: CapturePolicy): Eligibility => {
   if (!facts.exists)
     return { status: "missing", reason: "declared file not found at collection time" };
-  const inside = policy.resolvedOutputDirectories.some((directory) =>
-    facts.resolvedPath.startsWith(directory + sep),
-  );
-  return inside
-    ? { status: "eligible", resolvedPath: facts.resolvedPath }
-    : {
-        status: "external_only",
-        reason: "declared path resolves outside the configured output directories",
-      };
+  if (
+    !policy.resolvedOutputDirectories.some((directory) => isInside(facts.resolvedPath, directory))
+  )
+    return {
+      status: "external_only",
+      reason: "declared path resolves outside the configured output directories",
+    };
+  if (!facts.regularFile)
+    return { status: "failed", reason: "declared path is not a regular file" };
+  return { status: "eligible", resolvedPath: facts.resolvedPath };
 };
 
-/** Retains the bytes unless the declaration carries a digest they do not match. */
+/** Retains the bytes unless the declaration carries a digest they do not match; an empty digest declares none. */
 export const verifyContent = (bytes: Buffer, declared: DeclaredArtifact): Capture => {
   const digest = sha256Hex(bytes);
-  return declared.sha256 !== undefined && declared.sha256 !== digest
+  return declared.sha256 && declared.sha256 !== digest
     ? {
         status: "failed",
         reason: `declared sha256 ${declared.sha256} does not match file ${digest}`,

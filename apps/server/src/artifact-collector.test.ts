@@ -1,8 +1,22 @@
-import { chmodSync, mkdirSync, mkdtempDisposableSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempDisposableSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { collectArtifact } from "./artifact-collector.ts";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const filesystem = await importOriginal<typeof import("node:fs")>();
+  return { ...filesystem, readFileSync: vi.fn(filesystem.readFileSync) };
+});
+
+afterEach(() => vi.mocked(readFileSync).mockClear());
 
 const workspace = (): { root: string; out: string; [Symbol.dispose]: () => void } => {
   const directory = mkdtempDisposableSync(join(tmpdir(), "mia-artifacts-"));
@@ -30,28 +44,23 @@ describe("collectArtifact", () => {
     expect(collectArtifact({ path: join(dirs.out, "a.txt") }, [alias]).status).toBe("retained");
   });
 
-  // The target is unreadable, so a collector that read before deciding would fail or throw instead.
-  it.skipIf(process.getuid?.() === 0)(
-    "never reads a symlink target outside the output directory",
-    () => {
-      using dirs = workspace();
-      const secret = join(dirs.root, "secret.txt");
-      writeFileSync(secret, "private");
-      chmodSync(secret, 0o000);
-      symlinkSync(secret, join(dirs.out, "escape.txt"));
-      expect(collectArtifact({ path: join(dirs.out, "escape.txt") }, [dirs.out])).toEqual({
-        status: "external_only",
-        reason: "declared path resolves outside the configured output directories",
-      });
-    },
-  );
+  it("never reads a file outside the output directory, directly or through a symlink", () => {
+    using dirs = workspace();
+    const secret = join(dirs.root, "secret.txt");
+    writeFileSync(secret, "private");
+    symlinkSync(secret, join(dirs.out, "escape.txt"));
+    for (const path of [secret, join(dirs.out, "escape.txt")])
+      expect(collectArtifact({ path }, [dirs.out]).status).toBe("external_only");
+    expect(readFileSync).not.toHaveBeenCalled();
+  });
 
-  it("reports a dangling symlink as missing", () => {
+  it("reports a dangling symlink as missing without reading", () => {
     using dirs = workspace();
     symlinkSync(join(dirs.out, "gone.txt"), join(dirs.out, "dangling.txt"));
     expect(collectArtifact({ path: join(dirs.out, "dangling.txt") }, [dirs.out]).status).toBe(
       "missing",
     );
+    expect(readFileSync).not.toHaveBeenCalled();
   });
 
   it("treats an output directory that does not exist as containing nothing", () => {
@@ -61,13 +70,16 @@ describe("collectArtifact", () => {
     expect(capture.status).toBe("external_only");
   });
 
-  it("fails, rather than throws, on a declared path that cannot be read", () => {
+  // Opening a FIFO blocks until a writer appears, so reading one would hang the server.
+  it("fails a directory or FIFO inside the output directory without reading it", () => {
     using dirs = workspace();
     mkdirSync(join(dirs.out, "folder"));
-    const capture = collectArtifact({ path: join(dirs.out, "folder") }, [dirs.out]);
-    expect(capture).toEqual({
-      status: "failed",
-      reason: expect.stringMatching(/^declared file unreadable: /),
-    });
+    execFileSync("mkfifo", [join(dirs.out, "fifo")]);
+    for (const name of ["folder", "fifo"])
+      expect(collectArtifact({ path: join(dirs.out, name) }, [dirs.out])).toEqual({
+        status: "failed",
+        reason: "declared path is not a regular file",
+      });
+    expect(readFileSync).not.toHaveBeenCalled();
   });
 });

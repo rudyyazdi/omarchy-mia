@@ -16,6 +16,11 @@ describe("extractDeclaredArtifact", () => {
     ).toEqual({ path: "/work/out/a.txt" });
   });
 
+  it("maps the declared mime_type to camelCase once", () => {
+    const declaration = JSON.stringify({ artifact: { path: "/p", mime_type: "text/plain" } });
+    expect(extractDeclaredArtifact(declaration)).toEqual({ path: "/p", mimeType: "text/plain" });
+  });
+
   it("ignores content that declares nothing", () => {
     expect(extractDeclaredArtifact("plain output")).toBeNull();
     expect(extractDeclaredArtifact(JSON.stringify({ artifact: { name: "no path" } }))).toBeNull();
@@ -35,7 +40,10 @@ describe("decideEligibility", () => {
 
   it("admits a resolved path inside an output directory", () => {
     expect(
-      decideEligibility({ exists: true, resolvedPath: "/work/out/sub/a.txt" }, policy),
+      decideEligibility(
+        { exists: true, resolvedPath: "/work/out/sub/a.txt", regularFile: true },
+        policy,
+      ),
     ).toEqual({
       status: "eligible",
       resolvedPath: "/work/out/sub/a.txt",
@@ -45,17 +53,35 @@ describe("decideEligibility", () => {
   it.each(["/etc/hostname", "/work/out-sibling/a.txt", "/work/out", "/work/a.txt"])(
     "excludes %s as external-only",
     (resolvedPath) => {
-      expect(decideEligibility({ exists: true, resolvedPath }, policy)).toEqual({
+      expect(decideEligibility({ exists: true, resolvedPath, regularFile: true }, policy)).toEqual({
         status: "external_only",
         reason: "declared path resolves outside the configured output directories",
       });
     },
   );
 
+  it("admits paths under an output directory of /", () => {
+    expect(
+      decideEligibility(
+        { exists: true, resolvedPath: "/a.txt", regularFile: true },
+        { resolvedOutputDirectories: ["/"] },
+      ).status,
+    ).toBe("eligible");
+  });
+
+  it("fails a path inside an output directory that is not a regular file", () => {
+    expect(
+      decideEligibility(
+        { exists: true, resolvedPath: "/work/out/fifo", regularFile: false },
+        policy,
+      ),
+    ).toEqual({ status: "failed", reason: "declared path is not a regular file" });
+  });
+
   it("excludes everything when no output directory exists", () => {
     expect(
       decideEligibility(
-        { exists: true, resolvedPath: "/work/out/a.txt" },
+        { exists: true, resolvedPath: "/work/out/a.txt", regularFile: true },
         { resolvedOutputDirectories: [] },
       ).status,
     ).toBe("external_only");
@@ -65,11 +91,12 @@ describe("decideEligibility", () => {
 describe("verifyContent", () => {
   const bytes = Buffer.from("D1");
 
-  it("retains bytes without a declared digest or with a matching one", () => {
+  it("retains bytes without a declared digest, with an empty one, or with a matching one", () => {
     expect(verifyContent(bytes, { path: "/work/out/a.txt" })).toEqual({
       status: "retained",
       bytes,
     });
+    expect(verifyContent(bytes, { path: "/work/out/a.txt", sha256: "" }).status).toBe("retained");
     expect(verifyContent(bytes, { path: "/work/out/a.txt", sha256: sha256Hex(bytes) })).toEqual({
       status: "retained",
       bytes,

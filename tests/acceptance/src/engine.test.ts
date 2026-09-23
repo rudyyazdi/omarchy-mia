@@ -426,7 +426,7 @@ describe("configuration and provenance", () => {
     );
   });
 
-  it("registers declared tool outputs inside the output directory and marks others external-only", async () => {
+  it("registers declared tool outputs inside the output directory and ignores unmatched calls", async () => {
     const outDir = must(ts.profile.runtime.outputDirectories[0], "output directory");
     mkdirSync(outDir, { recursive: true });
     const file = join(outDir, "result.txt");
@@ -477,5 +477,48 @@ describe("configuration and provenance", () => {
     // the unmatched tool_use id (toolu_x) is recorded, not collected
     expect(rows("SELECT id FROM events WHERE type = 'tool_result_unmatched'")).toHaveLength(1);
     expect(artifacts.find((artifact) => artifact.logical_name === "hostname")).toBeUndefined();
+  });
+
+  it("records a non-retained capture with its reason, linked only to its tool call", async () => {
+    const outDir = must(ts.profile.runtime.outputDirectories[0], "output directory");
+    mkdirSync(join(outDir, "folder"), { recursive: true });
+    const declarations = {
+      toolu_1: { path: "/etc/hostname", name: "external" },
+      toolu_2: { path: join(outDir, "folder"), name: "directory" },
+      toolu_3: { path: join(outDir, "absent.txt"), name: "absent" },
+    };
+    const { turn, taskId } = await submit("artifacts");
+    turn.init();
+    for (const [callId, artifact] of Object.entries(declarations)) {
+      const pending = turn.request("mcp__d1__artifact", { name: artifact.name }, callId);
+      const requested = await client.waitFor(
+        "approval_requested",
+        (event) => event.payload.runtime_call_id === callId,
+      );
+      await decide(taskId, requested.payload.approval_id, "approve");
+      await pending;
+      turn.toolResult(callId, JSON.stringify({ artifact }));
+    }
+    turn.end();
+    await client.waitFor("task_finished");
+    const captured = rows<{ logical_name: string; capture_status: string; capture_reason: string }>(
+      "SELECT logical_name, capture_status, capture_reason FROM artifacts WHERE kind = 'tool_output' AND object_digest IS NULL AND external_locator = original_path ORDER BY logical_name",
+    );
+    expect(captured).toEqual([
+      { logical_name: "absent", capture_status: "missing", capture_reason: expect.any(String) },
+      { logical_name: "directory", capture_status: "failed", capture_reason: expect.any(String) },
+      {
+        logical_name: "external",
+        capture_status: "external_only",
+        capture_reason: expect.any(String),
+      },
+    ]);
+    const relations = rows<{ relation: string }>(
+      "SELECT l.relation FROM artifact_links l JOIN artifacts a ON a.id = l.artifact_id WHERE a.kind = 'tool_output' AND l.tool_call_id IS NOT NULL",
+    );
+    expect(relations).toEqual(Array.from({ length: 3 }, () => ({ relation: "tool_result" })));
+    expect(rows("SELECT id FROM artifact_links WHERE relation = 'task_output'")).toHaveLength(0);
+    expect(rows("SELECT id FROM events WHERE type = 'artifact_registered'")).toHaveLength(0);
+    expect(rows("SELECT id FROM events WHERE type = 'tool_result'")).toHaveLength(3);
   });
 });
