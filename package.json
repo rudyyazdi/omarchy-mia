@@ -34,6 +34,7 @@
     "test:unit": "vitest run --project unit"
   },
   "devDependencies": {
+    "@eslint-community/eslint-plugin-eslint-comments": "4.8.1",
     "@eslint/js": "10.0.1",
     "@types/node": "26.6.1",
     "@types/ws": "8.18.1",
