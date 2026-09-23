@@ -305,6 +305,8 @@ export const decideApproval = <Call extends CallFacts>(input: {
 
 export type InterruptionOutcome<Call extends CallFacts = CallFacts> =
   | { kind: "already_interrupting" }
+  /** The runtime already exited; its turn is being recorded as it ended, so there is nothing left to stop. */
+  | { kind: "runtime_ended" }
   | { kind: "invalid"; taskStatus: TaskStatus }
   | {
       kind: "interrupt";
@@ -318,10 +320,13 @@ export type InterruptionOutcome<Call extends CallFacts = CallFacts> =
 /** Close the gate, advance the epoch, and invalidate every pending approval without releasing its call. */
 export const decideInterruption = <Call extends CallFacts>(input: {
   taskStatus: TaskStatus;
+  /** The runtime's turn has ended, though the task is not yet recorded finished. */
+  runtimeEnded: boolean;
   conversationEpoch: number;
   pending: readonly { approvalId: string; call: Call }[];
 }): InterruptionOutcome<Call> => {
   if (input.taskStatus === "interrupting") return { kind: "already_interrupting" };
+  if (input.runtimeEnded) return { kind: "runtime_ended" };
   if (input.taskStatus !== "running" && input.taskStatus !== "awaiting_approval")
     return { kind: "invalid", taskStatus: input.taskStatus };
   return {
