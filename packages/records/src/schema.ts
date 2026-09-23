@@ -1,11 +1,5 @@
 import { z } from "zod";
-import type {
-  ApprovalStatus,
-  EventPayload,
-  TaskStatus,
-  ToolCallStatus,
-  ToolPolicy,
-} from "@mia/protocol";
+import type { ApprovalStatus, TaskStatus, ToolCallStatus, ToolPolicy } from "@mia/protocol";
 
 export type { ApprovalStatus } from "@mia/protocol";
 
@@ -274,11 +268,10 @@ export type ConversationStatus = "active" | "closed";
 export type ExecutionStatus = "running" | "completed" | "failed" | "killed";
 /** Missing configuration stays distinct from an explicit deny in the persisted policy audit. */
 export type ToolCallPolicy = ToolPolicy | "unlisted";
-export type ClientKind = "text-client" | "text";
+export type ClientKind = "text-client";
 /** Duplicate delivery is an acknowledgement, not a new persisted command outcome. */
-export type CommandDisposition = Exclude<EventPayload<"ack">["disposition"], "duplicate">;
-export type ArtifactKind =
-  "snapshot" | "tool_output" | "runtime_transcript" | "effort_evidence" | "output";
+export type CommandDisposition = "accepted" | "rejected";
+export type ArtifactKind = "snapshot" | "tool_output" | "runtime_transcript" | "effort_evidence";
 export type ProvenanceRole =
   | "agent_prompt"
   | "runtime_instructions"

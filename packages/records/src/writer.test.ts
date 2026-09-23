@@ -60,12 +60,12 @@ describe("record writer", () => {
 
   it("stores artifact bytes once and keeps distinct logical records", () => {
     const one = writer.registerArtifact({
-      kind: "output",
+      kind: "tool_output",
       logicalName: "a.txt",
       bytes: Buffer.from("same"),
     });
     const two = writer.registerArtifact({
-      kind: "output",
+      kind: "tool_output",
       logicalName: "b.txt",
       bytes: Buffer.from("same"),
     });
@@ -82,7 +82,7 @@ describe("record writer", () => {
       provenanceSetId: prov,
       runtimeConversationId: "rt-1",
     });
-    writer.ensureClient("client-1", "text");
+    writer.ensureClient("client-1", "text-client");
     writer.openConnection({ connectionId: "conn-1", clientId: "client-1", build: {} });
     const task = writer.createTask({ conversationId: conv.id, text: "t", clientId: "client-1" });
     const exec = writer.createExecution({
