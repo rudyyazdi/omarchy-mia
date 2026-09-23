@@ -22,6 +22,19 @@ export interface MiaClientOptions {
 
 export type AckPayload = ServerEventOf<"ack">["payload"];
 
+/**
+ * How long an operation may take is the caller's to decide: the client never creates a deadline, it only listens
+ * for `signal`, and an abort rejects the operation with the signal's reason.
+ */
+export interface Cancellable {
+  signal?: AbortSignal;
+}
+
+/** A command's options; a resend passes the original command's `messageId`. */
+export interface SendOptions extends Cancellable {
+  messageId?: string;
+}
+
 const isEventOf =
   <T extends ServerEventType>(type: T) =>
   (event: ServerEvent): event is ServerEventOf<T> =>
@@ -34,7 +47,7 @@ const isEventOf =
 export class MiaClient extends EventEmitter {
   readonly clientId: string;
   private socket: WebSocket | null = null;
-  // Each waiter settles exactly once: by its ack, its deadline, or the socket closing first.
+  // Each waiter settles exactly once: by its ack, its caller's signal, or the socket closing first.
   private pendingAcks = new Map<
     string,
     { acknowledge: (ack: AckPayload) => void; abandon: () => void }
@@ -54,7 +67,8 @@ export class MiaClient extends EventEmitter {
     return readFileSync(path, "utf8").trim();
   }
 
-  async connect(): Promise<void> {
+  async connect({ signal }: Cancellable = {}): Promise<void> {
+    signal?.throwIfAborted();
     this.connectionState = "connecting";
     const socket = new WebSocket(this.options.url, {
       headers: { authorization: `Bearer ${this.options.secret}` },
@@ -62,11 +76,26 @@ export class MiaClient extends EventEmitter {
     this.socket = socket;
     const { promise, resolve, reject } = Promise.withResolvers<undefined>();
     socket.once("open", () => resolve(undefined));
+    // Stays attached after an abort: terminating a connecting socket emits "error" on the next tick.
     socket.once("error", (error) => reject(error));
     socket.once("unexpected-response", (_, res) =>
       reject(new Error(`server refused the connection: HTTP ${res.statusCode}`)),
     );
-    await promise;
+    // An abort after "open" but before this resumes leaves the connection alone, since connect() resolves.
+    const onAbort = () => {
+      if (socket.readyState === WebSocket.CONNECTING) reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      await promise;
+    } catch (error) {
+      // A refused upgrade leaves the socket connecting; terminating one already closed does nothing.
+      socket.terminate();
+      this.connectionState = "disconnected";
+      throw error;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
     this.connectionState = "connected";
     socket.on("message", (data) => this.onMessage(data.toString("utf8")));
     socket.on("close", (code, reason) => {
@@ -122,11 +151,12 @@ export class MiaClient extends EventEmitter {
   send<T extends ClientCommand["type"]>(
     type: T,
     payload: Extract<ClientCommand, { type: T }>["payload"],
-    messageId = `cmd_${randomUUID()}`,
+    { messageId = `cmd_${randomUUID()}`, signal }: SendOptions = {},
   ): Promise<AckPayload> {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN)
       return Promise.reject(new Error("not connected"));
+    if (signal?.aborted) return Promise.reject(signal.reason);
     const envelope = {
       protocol_version: PROTOCOL_VERSION,
       message_id: messageId,
@@ -136,24 +166,28 @@ export class MiaClient extends EventEmitter {
     };
     this.recentInteractionIds.push(messageId);
     const { promise, resolve, reject } = Promise.withResolvers<AckPayload>();
-    const deadline = AbortSignal.timeout(30_000);
-    const onTimeout = () => {
-      this.pendingAcks.delete(messageId);
-      reject(new Error(`no acknowledgement for ${type} (${messageId}) within 30s`));
-    };
-    deadline.addEventListener("abort", onTimeout, { once: true });
-    this.pendingAcks.set(messageId, {
+    const waiter = {
       acknowledge: resolve,
       abandon: () =>
         reject(new Error(`connection closed before ${type} (${messageId}) was acknowledged`)),
-    });
+    };
+    // Removes only this send's waiter: a resend with the same id may have replaced it.
+    const forget = () => {
+      if (this.pendingAcks.get(messageId) === waiter) this.pendingAcks.delete(messageId);
+    };
+    const onAbort = () => {
+      forget();
+      reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    this.pendingAcks.set(messageId, waiter);
     try {
       socket.send(JSON.stringify(envelope));
     } catch (error) {
-      this.pendingAcks.delete(messageId);
+      forget();
       reject(error);
     }
-    return promise.finally(() => deadline.removeEventListener("abort", onTimeout));
+    return promise.finally(() => signal?.removeEventListener("abort", onAbort));
   }
 
   /** Send raw text (tests use this to exercise validation paths). */
@@ -173,8 +207,8 @@ export class MiaClient extends EventEmitter {
     };
   }
 
-  async startConversation(): Promise<string> {
-    const ack = await this.send("start_conversation", {});
+  async startConversation({ signal }: Cancellable = {}): Promise<string> {
+    const ack = await this.send("start_conversation", {}, { signal });
     if (ack.disposition === "rejected")
       throw new Error(`start_conversation rejected: ${ack.error?.code}: ${ack.error?.message}`);
     const fromResult = ack.result?.conversation_id;
@@ -184,76 +218,80 @@ export class MiaClient extends EventEmitter {
     return id;
   }
 
-  submitText(text: string, messageId?: string): Promise<AckPayload> {
+  submitText(text: string, options: SendOptions = {}): Promise<AckPayload> {
     if (!this.conversationId) throw new Error("no conversation");
-    return this.send("submit_text", { conversation_id: this.conversationId, text }, messageId);
+    return this.send("submit_text", { conversation_id: this.conversationId, text }, options);
   }
 
   decide({
     taskId,
     approvalId,
     decision,
-    messageId,
-  }: {
+    ...options
+  }: SendOptions & {
     taskId: string;
     approvalId: string;
     decision: Decision;
-    messageId?: string;
   }): Promise<AckPayload> {
     if (!this.conversationId) throw new Error("no conversation");
     return this.send(
       "approval_decision",
       { conversation_id: this.conversationId, task_id: taskId, approval_id: approvalId, decision },
-      messageId,
+      options,
     );
   }
 
-  interrupt(taskId: string, messageId?: string): Promise<AckPayload> {
+  interrupt(taskId: string, options: SendOptions = {}): Promise<AckPayload> {
     if (!this.conversationId) throw new Error("no conversation");
     return this.send(
       "interrupt_task",
       { conversation_id: this.conversationId, task_id: taskId },
-      messageId,
+      options,
     );
   }
 
-  sendDiagnostics(): Promise<AckPayload> {
-    return this.send("diagnostic_snapshot", {
-      conversation_id: this.conversationId,
-      diagnostics: this.diagnostics(),
-    });
+  sendDiagnostics({ signal }: Cancellable = {}): Promise<AckPayload> {
+    return this.send(
+      "diagnostic_snapshot",
+      { conversation_id: this.conversationId, diagnostics: this.diagnostics() },
+      { signal },
+    );
   }
 
-  heartbeat(): Promise<AckPayload> {
-    return this.send("heartbeat", {
-      conversation_id: this.conversationId,
-      captured_at: new Date().toISOString(),
-      connection_state: this.connectionState,
-    });
+  heartbeat({ signal }: Cancellable = {}): Promise<AckPayload> {
+    return this.send(
+      "heartbeat",
+      {
+        conversation_id: this.conversationId,
+        captured_at: new Date().toISOString(),
+        connection_state: this.connectionState,
+      },
+      { signal },
+    );
   }
 
   /** Wait for the next event of a type that satisfies the predicate. */
   waitFor<T extends ServerEventType>(
     type: T,
     predicate: (event: ServerEventOf<T>) => boolean = () => true,
-    timeoutMs = 120_000,
+    { signal }: Cancellable = {},
   ): Promise<ServerEventOf<T>> {
     const isWanted = isEventOf(type);
     const existing = this.events.find(
       (event): event is ServerEventOf<T> => isWanted(event) && predicate(event),
     );
     if (existing) return Promise.resolve(existing);
+    if (signal?.aborted) return Promise.reject(signal.reason);
     const channel = type === "error" ? "server_error" : type;
     const { promise, resolve, reject } = Promise.withResolvers<ServerEventOf<T>>();
-    const deadline = AbortSignal.timeout(timeoutMs);
-    const onTimeout = () => reject(new Error(`timed out waiting for ${type}`));
+    const onAbort = () => reject(signal?.reason);
     const handler = (event: ServerEvent) => {
       if (isWanted(event) && predicate(event)) resolve(event);
     };
-    deadline.addEventListener("abort", onTimeout, { once: true });
+    signal?.addEventListener("abort", onAbort, { once: true });
     this.on(channel, handler);
     return promise.finally(() => {
-      deadline.removeEventListener("abort", onTimeout);
+      signal?.removeEventListener("abort", onAbort);
       this.off(channel, handler);
     });
   }

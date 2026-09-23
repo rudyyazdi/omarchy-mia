@@ -26,7 +26,7 @@ const submit = async (
   messageId?: string,
 ): Promise<{ turn: ScriptedTurn; taskId: string }> => {
   const next = runtime.nextTurn();
-  const ack = await client.submitText(text, messageId);
+  const ack = await client.submitText(text, { messageId });
   expect(ack.disposition).toBe("accepted");
   const turn = await next;
   return { turn, taskId: mustString(ack.result?.task_id, "ack task_id") };
@@ -107,11 +107,11 @@ describe("streaming and commands", () => {
     );
     expect([...seqs].sort((left, right) => left - right)).toEqual(seqs);
     // resend with the same message id: duplicate disposition, no new task
-    const dup = await client.submitText("hello", "cmd-1");
+    const dup = await client.submitText("hello", { messageId: "cmd-1" });
     expect(dup.disposition).toBe("duplicate");
     expect(runtime.turns).toHaveLength(1);
     // same id, different payload: conflict, nothing executed
-    const conflict = await client.submitText("different", "cmd-1");
+    const conflict = await client.submitText("different", { messageId: "cmd-1" });
     expect(conflict.disposition).toBe("rejected");
     expect(conflict.error?.code).toBe("duplicate_command_conflict");
     expect(rows("SELECT id FROM tasks")).toHaveLength(1);

@@ -1,6 +1,11 @@
 import { Command } from "commander";
 import { errorMessage } from "@mia/protocol";
-import { runTextClient, type ConnectionOptions } from "./repl.ts";
+import { runTextClient, type ConnectionOptions, type TextClientDeadlines } from "./repl.ts";
+
+const deadlines: TextClientDeadlines = {
+  connect: () => AbortSignal.timeout(10_000),
+  ack: () => AbortSignal.timeout(30_000),
+};
 
 /**
  * Bad arguments exit 2 with commander's own help on stderr: the option list and the argument
@@ -35,7 +40,7 @@ const connection = (): ConnectionOptions => {
   return usage();
 };
 
-runTextClient(connection(), { input: process.stdin, output: process.stdout }).then(
+runTextClient(connection(), { input: process.stdin, output: process.stdout }, deadlines).then(
   () => process.exit(0),
   (error: unknown) => {
     console.error(`mia-client: ${errorMessage(error)}`);
