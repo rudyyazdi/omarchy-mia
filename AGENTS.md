@@ -5,7 +5,6 @@ This file contains the guidelines for contributing to this codebase. It holds no
 ## Style
 
 - No non-null assertions (`!`) and no type casts (`as T`, `<T>x`, `as unknown as`); when one is genuinely unavoidable (typically at an I/O boundary such as a SQLite row or `JSON.parse`), add `// eslint-disable-next-line <rule> -- <why>` on that one line so the reason is recorded.
-- Internal types and variables are camelCase; snake_case appears only on wire-format payloads in `@mia/protocol` and on data received from the runtime, mapped once at the boundary.
 - No single-letter identifiers other than property names, not even as arrow parameters (`(event) => event.id`, never `(e) => e.id`); `_` marks an ignored value.
 - Standalone functions are arrow functions assigned to `const`, and callbacks are arrow functions; class methods stay methods. Functions take at most three parameters; pass an object beyond that.
 - Dispatch on a discriminated union uses `match()` from ts-pattern with `.exhaustive()`, never `switch`. No nested ternaries.
