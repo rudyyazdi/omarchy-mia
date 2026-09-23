@@ -2,26 +2,16 @@
  * mia debug: read-only inspection of the private conversation catalog. Works offline, never contacts a
  * runtime or provider, never approves or replays anything.
  */
-import { resolve } from "node:path";
 import { Command } from "commander";
 import {
-  Catalog,
-  defaultStateDir,
-  exportConversation,
-  listConversations,
-  reconcileObjects,
-  snapshotConversation,
-  taskViews,
-  diagnosticsViews,
-  verifyExport,
-  type ConversationSnapshot,
-} from "@mia/records";
-
-interface GlobalOptions {
-  state?: string;
-  output?: string;
-  json: boolean;
-}
+  exportToDirectory,
+  reconcile,
+  showArtifacts,
+  showConversation,
+  showConversations,
+  verifyExportDirectory,
+  type GlobalOptions,
+} from "./commands.ts";
 
 /**
  * Bad arguments exit 2 with commander's own help for `mia debug` on stderr, which lists the
@@ -31,9 +21,6 @@ const usage: () => never = () => {
   console.error(debug.helpInformation());
   process.exit(2);
 };
-
-const out = (value: unknown) =>
-  console.log(typeof value === "string" ? value : JSON.stringify(value, null, 2));
 
 const program = new Command()
   .name("mia")
@@ -46,140 +33,24 @@ const program = new Command()
   })
   .configureOutput({ writeErr: () => undefined })
   .configureHelp({ showGlobalOptions: true });
-
 const options = () => program.opts<GlobalOptions>();
-const stateDir = () => resolve(options().state ?? defaultStateDir());
-
-/** Open the catalog for one command, read-only unless the command writes, and always close it. */
-const withCatalog = (readonly: boolean, run: (catalog: Catalog) => void): void => {
-  const catalog = new Catalog(stateDir(), { readonly });
-  try {
-    run(catalog);
-  } finally {
-    catalog.close();
-  }
-};
-
-const printConversation = (snapshot: ConversationSnapshot): void => {
-  const conv = snapshot.tables.conversations[0];
-  if (!conv) throw new Error(`conversation ${snapshot.conversation_id} has no catalog row`);
-  out(
-    `conversation ${conv.id}  started ${conv.started_at}  status ${conv.status}  cutoff seq ${snapshot.cutoff_sequence}`,
-  );
-  out(`provenance:`);
-  for (const entry of snapshot.tables.provenance_entries)
-    out(
-      `  ${entry.role}: ${entry.availability}${entry.version ? ` v=${entry.version}` : ""}${entry.artifact_id ? ` artifact=${entry.artifact_id}` : ""}${entry.reason ? ` (${entry.reason})` : ""}`,
-    );
-  for (const execution of snapshot.tables.executions)
-    out(
-      `execution ${execution.id} task=${execution.task_id} epoch=${execution.execution_epoch} model requested=${execution.requested_model} reported=${execution.reported_model ?? "unreported"} effort requested=${execution.requested_effort} reported=${execution.reported_effort ?? "unverified"} status=${execution.status}`,
-    );
-  for (const task of taskViews(snapshot)) {
-    out(`\n== task ${task.id} [${task.status}] ${task.created_at}`);
-    out(`user> ${task.text}`);
-    out(`agent${task.partial ? " (partial)" : ""}> ${task.assistant_text || "(no text)"}`);
-    for (const call of task.tool_calls)
-      out(
-        `  tool ${call.tool_identity} call=${call.runtime_call_id} rev=${call.binding_revision} policy=${call.policy} status=${call.status}${call.detail ? ` (${call.detail})` : ""} approvals=${JSON.stringify(call.approvals.map((approval) => `${approval.id}:${approval.status}`))}`,
-      );
-    if (task.interruption) out(`  interruption: ${JSON.stringify(task.interruption)}`);
-    for (const event of task.errors) out(`  ${event.type}: ${event.payload}`);
-  }
-  out(`\ndiagnostics:`);
-  for (const diagnostics of diagnosticsViews(snapshot))
-    out(
-      `  ${diagnostics.received_at} client=${diagnostics.client_id} ${diagnostics.freshness} ${JSON.stringify(diagnostics.state).slice(0, 160)}`,
-    );
-  if (snapshot.unresolved_references.length)
-    out(`unresolved references: ${JSON.stringify(snapshot.unresolved_references)}`);
-};
-
-const printArtifacts = (snapshot: ConversationSnapshot): void => {
-  for (const artifact of snapshot.tables.artifacts)
-    out(
-      `${artifact.id}  ${artifact.kind}  ${artifact.logical_name}  ${artifact.capture_status}  ${artifact.byte_size ?? "-"}B  ${artifact.object_digest ?? "no object"}${artifact.capture_reason ? `  (${artifact.capture_reason})` : ""}`,
-    );
-  out(
-    `links: ${snapshot.tables.artifact_links.length}, dependencies: ${snapshot.tables.artifact_dependencies.length}, objects: ${snapshot.tables.objects.length}`,
-  );
-};
 
 const debug = program.command("debug").allowExcessArguments();
+const subcommand = (spec: string) => debug.command(spec).allowExcessArguments();
 
-/** Register a subcommand that reads one conversation snapshot and renders it, as JSON on `--json`. */
-const snapshotCommand = (
-  name: string,
-  render: {
-    json: (snapshot: ConversationSnapshot) => unknown;
-    text: (snapshot: ConversationSnapshot) => void;
-  },
-): void => {
-  debug
-    .command(`${name} <conversation-id>`)
-    .allowExcessArguments()
-    .action((conversationId: string) =>
-      withCatalog(true, (catalog) => {
-        const snapshot = snapshotConversation(catalog, conversationId);
-        if (options().json) out(render.json(snapshot));
-        else render.text(snapshot);
-      }),
-    );
-};
-
-debug
-  .command("conversations")
-  .allowExcessArguments()
-  .action(() =>
-    withCatalog(true, (catalog) => {
-      const list = listConversations(catalog);
-      if (options().json) out(list);
-      else
-        for (const conversation of list)
-          out(
-            `${conversation.started_at}  ${conversation.id}  ${conversation.status}  tasks=${conversation.task_count}  events=${conversation.last_sequence}`,
-          );
-    }),
-  );
-
-snapshotCommand("conversation", { json: (snapshot) => snapshot, text: printConversation });
-
-snapshotCommand("artifacts", {
-  json: (snapshot) => ({
-    artifacts: snapshot.tables.artifacts,
-    links: snapshot.tables.artifact_links,
-    dependencies: snapshot.tables.artifact_dependencies,
-    objects: snapshot.tables.objects,
-  }),
-  text: printArtifacts,
+subcommand("conversations").action(() => showConversations(options()));
+subcommand("conversation <conversation-id>").action((id: string) =>
+  showConversation(options(), id),
+);
+subcommand("artifacts <conversation-id>").action((id: string) => showArtifacts(options(), id));
+subcommand("export <conversation-id>").action((id: string) => {
+  const { output, ...rest } = options();
+  if (!output) usage();
+  exportToDirectory({ ...rest, output }, id);
 });
-
-debug
-  .command("export <conversation-id>")
-  .allowExcessArguments()
-  .action((conversationId: string) => {
-    const { output } = options();
-    if (!output) usage();
-    withCatalog(false, (catalog) => {
-      const result = exportConversation(catalog, conversationId, resolve(output));
-      out(
-        `exported to ${result.directory}; complete=${result.manifest.complete}; events=${result.manifest.record_counts.events}; objects=${result.manifest.objects.included}${result.manifest.partial_reasons.length ? `; partial: ${result.manifest.partial_reasons.join(", ")}` : ""}`,
-      );
-    });
-  });
-
-debug
-  .command("verify <export-directory>")
-  .allowExcessArguments()
-  .action((exportDirectory: string) => {
-    const result = verifyExport(resolve(exportDirectory));
-    out(result);
-    process.exit(result.ok ? 0 : 1);
-  });
-
-debug
-  .command("reconcile")
-  .allowExcessArguments()
-  .action(() => withCatalog(false, (catalog) => out(reconcileObjects(catalog))));
+subcommand("verify <export-directory>").action((directory: string) =>
+  process.exit(verifyExportDirectory(directory) ? 0 : 1),
+);
+subcommand("reconcile").action(() => reconcile(options()));
 
 program.parse();
