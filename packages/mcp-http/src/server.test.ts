@@ -1,8 +1,12 @@
+import { subscribe, unsubscribe } from "node:diagnostics_channel";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import { Agent, request } from "node:http";
+import { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readLogEntries } from "./log-fixture.ts";
 import {
   McpServer,
   startMcpHttpServer,
@@ -45,6 +49,30 @@ const initializeRequest = (clientName = "mcp-http-test") => ({
 
 const initialize = (url: string) => post(url, initializeRequest());
 
+/** POSTs an initialize request through `agent` and resolves with the status once the body is read. */
+const initializeThrough = async (url: string, agent: Agent): Promise<number> => {
+  const response = Promise.withResolvers<number>();
+  const outgoing = request(
+    url,
+    {
+      method: "POST",
+      agent,
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+    },
+    (incoming) => {
+      incoming.resume();
+      incoming.once("end", () => response.resolve(incoming.statusCode ?? 0));
+      incoming.once("error", response.reject);
+    },
+  );
+  outgoing.once("error", response.reject);
+  outgoing.end(JSON.stringify(initializeRequest()));
+  return response.promise;
+};
+
 const bodyLimitBytes = 4 * 1024 * 1024;
 
 /** A valid initialize request whose JSON is exactly `bytes` long, so only its size can refuse it. */
@@ -58,10 +86,11 @@ const holdRequest = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { nam
  * resolves with the request's context once the tool is running; `contexts` has every request's.
  * The server is also stored in `handle`, so `afterEach` closes it even when the test fails.
  */
-const startHoldingServer = async () => {
+const startHoldingServer = async (options: { logFile?: string } = {}) => {
   const entered = Promise.withResolvers<McpRequestContext>();
   const contexts: McpRequestContext[] = [];
   const started = await startMcpHttpServer({
+    logFile: options.logFile,
     createServer: (ctx) => {
       contexts.push(ctx);
       const server = new McpServer({ name: "mcp-http-test", version: "0" });
@@ -84,11 +113,15 @@ const startHoldingServer = async () => {
 
 describe("MCP HTTP server", () => {
   it("keeps serving when its request log cannot be written", async () => {
-    // A directory cannot be appended to, so every log write fails with EISDIR.
+    // A directory cannot be opened for appending, so the log fails with EISDIR.
     const failures: unknown[] = [];
+    const reported = Promise.withResolvers<undefined>();
     handle = await startMcpHttpServer({
       logFile: dir,
-      reportLogFailure: (error) => failures.push(error),
+      reportLogFailure: (error) => {
+        failures.push(error);
+        reported.resolve(undefined);
+      },
       createServer: () => new McpServer({ name: "mcp-http-test", version: "0" }),
     });
 
@@ -100,8 +133,79 @@ describe("MCP HTTP server", () => {
     expect(refused.status).toBe(405);
     await refused.body?.cancel();
 
+    await reported.promise;
+    await handle.close();
+    handle = undefined;
     expect(failures).toHaveLength(1);
     expect(failures[0]).toMatchObject({ code: "EISDIR" });
+  });
+
+  it("does not pile up socket listeners across requests on a kept-alive connection", async () => {
+    // Node publishes each request the server starts, with its socket, on this channel.
+    const sockets = new Set<Socket>();
+    const errorListenersAtStart: number[] = [];
+    const onRequestStart = (message: unknown) => {
+      if (typeof message !== "object" || message === null || !("socket" in message)) return;
+      if (!(message.socket instanceof Socket)) return;
+      sockets.add(message.socket);
+      errorListenersAtStart.push(message.socket.listenerCount("error"));
+    };
+    // One socket, kept alive, so every request arrives on the same connection.
+    const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+    subscribe("http.server.request.start", onRequestStart);
+    try {
+      handle = await startMcpHttpServer({
+        logFile: join(dir, "requests.jsonl"),
+        createServer: () => new McpServer({ name: "mcp-http-test", version: "0" }),
+      });
+      const statuses: number[] = [];
+      for (const _ of Array.from({ length: 12 }))
+        statuses.push(await initializeThrough(handle.url, agent));
+      expect(statuses).toEqual(Array.from({ length: 12 }, () => 200));
+    } finally {
+      agent.destroy();
+      unsubscribe("http.server.request.start", onRequestStart);
+    }
+    expect(sockets.size).toBe(1);
+    expect(errorListenersAtStart).toEqual(
+      Array.from({ length: 12 }, () => errorListenersAtStart[0]),
+    );
+  });
+
+  it("writes every request's log lines by the time it closes", async () => {
+    const logFile = join(dir, "requests.jsonl");
+    handle = await startMcpHttpServer({
+      logFile,
+      createServer: () => new McpServer({ name: "mcp-http-test", version: "0" }),
+    });
+    const initialized = await initialize(handle.url);
+    await initialized.text();
+    await handle.close();
+    handle = undefined;
+
+    const entries: unknown[] = await readLogEntries(logFile);
+    expect(entries).toEqual([
+      expect.objectContaining({ ev: "request", req: 1, rpc_method: "initialize" }),
+      expect.objectContaining({ ev: "finish", req: 1, status: 200 }),
+      expect.objectContaining({ ev: "close", req: 1, finished: true }),
+    ]);
+  });
+
+  it("writes the close line of a request that shutdown cuts off", async () => {
+    const logFile = join(dir, "requests.jsonl");
+    const { handle: server, entered } = await startHoldingServer({ logFile });
+
+    const call = post(server.url, holdRequest).then((response) => response.text());
+    const refused = expect(call).rejects.toThrow();
+    const ctx = await entered;
+    await server.close();
+    handle = undefined;
+    await refused;
+
+    const entries: unknown[] = await readLogEntries(logFile);
+    expect(entries).toContainEqual(
+      expect.objectContaining({ ev: "close", req: ctx.requestId, finished: false }),
+    );
   });
 
   it("answers 500 when a request fails, and keeps serving", async () => {
@@ -196,10 +300,7 @@ describe("MCP HTTP server", () => {
     expect(oversized.status).toBe(413);
     await oversized.body?.cancel();
 
-    const entries: unknown[] = (await readFile(logFile, "utf8"))
-      .trimEnd()
-      .split("\n")
-      .map((line) => JSON.parse(line));
+    const entries: unknown[] = await readLogEntries(logFile);
     expect(entries).toContainEqual(
       expect.objectContaining({
         ev: "request",

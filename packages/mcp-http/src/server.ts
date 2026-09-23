@@ -17,7 +17,8 @@ export interface McpHttpServerOptions {
   port?: number;
   /**
    * JSON-lines file for request/response lifecycle diagnostics; unset or empty logs nothing.
-   * A write failure is reported once on stderr and turns logging off; it never fails a request.
+   * Lines are written in the background and are all on disk once `close` resolves. A write failure
+   * is reported once on stderr and turns logging off; it never fails a request.
    */
   logFile?: string;
   /** Receives the request log's first failed write; defaults to a line on stderr. */
@@ -99,9 +100,15 @@ export const startMcpHttpServer = async (
   const requestLog =
     logFile === undefined || logFile === ""
       ? undefined
-      : createRequestLog(logFile, reportLogFailure);
-  const log = (entry: Record<string, unknown>) =>
-    requestLog?.({ at: new Date().toISOString(), port: boundPort, ...entry });
+      : createRequestLog({
+          file: logFile,
+          reportFailure: reportLogFailure,
+          stamp: () => ({ at: new Date().toISOString(), port: boundPort }),
+        });
+  const log = (entry: Record<string, unknown>) => requestLog?.write(entry);
+  // Logged responses whose close line is not written yet, so close() can wait for them before
+  // closing the log. One entry per response in progress: bounded by what the server is serving.
+  const openResponses = new Set<ServerResponse>();
 
   const handleRequest = async (
     req: IncomingMessage,
@@ -173,18 +180,23 @@ export const startMcpHttpServer = async (
       res.on("finish", () =>
         log({ ev: "finish", req: reqNo, status: res.statusCode, ms: Date.now() - startedAt }),
       );
-      res.on("close", () =>
+      openResponses.add(res);
+      res.on("close", () => {
+        openResponses.delete(res);
         log({
           ev: "close",
           req: reqNo,
           status: res.statusCode,
           finished: res.writableFinished,
           ms: Date.now() - startedAt,
-        }),
-      );
-      req.socket.once("error", (socketError) =>
-        log({ ev: "socket_error", req: reqNo, error: String(socketError) }),
-      );
+        });
+      });
+      // A kept-alive socket outlives its request: remove the listener with the response, or
+      // every request on the connection adds one more.
+      const onSocketError = (socketError: Error) =>
+        log({ ev: "socket_error", req: reqNo, error: String(socketError) });
+      req.socket.once("error", onSocketError);
+      res.once("close", () => req.socket.off("error", onSocketError));
     }
     const closeController = new AbortController();
     let completed = false;
@@ -219,10 +231,18 @@ export const startMcpHttpServer = async (
   const listening = Promise.withResolvers<undefined>();
   httpServer.once("error", listening.reject);
   httpServer.listen(options.port ?? 0, host, () => listening.resolve(undefined));
-  await listening.promise;
+  try {
+    await listening.promise;
+  } catch (error) {
+    await requestLog?.close();
+    throw error;
+  }
   const address = httpServer.address();
-  if (address === null || typeof address === "string")
+  if (address === null || typeof address === "string") {
+    httpServer.close();
+    await requestLog?.close();
     throw new Error("MCP HTTP server did not bind a TCP address");
+  }
   boundPort = address.port;
   return {
     url: `http://${host}:${address.port}${path}`,
@@ -232,7 +252,10 @@ export const startMcpHttpServer = async (
       const closed = once(httpServer, "close");
       httpServer.closeAllConnections();
       httpServer.close();
-      await closed;
+      // The server closes before the destroyed sockets do, so wait for the responses they carried:
+      // a request cut off by shutdown still gets its close line.
+      await Promise.all([closed, ...[...openResponses].map((res) => once(res, "close"))]);
+      await requestLog?.close();
     },
   };
 };
