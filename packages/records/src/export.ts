@@ -6,13 +6,14 @@ import {
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, join } from "node:path";
 import { sha256Hex } from "@mia/protocol";
+import { match } from "ts-pattern";
 import { z } from "zod";
 import { parseJson, type Catalog } from "./catalog.ts";
+import { ExportFiles } from "./export-files.ts";
 import { ObjectStore } from "./objects.ts";
 import { snapshotConversation, UnresolvedReferenceSchema } from "./queries.ts";
 import { renderReport } from "./report.ts";
@@ -214,13 +215,6 @@ export interface VerificationResult {
   checked_objects: number;
 }
 
-/** Every regular file below dir, as absolute paths. */
-const walk = (dir: string): string[] =>
-  readdirSync(dir).flatMap((name) => {
-    const path = join(dir, name);
-    return statSync(path).isDirectory() ? walk(path) : [path];
-  });
-
 const idsOf = (rows: { id: string }[]): Set<string> => new Set(rows.map((row) => row.id));
 
 const failedVerification = (problem: string): VerificationResult => ({
@@ -239,11 +233,29 @@ const RecordIdSchema = z.object({ id: z.string() }) satisfies z.ZodType<Pick<Tas
 /** Verify an export offline: file checksums, object digests, referential integrity, report safety. */
 export const verifyExport = (dir: string): VerificationResult => {
   const problems: string[] = [];
-  const manifestPath = join(dir, "manifest.json");
-  if (!existsSync(manifestPath)) return failedVerification("manifest.json missing");
+  let files: ExportFiles;
+  try {
+    files = new ExportFiles(dir);
+  } catch {
+    return failedVerification("export directory unreadable");
+  }
+  const readFile = (name: string, missingProblem: string | null = `file missing: ${name}`) =>
+    match(files.read(name))
+      .with({ status: "read" }, ({ bytes }) => bytes)
+      .with({ status: "missing" }, () => {
+        if (missingProblem) problems.push(missingProblem);
+        return null;
+      })
+      .with({ status: "invalid" }, ({ problem }) => {
+        problems.push(problem);
+        return null;
+      })
+      .exhaustive();
+  const manifestBytes = readFile("manifest.json", "manifest.json missing");
+  if (!manifestBytes) return failedVerification(problems[0] ?? "manifest.json unreadable");
   let manifestJson: unknown;
   try {
-    manifestJson = parseJson(readFileSync(manifestPath, "utf8"));
+    manifestJson = parseJson(manifestBytes.toString("utf8"));
   } catch {
     return failedVerification("manifest.json invalid: unreadable or not JSON");
   }
@@ -264,27 +276,24 @@ export const verifyExport = (dir: string): VerificationResult => {
   const manifest = parsed.data;
   let checkedFiles = 0;
   for (const [rel, expected] of Object.entries(manifest.files)) {
-    const path = join(dir, rel);
-    if (!existsSync(path)) {
-      problems.push(`file missing: ${rel}`);
-      continue;
-    }
-    const bytes = readFileSync(path);
+    const bytes = readFile(rel);
+    if (!bytes) continue;
     if (bytes.byteLength !== expected.bytes || sha256Hex(bytes) !== expected.sha256)
       problems.push(`checksum mismatch: ${rel}`);
     checkedFiles++;
   }
   // Every file present must be listed (except manifest itself).
-  for (const file of walk(dir)) {
-    const rel = relative(dir, file);
+  const inventory = files.inventory();
+  problems.push(...inventory.problems);
+  for (const rel of inventory.files) {
     if (rel !== "manifest.json" && !manifest.files[rel]) problems.push(`unlisted file: ${rel}`);
   }
   // Validate only row identities and fields used below, not the full catalog schemas.
   const readTable = <Row>(table: ExportTable, schema: z.ZodType<Row>): Row[] => {
-    const path = join(dir, tableFile(table));
+    const bytes = readFile(tableFile(table), null);
     const rows: Row[] = [];
-    if (existsSync(path)) {
-      for (const line of readFileSync(path, "utf8").split("\n").filter(Boolean)) {
+    if (bytes) {
+      for (const line of bytes.toString("utf8").split("\n").filter(Boolean)) {
         try {
           const parsedRow = schema.safeParse(parseJson(line));
           if (parsedRow.success) rows.push(parsedRow.data);
@@ -408,17 +417,19 @@ export const verifyExport = (dir: string): VerificationResult => {
     }
     if (!objectDigests.has(digest))
       problems.push(`artifact ${artifact.id} digest not in objects table`);
-    const path = join(dir, "objects", "sha256", digest.slice(0, 2), digest);
-    if (!existsSync(path)) {
-      if (!manifest.objects.missing.includes(digest) && !manifest.objects.corrupt.includes(digest))
-        problems.push(`object bytes missing and not declared: ${digest}`);
-      continue;
-    }
-    if (sha256Hex(readFileSync(path)) !== digest) problems.push(`object corrupt: ${digest}`);
+    // Keep raw segments until the filesystem boundary has rejected parent traversal.
+    const name = `objects/sha256/${digest.slice(0, 2)}/${digest}`;
+    const declaredUnavailable =
+      manifest.objects.missing.includes(digest) || manifest.objects.corrupt.includes(digest);
+    const bytes = readFile(
+      name,
+      declaredUnavailable ? null : `object bytes missing and not declared: ${digest}`,
+    );
+    if (!bytes) continue;
+    if (sha256Hex(bytes) !== digest) problems.push(`object corrupt: ${digest}`);
     checkedObjects++;
   }
-  const reportPath = join(dir, "report.html");
-  const report = existsSync(reportPath) ? readFileSync(reportPath, "utf8") : null;
+  const report = readFile("report.html", null)?.toString("utf8");
   if (!report) problems.push("report.html missing");
   else {
     if (/<script\b/i.test(report)) problems.push("report contains a script tag");
