@@ -71,4 +71,26 @@ describe("validateRuntimeConfig", () => {
     const validate = () => validateRuntimeConfig({ ...validRuntime(), env: { [key]: "value" } });
     expect(validate).toThrow(`found key ${key}`);
   });
+
+  it.each(["MAX_THINKING_TOKENS", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"])(
+    "accepts %s, a token count written in digits",
+    (key) => {
+      expect(() =>
+        validateRuntimeConfig({ ...validRuntime(), env: { [key]: "8000" } }),
+      ).not.toThrow();
+    },
+  );
+
+  it.each([
+    ["GITHUB_TOKEN", "8000"],
+    ["API_TOKENS", "abc"],
+    ["MAX_THINKING_TOKENS", ""],
+    ["MAX_THINKING_TOKENS", "8000 abc"],
+    ["MAX_THINKING_TOKENS", "1234567890"],
+    ["SECRET_TOKENS", "12345678"],
+    ["DB_PASSWORD_TOKENS", "424242"],
+  ])("rejects %s=%j, which is not a token count", (key, value) => {
+    const validate = () => validateRuntimeConfig({ ...validRuntime(), env: { [key]: value } });
+    expect(validate).toThrow(`found key ${key}`);
+  });
 });
