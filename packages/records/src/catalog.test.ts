@@ -19,6 +19,13 @@ describe("defaultStateDir", () => {
   });
 });
 
+/** Leave a catalog at `path` whose stored schema version is one this code does not know. */
+const storeNextSchemaVersion = (path: string): void => {
+  const writer = Catalog.openSync(path);
+  writer.db.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION + 1);
+  writer.close();
+};
+
 describe("read-only catalog", () => {
   it("opens a catalog at the current schema version", () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-catalog-"));
@@ -30,9 +37,7 @@ describe("read-only catalog", () => {
 
   it("refuses a catalog at another schema version, as a writable open does", () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-catalog-"));
-    const writer = Catalog.openSync(directory.path);
-    writer.db.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION + 1);
-    writer.close();
+    storeNextSchemaVersion(directory.path);
     const mismatch = `catalog schema version ${SCHEMA_VERSION + 1} does not match ${SCHEMA_VERSION}`;
     expect(() => Catalog.openSync(directory.path, { readonly: true })).toThrow(mismatch);
     expect(() => Catalog.openSync(directory.path)).toThrow(mismatch);
@@ -40,9 +45,7 @@ describe("read-only catalog", () => {
 
   it("closes the database when a writable open fails", () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-catalog-"));
-    const writer = Catalog.openSync(directory.path);
-    writer.db.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION + 1);
-    writer.close();
+    storeNextSchemaVersion(directory.path);
     expect(() => Catalog.openSync(directory.path)).toThrow("does not match");
     // SQLite removes the write-ahead log when the last connection closes; a leaked connection keeps it.
     expect(existsSync(join(directory.path, "catalog.sqlite-wal"))).toBe(false);
