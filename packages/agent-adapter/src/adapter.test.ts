@@ -1,5 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempDisposableSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempDisposableSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -8,8 +15,28 @@ import {
   hookEvidenceFrom,
   probeStaticCapabilities,
   readRuntimeFile,
+  writeLaunchFiles,
   type RuntimeFileRead,
 } from "./adapter.ts";
+
+describe("writeLaunchFiles", () => {
+  it("creates the planned directories and files, owner-only, with the planned contents", async () => {
+    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-launch-files-"));
+    const runtimeDir = join(directory.path, "conversation", "runtime");
+    const workingDirectory = join(directory.path, "work");
+    const settings = join(runtimeDir, "settings.json");
+    await writeLaunchFiles({
+      directories: [runtimeDir, workingDirectory],
+      files: [{ path: settings, content: "{}" }],
+    });
+    for (const created of [runtimeDir, workingDirectory]) {
+      expect(statSync(created).isDirectory()).toBe(true);
+      expect(statSync(created).mode & 0o077).toBe(0);
+    }
+    expect(readFileSync(settings, "utf8")).toBe("{}");
+    expect(statSync(settings).mode & 0o077).toBe(0);
+  });
+});
 
 describe("readRuntimeFile", () => {
   it("reports a FIFO as not a regular file without waiting for a writer, however many are read", async () => {

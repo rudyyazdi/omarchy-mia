@@ -16,6 +16,7 @@ export {
   hookEvidenceFrom,
   probeStaticCapabilities,
   readRuntimeFile,
+  writeLaunchFiles,
 } from "./adapter.ts";
 export type {
   HookEvidence,

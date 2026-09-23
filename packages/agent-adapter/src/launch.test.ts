@@ -1,4 +1,4 @@
-import { mkdtempDisposableSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempDisposableSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -61,6 +61,22 @@ describe("launch plan", () => {
       MCP_TOOL_TIMEOUT: String(MCP_TOOL_TIMEOUT_MS),
       CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: String(MCP_TOOL_TIMEOUT_MS),
     });
+  });
+
+  it("writes nothing itself, and plans the directories and files its arguments refer to", () => {
+    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-launch-"));
+    const plan = planIn(directory.path, {});
+    const runtimeDir = join(directory.path, "runtime");
+    const workingDirectory = join(directory.path, "work");
+    expect(existsSync(runtimeDir)).toBe(false);
+    expect(existsSync(workingDirectory)).toBe(false);
+
+    expect(plan.cwd).toBe(workingDirectory);
+    expect(plan.setup.directories).toEqual([runtimeDir, workingDirectory]);
+    const argAfter = (flag: string): string => plan.args[plan.args.indexOf(flag) + 1] ?? "";
+    const planned = new Map(plan.setup.files.map((file) => [file.path, JSON.parse(file.content)]));
+    expect(planned.get(argAfter("--mcp-config"))).toEqual(plan.description.mcp_config);
+    expect(planned.get(argAfter("--settings"))).toEqual(plan.description.settings);
   });
 
   it("turns on runtime debug logging only when the given environment sets MIA_RUNTIME_DEBUG", () => {

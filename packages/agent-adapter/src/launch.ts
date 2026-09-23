@@ -1,4 +1,3 @@
-import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { BRIDGE_SERVER_NAME, BRIDGE_TOOL_IDENTITY } from "./bridge.ts";
 import type { Effort } from "@mia/protocol";
@@ -10,6 +9,8 @@ export interface LaunchPlan {
   env: Record<string, string>;
   cwd: string;
   files: { mcpConfig: string; settings: string; hookEvidence: string };
+  /** What must exist before the runtime starts; `prepareLaunch` writes nothing, `writeLaunchFiles` creates it. */
+  setup: LaunchSetup;
   /** Redacted, retained description of what was launched (no secrets, no argv prompt). */
   description: {
     model: string;
@@ -22,6 +23,12 @@ export interface LaunchPlan {
     settings: unknown;
     mcp_config: unknown;
   };
+}
+
+/** Directories (owner-only) to create, in order, then files (owner-only) to write into them. */
+export interface LaunchSetup {
+  directories: string[];
+  files: { path: string; content: string }[];
 }
 
 export const HOOK_SCRIPT_PATH = join(import.meta.dirname, "hook-capture.mjs");
@@ -68,12 +75,11 @@ export const runtimeEnvironment = (
 
 /**
  * Build the exact runtime invocation. Mia decides everything explicitly: model, effort, tool surface,
- * MCP wiring, permission rules and the approval tool. The prompt text goes on stdin, never argv.
+ * MCP wiring, permission rules and the approval tool. The prompt text goes on stdin, never argv. It does no I/O:
+ * the directories and config files the invocation refers to are returned in `setup` for the caller to write.
  */
 export const prepareLaunch = (input: LaunchInput): LaunchPlan => {
   const { config, runtimeDir, bridgeUrl, sessionId, resume } = input;
-  mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
-  mkdirSync(config.workingDirectory, { recursive: true, mode: 0o700 });
 
   const mcpConfig = {
     mcpServers: {
@@ -117,8 +123,6 @@ export const prepareLaunch = (input: LaunchInput): LaunchPlan => {
   };
   const mcpConfigPath = join(runtimeDir, "mcp.json");
   const settingsPath = join(runtimeDir, "settings.json");
-  writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), { mode: 0o600 });
-  writeFileSync(settingsPath, JSON.stringify(settings, null, 2), { mode: 0o600 });
 
   const args = [
     "-p",
@@ -162,6 +166,13 @@ export const prepareLaunch = (input: LaunchInput): LaunchPlan => {
     env,
     cwd: config.workingDirectory,
     files: { mcpConfig: mcpConfigPath, settings: settingsPath, hookEvidence },
+    setup: {
+      directories: [runtimeDir, config.workingDirectory],
+      files: [
+        { path: mcpConfigPath, content: JSON.stringify(mcpConfig, null, 2) },
+        { path: settingsPath, content: JSON.stringify(settings, null, 2) },
+      ],
+    },
     description: {
       model: config.model,
       effort: config.effort,

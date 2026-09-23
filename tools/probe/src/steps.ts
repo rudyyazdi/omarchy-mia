@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { hookEvidenceFrom, prepareLaunch, readRuntimeFile } from "@mia/agent-adapter";
+import {
+  hookEvidenceFrom,
+  prepareLaunch,
+  readRuntimeFile,
+  writeLaunchFiles,
+} from "@mia/agent-adapter";
 import type { SlowMode } from "@mia/controlled-mcp";
 import {
   effortsOf,
@@ -174,6 +179,7 @@ export const effortControl = async (context: ProbeContext): Promise<void> => {
     agentPromptFile: config.agentPromptFile,
     env: context.env,
   });
+  await writeLaunchFiles(plan.setup);
   const idx = plan.args.indexOf("--effort");
   const args = [...plan.args];
   if (idx >= 0) args.splice(idx, 2);
