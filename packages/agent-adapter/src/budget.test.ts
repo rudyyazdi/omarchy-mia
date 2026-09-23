@@ -1,10 +1,8 @@
 import { mkdtempDisposableSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { LiveCallBudget } from "./budget.ts";
-
-afterEach(() => vi.unstubAllEnvs());
 
 describe("live call budget", () => {
   it("appends one ledger entry per reservation and refuses the cap without writing", () => {
@@ -33,19 +31,21 @@ describe("live call budget", () => {
   });
 
   it("uses environment overrides and the documented defaults when absent", () => {
-    vi.stubEnv("MIA_LIVE_BUDGET_FILE", undefined);
-    vi.stubEnv("MIA_LIVE_CALL_CAP", undefined);
-    expect(LiveCallBudget.fromEnv("fallback")).toMatchObject({ file: "fallback", cap: 50 });
-    vi.stubEnv("MIA_LIVE_BUDGET_FILE", "override");
-    vi.stubEnv("MIA_LIVE_CALL_CAP", "3");
-    expect(LiveCallBudget.fromEnv("fallback")).toMatchObject({ file: "override", cap: 3 });
+    expect(LiveCallBudget.fromEnv({}, "fallback")).toMatchObject({ file: "fallback", cap: 50 });
+    expect(
+      LiveCallBudget.fromEnv(
+        { MIA_LIVE_BUDGET_FILE: "override", MIA_LIVE_CALL_CAP: "3" },
+        "fallback",
+      ),
+    ).toMatchObject({ file: "override", cap: 3 });
   });
 
   it.each(["abc", "", "-1", "2.5", "1e3", " 3", "99999999999999999999"])(
     "refuses a call cap that is not a non-negative integer: %j",
     (cap) => {
-      vi.stubEnv("MIA_LIVE_CALL_CAP", cap);
-      expect(() => LiveCallBudget.fromEnv("fallback")).toThrow("must be a non-negative integer");
+      expect(() => LiveCallBudget.fromEnv({ MIA_LIVE_CALL_CAP: cap }, "fallback")).toThrow(
+        "must be a non-negative integer",
+      );
     },
   );
 
