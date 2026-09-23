@@ -103,17 +103,18 @@ describe("server lifecycle", () => {
         env: { MIA_MCP_HTTP_LOG: logFile },
       });
       try {
-        // The bridge refuses a GET, and logs the refusal before it answers.
+        // The bridge refuses a GET, and logs the refusal.
         const response = await fetch(server.bridge.url, { signal: AbortSignal.timeout(5_000) });
         expect(response.status).toBe(405);
-        const entries: unknown[] = readFileSync(logFile, "utf8")
-          .trim()
-          .split("\n")
-          .map((line) => JSON.parse(line));
-        expect(entries).toEqual([expect.objectContaining({ ev: "request", http: "GET" })]);
       } finally {
         await server.close(unbounded());
       }
+      // The log is written in the background; closing the server writes out what is queued.
+      const entries: unknown[] = readFileSync(logFile, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(entries).toEqual([expect.objectContaining({ ev: "request", http: "GET" })]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
