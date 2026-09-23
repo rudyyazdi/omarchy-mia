@@ -8,10 +8,12 @@ export {
   ClaudeCodeAdapter,
   probeStaticCapabilities,
   readHookEvidence,
+  readRuntimeFile,
 } from "./adapter.ts";
 export type {
   HookEvidence,
   RuntimeCancellation,
+  RuntimeFileRead,
   StaticCapabilities,
   TurnHandle,
   TurnOptions,

@@ -4,7 +4,9 @@ import { join, resolve } from "node:path";
 import { match } from "ts-pattern";
 import {
   readHookEvidence,
+  readRuntimeFile,
   type HookEvidence,
+  type RuntimeFileRead,
   type RuntimeEvent,
   type PermissionDecision,
   type PermissionRequest,
@@ -165,6 +167,18 @@ interface NewCallInput {
 }
 
 const RUNTIME_IDENTITY = "claude-code";
+
+/** An artifact a finished turn retains for its task, with the bytes read for it or why they could not be. */
+interface TurnEvidence {
+  kind: ArtifactKind;
+  name: string;
+  relation: "runtime_transcript" | "task_output";
+  originalPath: string | null;
+  content: Exclude<RuntimeFileRead, { status: "absent" }>;
+}
+
+/** What a turn's evidence artifact holds: its bytes, or why they are missing. */
+type EvidenceCapture = { status: "retained"; bytes: Buffer } | { status: "failed"; reason: string };
 
 /** State changes and effects a transaction queues; neither runs unless it commits. */
 interface CommitQueue {
@@ -1394,6 +1408,8 @@ export class Engine {
     const actions = classifyActions(calls, task.interrupted);
     const unknown = actions.some((action) => action.status === "unknown");
     const { status, error } = classifyTask({ interrupted: task.interrupted, result, unknown });
+    // Read before the transaction: retaining evidence is best-effort, recording that the task finished is not.
+    const transcript = readRuntimeFile(result.streamLogPath);
     const hookEvidence = readHookEvidence(result.hookEvidencePath);
     const { records: hooks, malformedLines, readError } = hookEvidence;
     const efforts = effortLevels(hooks);
@@ -1413,42 +1429,24 @@ export class Engine {
         );
         for (const approval of stillPending)
           writer.updateApproval(approval.id, { status: "expired", reason: "task ended" });
-        const retain = (artifact: {
-          kind: ArtifactKind;
-          name: string;
-          bytes: Buffer;
-          relation: "runtime_transcript" | "task_output";
-          originalPath?: string;
-        }) => {
-          const art = writer.registerArtifact({
-            kind: artifact.kind,
-            logicalName: artifact.name,
-            mimeType: "application/x-ndjson",
-            bytes: artifact.bytes,
-            producerExecutionId: task.executionId,
-            originalPath: artifact.originalPath ?? null,
-          });
-          writer.linkArtifact({
-            conversationId: conversation.id,
-            artifactId: art.artifactId,
-            relation: artifact.relation,
-            taskId: task.id,
-          });
-        };
-        if (existsSync(result.streamLogPath))
-          retain({
+        if (transcript.status !== "absent")
+          this.retainEvidence(task, {
             kind: "runtime_transcript",
             name: `turn-${conversation.turnCount}.stream.jsonl`,
-            bytes: readFileSync(result.streamLogPath),
             relation: "runtime_transcript",
             originalPath: result.streamLogPath,
+            content: transcript,
           });
         if (hooks.length > 0)
-          retain({
+          this.retainEvidence(task, {
             kind: "effort_evidence",
             name: `turn-${conversation.turnCount}.hooks.jsonl`,
-            bytes: Buffer.from(hooks.map((hook) => JSON.stringify(hook)).join("\n") + "\n"),
             relation: "task_output",
+            originalPath: null,
+            content: {
+              status: "read",
+              bytes: Buffer.from(hooks.map((hook) => JSON.stringify(hook)).join("\n") + "\n"),
+            },
           });
         writer.updateExecution(task.executionId, {
           status: executionStatusFor(task.interrupted, result),
@@ -1522,6 +1520,58 @@ export class Engine {
       abandoned: task.abandoned,
     });
     if (note) conversation.pendingNote = note;
+  }
+
+  /**
+   * Retain one piece of a finished turn's evidence, linked to its task (inside tx). Bytes that cannot be
+   * stored roll back to a savepoint and leave a failed artifact that says why, so an object write failure
+   * never takes down the task, action and execution updates committed with it.
+   */
+  private retainEvidence(task: TaskState, evidence: TurnEvidence): void {
+    const { content } = evidence;
+    if (content.status === "unreadable") {
+      this.registerEvidence(task, evidence, {
+        status: "failed",
+        reason: `unreadable: ${content.reason}`,
+      });
+      return;
+    }
+    const retained = this.deps.catalog.savepoint(() =>
+      this.registerEvidence(task, evidence, { status: "retained", bytes: content.bytes }),
+    );
+    if (!retained.ok)
+      this.registerEvidence(task, evidence, {
+        status: "failed",
+        reason: `not retained: ${errorMessage(retained.error)}`,
+      });
+  }
+
+  private registerEvidence(
+    task: TaskState,
+    evidence: TurnEvidence,
+    capture: EvidenceCapture,
+  ): void {
+    const { writer } = this.deps;
+    const artifact = writer.registerArtifact({
+      kind: evidence.kind,
+      logicalName: evidence.name,
+      mimeType: "application/x-ndjson",
+      producerExecutionId: task.executionId,
+      originalPath: evidence.originalPath,
+      ...match(capture)
+        .with({ status: "retained" }, ({ bytes }) => ({ bytes }))
+        .with({ status: "failed" }, ({ status, reason }) => ({
+          captureStatus: status,
+          captureReason: reason,
+        }))
+        .exhaustive(),
+    });
+    writer.linkArtifact({
+      conversationId: this.activeConversation.id,
+      artifactId: artifact.artifactId,
+      relation: evidence.relation,
+      taskId: task.id,
+    });
   }
 
   /** Records a declared tool output whatever its capture status; only a retained one becomes a task output. */
