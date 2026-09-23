@@ -149,6 +149,13 @@ interface ConversationState {
   /** Retained copy of the agent prompt used for every turn of this conversation. */
   promptFile: string;
   turnCount: number;
+  /**
+   * A runtime has started this conversation's session, so the next turn resumes it instead of creating it. Set
+   * when a turn's runtime_started commits, not from the turn count: a turn whose runtime never spawned (a failed
+   * launch, or an interruption before spawn) leaves no session to resume. A runtime that exits after spawning but
+   * before it persists the session still sets it.
+   */
+  sessionStarted: boolean;
   epoch: number;
   /** Mia-authored note carried into the next runtime turn after an interruption or unknown outcome. */
   pendingNote: string | null;
@@ -464,6 +471,7 @@ export class Engine {
           directory: conv.directory,
           promptFile,
           turnCount: 0,
+          sessionStarted: false,
           epoch: 0,
           pendingNote: null,
         };
@@ -582,7 +590,7 @@ export class Engine {
     const handle = this.deps.adapter.submitTurn({
       text: runtimePrompt,
       runtimeConversationId: conversation.runtimeConversationId,
-      firstTurn: turnIndex === 1,
+      firstTurn: !conversation.sessionStarted,
       runtimeDir: resolve(conversation.directory, "runtime"),
       turnIndex,
       agentPromptFile: conversation.promptFile,
@@ -1013,6 +1021,9 @@ export class Engine {
         match(event)
           .with({ type: "runtime_started" }, (started) => {
             this.record("runtime_started", { pid: started.pid, launch: started.launch }, opts);
+            this.onCommit(() => {
+              conversation.sessionStarted = true;
+            });
           })
           .with({ type: "runtime_init" }, ({ init }) => {
             this.record("runtime_init", init.evidence, opts);

@@ -1192,6 +1192,31 @@ describe("interruption path", () => {
   });
 });
 
+describe("runtime session", () => {
+  it("creates the session again on the turn after one whose runtime never started", async () => {
+    const { turn, taskId } = await submit("first");
+    expect(turn.launch.resume).toBe(false);
+    await client.interrupt(taskId);
+    expect((await client.waitFor("task_finished")).payload.status).toBe("interrupted");
+    const { turn: next } = await submit("second");
+    expect(next.launch.resume).toBe(false);
+    next.end();
+    await client.waitFor("task_finished", (event) => event.payload.task_id !== taskId);
+  });
+
+  it("resumes the session on the turn after one whose runtime started", async () => {
+    const { turn, taskId } = await submit("first");
+    turn.spawn();
+    turn.end();
+    await client.waitFor("task_finished");
+    const { turn: next } = await submit("second");
+    expect(next.launch.resume).toBe(true);
+    expect(next.options.runtimeConversationId).toBe(turn.options.runtimeConversationId);
+    next.end();
+    await client.waitFor("task_finished", (event) => event.payload.task_id !== taskId);
+  });
+});
+
 describe("configuration and provenance", () => {
   it("records the runtime identity probed at startup, not at each conversation start", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mia-identity-"));
