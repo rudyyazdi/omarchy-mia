@@ -39,6 +39,7 @@ import {
   type ArtifactKind,
   type Catalog,
   type JournalEventType,
+  type LinkRelation,
   type RecordWriter,
 } from "@mia/records";
 import {
@@ -186,7 +187,7 @@ const RUNTIME_IDENTITY = "claude-code";
 interface TurnEvidence {
   kind: ArtifactKind;
   name: string;
-  relation: "runtime_transcript" | "task_output";
+  relation: Extract<LinkRelation, "runtime_transcript" | "task_output">;
   originalPath: string | null;
   content: Exclude<RuntimeFileRead, { status: "absent" }>;
 }

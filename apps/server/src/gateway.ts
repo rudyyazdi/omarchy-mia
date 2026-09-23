@@ -53,7 +53,7 @@ export const loadOrCreateSecret = (path: string): string => {
   return secret;
 };
 
-interface ConnectionState {
+interface Connection {
   id: string;
   socket: WebSocket;
   clientId: string | null;
@@ -117,7 +117,7 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
     noServer: true,
     maxPayload: LIMITS.maxEnvelopeBytes,
   });
-  const connections = new Map<string, ConnectionState>();
+  const connections = new Map<string, Connection>();
 
   const authenticate = (req: IncomingMessage): boolean => {
     const header = req.headers.authorization ?? "";
@@ -142,7 +142,7 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
     conn.socket.send(JSON.stringify(event));
   };
 
-  const ack = (conn: ConnectionState, payload: AckPayload) => {
+  const ack = (conn: Connection, payload: AckPayload) => {
     const event: ServerEvent = {
       protocol_version: PROTOCOL_VERSION,
       message_id: randomUUID(),
@@ -155,7 +155,7 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
     if (conn.socket.readyState === conn.socket.OPEN) conn.socket.send(JSON.stringify(event));
   };
 
-  const rejectRaw = (conn: ConnectionState, commandId: string, error: AckError) => {
+  const rejectRaw = (conn: Connection, commandId: string, error: AckError) => {
     ack(conn, { command_id: commandId, disposition: "rejected", error });
   };
 
@@ -170,7 +170,7 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
 
   /** Answer a message_id the client already used, from its record; nothing runs. */
   const answerRecorded = (
-    conn: ConnectionState,
+    conn: Connection,
     commandId: string,
     recorded: Exclude<RecordedCommand, { kind: "new" }>,
   ) =>
@@ -195,7 +195,7 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
    * The command is recorded `received` before the engine runs and finished with the reply its ack carries,
    * so a duplicate is answered from the record and never runs twice.
    */
-  const handleCommand = (conn: ConnectionState, command: ClientCommand) => {
+  const handleCommand = (conn: Connection, command: ClientCommand) => {
     const commandId = command.message_id;
     let progress: Progress = { stage: "unrecorded" };
     try {
@@ -266,7 +266,7 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
   };
 
   wss.on("connection", (socket) => {
-    const conn: ConnectionState = {
+    const conn: Connection = {
       id: `conn_${randomUUID().replace(/-/g, "")}`,
       socket,
       clientId: null,

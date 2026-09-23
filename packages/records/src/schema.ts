@@ -542,8 +542,7 @@ export interface ArtifactLinkRow {
 }
 
 /** Why one artifact requires another: a build artifact requires the diff of its local changes. */
-export const DependencyRelationSchema = z.enum(["local_changes"]);
-export type DependencyRelation = z.infer<typeof DependencyRelationSchema>;
+export type DependencyRelation = "local_changes";
 
 export interface ArtifactDependencyRow {
   parent_artifact_id: string;

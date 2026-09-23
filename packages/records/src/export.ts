@@ -19,7 +19,6 @@ import { snapshotConversation, UnresolvedReferenceSchema } from "./queries.ts";
 import { renderReport } from "./report.ts";
 import {
   CaptureStatusSchema,
-  DependencyRelationSchema,
   EXPORT_TABLES,
   SCHEMA_VERSION,
   type ExportTable,
@@ -156,9 +155,10 @@ export const exportConversation = (
   write("report.html", renderReport(snapshot, { objectStatus }));
 
   const artifacts = snapshot.tables.artifacts;
-  const coverage: Record<string, number> = {};
+  // A Map, not an object: a stored type such as `__proto__` must count like any other, not reach the prototype.
+  const coverage = new Map<string, number>();
   for (const event of snapshot.tables.events)
-    coverage[event.type] = (coverage[event.type] ?? 0) + 1;
+    coverage.set(event.type, (coverage.get(event.type) ?? 0) + 1);
   const partialReasons: string[] = [];
   if (missing.length) partialReasons.push(`${missing.length} referenced object(s) missing`);
   if (corrupt.length) partialReasons.push(`${corrupt.length} referenced object(s) corrupt`);
@@ -179,7 +179,7 @@ export const exportConversation = (
     partial_reasons: partialReasons,
     record_counts: counts,
     artifact_count: artifacts.length,
-    coverage,
+    coverage: Object.fromEntries(coverage),
     objects: {
       included,
       missing,
@@ -385,8 +385,9 @@ export const verifyExport = (dir: string): VerificationResult => {
       z.object({
         parent_artifact_id: z.string(),
         required_artifact_id: z.string(),
-        relation: DependencyRelationSchema,
-      }) satisfies z.ZodType<ArtifactDependencyRow>,
+      }) satisfies z.ZodType<
+        Pick<ArtifactDependencyRow, "parent_artifact_id" | "required_artifact_id">
+      >,
     ),
   };
   for (const table of EXPORT_TABLES) {

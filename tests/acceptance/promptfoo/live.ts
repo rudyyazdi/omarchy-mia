@@ -8,7 +8,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
 import { startFixture } from "@mia/controlled-mcp";
-import { errorMessage, isRecord } from "@mia/protocol";
+import { errorMessage, isRecord, type Effort } from "@mia/protocol";
 import { Catalog, exportConversation, snapshotConversation, verifyExport } from "@mia/records";
 import { loadProfile } from "@mia/agent-adapter";
 import { SHUTDOWN_TURN_WAIT_MS, startServer, type MiaServer } from "@mia/server";
@@ -47,7 +47,8 @@ const decodeEvidence = (output: unknown): Record<string, unknown> => {
 interface RuntimeEvidence {
   requested_model: string[];
   reported_model: string[];
-  requested_effort: string[];
+  requested_effort: Effort[];
+  // eslint-disable-next-line no-restricted-syntax -- whatever effort levels the runtime reported, or "unverified"
   reported_effort: string[];
   runtime_version: string | null;
   event_count: number;

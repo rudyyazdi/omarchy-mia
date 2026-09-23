@@ -6,6 +6,7 @@ import {
   LIMITS,
   PROTOCOL_VERSION,
   type ApprovalStatus,
+  type Decision,
   type ServerEventType,
   type TaskStatus,
   type ToolCallStatus,
@@ -78,7 +79,7 @@ const expectResumed = async (taskId: string): Promise<void> => {
   });
 };
 
-const decide = (taskId: string, approvalId: string, decision: "approve" | "reject") =>
+const decide = (taskId: string, approvalId: string, decision: Decision) =>
   client.decide({ taskId: taskId, approvalId: approvalId, decision: decision });
 
 /**

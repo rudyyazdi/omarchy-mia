@@ -6,6 +6,8 @@ import { Catalog } from "./catalog.ts";
 import type { CommandReply } from "./schema.ts";
 import { RecordWriter } from "./writer.ts";
 
+type CommandInput = Parameters<RecordWriter["recordCommand"]>[0];
+
 let dir: string;
 let catalog: Catalog;
 let writer: RecordWriter;
@@ -121,11 +123,11 @@ describe("record writer", () => {
     expect(() =>
       writer.createApproval({ toolCallId: call, executionEpoch: 1, requestingEventId: null }),
     ).toThrow();
-    const command = {
+    const command: CommandInput = {
       connectionId: "conn-1",
       clientId: "client-1",
       clientCommandId: "cmd-1",
-      type: "submit_text" as const,
+      type: "submit_text",
       payload: { text: "a" },
     };
     expect(writer.recordCommand(command).kind).toBe("new");
@@ -135,11 +137,11 @@ describe("record writer", () => {
   });
 
   describe("commands", () => {
-    const command = (clientCommandId: string, connectionId = "conn-1") => ({
+    const command = (clientCommandId: string, connectionId = "conn-1"): CommandInput => ({
       connectionId,
       clientId: "client-1",
       clientCommandId,
-      type: "start_conversation" as const,
+      type: "start_conversation",
       payload: {},
     });
     const recordNew = (clientCommandId: string): string => {
