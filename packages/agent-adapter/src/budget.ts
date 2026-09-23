@@ -8,6 +8,11 @@ const parseCallCap = (text: string): number => {
   return Number(text);
 };
 
+/** The environment variables that override the budget's ledger file and call cap. */
+type LiveCallBudgetEnv = Readonly<
+  Partial<Record<"MIA_LIVE_BUDGET_FILE" | "MIA_LIVE_CALL_CAP", string>>
+>;
+
 /**
  * Live model-call budget shared by the probe and the live acceptance lane.
  * One entry per Mia-submitted turn. The cap is a session guard, not a billing record.
@@ -22,8 +27,8 @@ export class LiveCallBudget {
       throw new Error(`live call cap must be a non-negative integer (got ${cap})`);
   }
 
-  /** The caller passes its environment in, so this module reads no global state. */
-  static fromEnv(env: NodeJS.ProcessEnv, defaultFile: string): LiveCallBudget {
+  /** Overrides come from the caller's environment; only a process entry point reads the global one. */
+  static fromEnv(env: LiveCallBudgetEnv, defaultFile: string): LiveCallBudget {
     return new LiveCallBudget(
       env.MIA_LIVE_BUDGET_FILE ?? defaultFile,
       parseCallCap(env.MIA_LIVE_CALL_CAP ?? "50"),
