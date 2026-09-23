@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { match, P } from "ts-pattern";
 import WebSocket from "ws";
 import {
+  IdSchema,
   PROTOCOL_VERSION,
   ServerEventSchema,
   type AckPayload,
@@ -38,6 +39,19 @@ export interface SendOptions extends Cancellable {
   messageId?: string;
 }
 
+/**
+ * Why `value` cannot travel as the envelope's `field`, or null when it can. The server acknowledges a command whose
+ * id it cannot carry as `unknown`, which no waiter is keyed on, so such an id is refused here before it is sent.
+ */
+const invalidId = (field: "message_id" | "client_id", value: string): Error | null => {
+  const parsed = IdSchema.safeParse(value);
+  return parsed.success
+    ? null
+    : new Error(
+        `invalid ${field}: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
+      );
+};
+
 const isEventOf =
   <T extends ServerEventType>(type: T) =>
   (event: ServerEvent): event is ServerEventOf<T> =>
@@ -70,6 +84,8 @@ export class MiaClient extends EventEmitter {
   constructor(readonly options: MiaClientOptions) {
     super();
     this.clientId = options.clientId ?? `client_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    const invalid = invalidId("client_id", this.clientId);
+    if (invalid) throw invalid;
   }
 
   static readSecret(path: string): string {
@@ -170,6 +186,8 @@ export class MiaClient extends EventEmitter {
     payload: Extract<ClientCommand, { type: T }>["payload"],
     { messageId = `cmd_${randomUUID()}`, signal }: SendOptions = {},
   ): Promise<AckPayload> {
+    const invalid = invalidId("message_id", messageId);
+    if (invalid) return Promise.reject(invalid);
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN)
       return Promise.reject(new Error("not connected"));

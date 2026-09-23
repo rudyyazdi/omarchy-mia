@@ -3,15 +3,22 @@ import { createServer, type Socket } from "node:net";
 import { describe, expect, it } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
 import { ackEvent } from "./ack-fixture.ts";
-import { ClientCommandSchema, type AcceptedAck, type RefusedAck } from "@mia/protocol";
+import { ClientCommandSchema, LIMITS, type AcceptedAck, type RefusedAck } from "@mia/protocol";
 import { MiaClient } from "./client.ts";
 
-const makeClient = (url = "ws://127.0.0.1:1") =>
+const makeClient = (url = "ws://127.0.0.1:1", clientId?: string) =>
   new MiaClient({
     url,
     secret: "test",
     build: { name: "test", version: "0", commit: null, dirty: false },
+    ...(clientId === undefined ? {} : { clientId }),
   });
+
+/** Ids the protocol cannot carry: the server would acknowledge them as `unknown`. */
+const UNCARRIABLE_IDS = [
+  ["an empty", ""],
+  ["an over-long", "x".repeat(LIMITS.maxIdChars + 1)],
+] as const;
 
 /** Runs `test` with a client connected to a bare server, and tears both down even if it fails. */
 const withConnectedClient = async (
@@ -34,6 +41,27 @@ const withConnectedClient = async (
     server.close();
     await closed;
   }
+};
+
+/**
+ * Runs `refuse`, which sends a command the client must refuse, then shows that the refused command wrote nothing to
+ * the socket and left no trace among the recent interaction ids: the next command is the first the server sees.
+ */
+const expectRefusedUnsent = async (
+  client: MiaClient,
+  socket: WebSocket,
+  refuse: () => Promise<void>,
+): Promise<void> => {
+  const received: string[] = [];
+  socket.on("message", (data) => received.push(data.toString("utf8")));
+  await refuse();
+  const sent = once(socket, "message");
+  const next = client.send("start_conversation", {}, { messageId: "next" });
+  await sent;
+  expect(received.map((text) => JSON.parse(text).message_id)).toEqual(["next"]);
+  expect(client.diagnostics().recent_interaction_ids).toEqual(["next"]);
+  socket.send(JSON.stringify(ackEvent("next")));
+  await next;
 };
 
 /** How the handshake server answers a WebSocket upgrade request: never, or with an HTTP 401. */
@@ -157,19 +185,17 @@ describe("client cancellation", () => {
     }));
 
   it("does not send a command whose signal is already aborted", () =>
-    withConnectedClient(async (client, socket) => {
-      const received: string[] = [];
-      socket.on("message", (data) => received.push(data.toString("utf8")));
-      const reason = new Error("already cancelled");
-      const refused = client.send("start_conversation", {}, { signal: AbortSignal.abort(reason) });
-      await expect(refused).rejects.toBe(reason);
-      const sent = once(socket, "message");
-      const next = client.send("start_conversation", {}, { messageId: "next" });
-      await sent;
-      expect(received.map((text) => JSON.parse(text).message_id)).toEqual(["next"]);
-      socket.send(JSON.stringify(ackEvent("next")));
-      await next;
-    }));
+    withConnectedClient((client, socket) =>
+      expectRefusedUnsent(client, socket, async () => {
+        const reason = new Error("already cancelled");
+        const refused = client.send(
+          "start_conversation",
+          {},
+          { signal: AbortSignal.abort(reason) },
+        );
+        await expect(refused).rejects.toBe(reason);
+      }),
+    ));
 
   it("rejects a send still waiting for its ack as soon as the connection closes", () =>
     withConnectedClient(async (client, socket) => {
@@ -253,4 +279,27 @@ describe("client cancellation", () => {
       await expect(client.connect({ signal: AbortSignal.abort(reason) })).rejects.toBe(reason);
       expect(client.connectionState).toBe("disconnected");
     }));
+});
+
+describe("client ids", () => {
+  it.each(UNCARRIABLE_IDS)("refuses to construct a client with %s client_id", (_, clientId) => {
+    expect(() => makeClient(undefined, clientId)).toThrow("invalid client_id");
+  });
+
+  it("accepts a client_id of the longest length the protocol carries", () => {
+    const clientId = "x".repeat(LIMITS.maxIdChars);
+    expect(makeClient(undefined, clientId).clientId).toBe(clientId);
+  });
+
+  it.each(UNCARRIABLE_IDS)(
+    "rejects a send with %s message_id at once and writes nothing to the socket",
+    (_, messageId) =>
+      withConnectedClient((client, socket) =>
+        expectRefusedUnsent(client, socket, async () => {
+          await expect(client.send("start_conversation", {}, { messageId })).rejects.toThrow(
+            "invalid message_id",
+          );
+        }),
+      ),
+  );
 });
