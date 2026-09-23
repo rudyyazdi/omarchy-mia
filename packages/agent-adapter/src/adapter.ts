@@ -8,7 +8,8 @@ import type { ExecutionStatus } from "@mia/records";
 import type { ApprovalBridge, PermissionHandler } from "./bridge.ts";
 import type { RuntimeConfig } from "./config.ts";
 import { withinDeadline } from "./deadline.ts";
-import { prepareLaunch, type LaunchPlan } from "./launch.ts";
+import { prepareLaunch, runtimeEnvironment, type LaunchPlan } from "./launch.ts";
+import { resolveExecutable } from "./resolve-executable.ts";
 import { ClaudeTranslator } from "./claude-translate.ts";
 import type { RuntimeEvent, RuntimeInit, TurnSummary } from "./runtime-events.ts";
 import { LineSplitter, parseStreamLine, redactLine } from "./stream.ts";
@@ -89,19 +90,20 @@ const REQUIRED_FLAGS = [
 
 /**
  * Static checks: nothing here contacts a model. `env` is the environment a launch passes on (see
- * `LaunchInput.env`): the executable is looked up on its PATH and run with it, and the credential
- * is detected from it.
+ * `LaunchInput.env`): the executable is looked up on the PATH and run with the environment the launch
+ * derives from it (`runtimeEnvironment`), and the credential is detected from it.
  */
 export const probeStaticCapabilities = (
   config: RuntimeConfig,
   env: NodeJS.ProcessEnv,
 ): StaticCapabilities => {
   const errors: string[] = [];
-  const which = spawnSync("sh", ["-c", `command -v ${JSON.stringify(config.executable)}`], {
-    encoding: "utf8",
-    env,
+  // The launch spawns the runtime in config.workingDirectory with this environment, so probe it the same way.
+  const launchEnv = runtimeEnvironment(config, env);
+  const resolved = resolveExecutable(config.executable, {
+    path: launchEnv.PATH,
+    cwd: config.workingDirectory,
   });
-  const resolved = which.status === 0 ? which.stdout.trim() : null;
   if (!resolved) errors.push(`runtime executable "${config.executable}" not found on PATH`);
   let version: string | null = null;
   const flags: Record<string, boolean> = {};
@@ -109,7 +111,7 @@ export const probeStaticCapabilities = (
     const versionProbe = spawnSync(resolved, ["--version"], {
       encoding: "utf8",
       timeout: 20_000,
-      env,
+      env: launchEnv,
     });
     version = versionProbe.status === 0 ? versionProbe.stdout.trim() : null;
     if (!version)
@@ -117,7 +119,8 @@ export const probeStaticCapabilities = (
         `"${resolved} --version" failed: ${versionProbe.stderr?.trim() || versionProbe.error?.message || "unknown"}`,
       );
     const help =
-      spawnSync(resolved, ["--help"], { encoding: "utf8", timeout: 20_000, env }).stdout ?? "";
+      spawnSync(resolved, ["--help"], { encoding: "utf8", timeout: 20_000, env: launchEnv })
+        .stdout ?? "";
     for (const flag of REQUIRED_FLAGS) {
       // help abbreviates paired flags as --append-system-prompt[-file]
       const abbreviated = flag.replace(/-file$/, "[-file]");

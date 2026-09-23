@@ -46,6 +46,27 @@ export interface LaunchInput {
 }
 
 /**
+ * The environment the runtime runs with: `env` (see `LaunchInput.env`) overlaid with `config.env` and Mia's own
+ * settings. The launch and the startup probe both use it, so the probe finds and runs the same executable.
+ */
+export const runtimeEnvironment = (
+  config: RuntimeConfig,
+  env: NodeJS.ProcessEnv,
+): Record<string, string> => {
+  const merged: Record<string, string> = {};
+  for (const [name, value] of Object.entries(env)) if (value !== undefined) merged[name] = value;
+  Object.assign(merged, config.env);
+  merged.MCP_TOOL_TIMEOUT = String(MCP_TOOL_TIMEOUT_MS);
+  // Claude Code 2.1.278 adds a separate idle timeout: a call with "no response or progress" for 300s is aborted. A held
+  // approval prompt is exactly that, so it gets the same 24h (capability record F4). 0 would disable it entirely.
+  merged.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT = String(MCP_TOOL_TIMEOUT_MS);
+  // Never let a nested Claude Code session inherit this process's session context.
+  delete merged.CLAUDECODE;
+  delete merged.CLAUDE_CODE_ENTRYPOINT;
+  return merged;
+};
+
+/**
  * Build the exact runtime invocation. Mia decides everything explicitly: model, effort, tool surface,
  * MCP wiring, permission rules and the approval tool. The prompt text goes on stdin, never argv.
  */
@@ -133,16 +154,7 @@ export const prepareLaunch = (input: LaunchInput): LaunchPlan => {
       "--debug-file",
       join(runtimeDir, "runtime-debug.log"),
     );
-  const env: Record<string, string> = {};
-  for (const [name, value] of Object.entries(input.env)) if (value !== undefined) env[name] = value;
-  Object.assign(env, config.env);
-  env.MCP_TOOL_TIMEOUT = String(MCP_TOOL_TIMEOUT_MS);
-  // Claude Code 2.1.278 adds a separate idle timeout: a call with "no response or progress" for 300s is aborted. A held
-  // approval prompt is exactly that, so it gets the same 24h (capability record F4). 0 would disable it entirely.
-  env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT = String(MCP_TOOL_TIMEOUT_MS);
-  // Never let a nested Claude Code session inherit this process's session context.
-  delete env.CLAUDECODE;
-  delete env.CLAUDE_CODE_ENTRYPOINT;
+  const env = runtimeEnvironment(config, input.env);
 
   return {
     command: config.executable,
