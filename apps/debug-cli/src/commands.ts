@@ -2,19 +2,24 @@ import { resolve } from "node:path";
 import {
   Catalog,
   defaultStateDir,
+  diagnosticsViews,
   exportConversation,
   listConversations,
   reconcileObjects,
   snapshotConversation,
+  taskViews,
   verifyExport,
   type ConversationSnapshot,
 } from "@mia/records";
 import {
   artifactsJson,
   formatArtifacts,
-  formatConversation,
+  formatConversationHeader,
   formatConversationList,
+  formatDiagnostics,
   formatExport,
+  formatTask,
+  formatUnresolved,
 } from "./format.ts";
 
 /** The global options every `mia debug` subcommand receives, as commander parsed them. */
@@ -51,13 +56,13 @@ const showSnapshot = (
   conversationId: string,
   render: {
     json: (snapshot: ConversationSnapshot) => unknown;
-    text: (snapshot: ConversationSnapshot) => string[];
+    text: (snapshot: ConversationSnapshot) => void;
   },
 ): void =>
   withCatalog(options, true, (catalog) => {
     const snapshot = snapshotConversation(catalog, conversationId);
     if (options.json) out(render.json(snapshot));
-    else printLines(render.text(snapshot));
+    else render.text(snapshot);
   });
 
 export const showConversations = (options: GlobalOptions): void =>
@@ -67,11 +72,26 @@ export const showConversations = (options: GlobalOptions): void =>
     else printLines(formatConversationList(list));
   });
 
+/**
+ * Prints each section as soon as it is derived, so a record that fails to parse still leaves
+ * everything before it on screen.
+ */
+const printConversation = (snapshot: ConversationSnapshot): void => {
+  printLines(formatConversationHeader(snapshot));
+  for (const task of taskViews(snapshot)) printLines(formatTask(task));
+  out(`\ndiagnostics:`);
+  printLines(formatDiagnostics(diagnosticsViews(snapshot)));
+  printLines(formatUnresolved(snapshot));
+};
+
 export const showConversation = (options: GlobalOptions, conversationId: string): void =>
-  showSnapshot(options, conversationId, { json: (snapshot) => snapshot, text: formatConversation });
+  showSnapshot(options, conversationId, { json: (snapshot) => snapshot, text: printConversation });
 
 export const showArtifacts = (options: GlobalOptions, conversationId: string): void =>
-  showSnapshot(options, conversationId, { json: artifactsJson, text: formatArtifacts });
+  showSnapshot(options, conversationId, {
+    json: artifactsJson,
+    text: (snapshot) => printLines(formatArtifacts(snapshot)),
+  });
 
 export const exportToDirectory = (
   options: GlobalOptions & { output: string },

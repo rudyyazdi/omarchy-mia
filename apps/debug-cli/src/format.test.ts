@@ -2,7 +2,7 @@ import { emptySnapshotTables, type ConversationSnapshot } from "@mia/records";
 import { describe, expect, it } from "vitest";
 import {
   formatArtifacts,
-  formatConversation,
+  formatConversationHeader,
   formatConversationList,
   formatExport,
 } from "./format.ts";
@@ -62,7 +62,7 @@ describe("debug formatting", () => {
   });
 
   it("refuses a snapshot without its conversation row", () => {
-    expect(() => formatConversation(emptySnapshot())).toThrow(
+    expect(() => formatConversationHeader(emptySnapshot())).toThrow(
       "conversation conv_1 has no catalog row",
     );
   });

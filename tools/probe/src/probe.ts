@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { probeStaticCapabilities, type StaticCapabilities } from "@mia/agent-adapter";
 import { redactValue } from "@mia/protocol";
 import { firstEvent } from "./checks.ts";
-import { log, ProbeContext, type ProbeOptions } from "./context.ts";
+import { log, ProbeContext } from "./context.ts";
+import type { ProbeOptions } from "./record.ts";
 import {
   effortControl,
   followupEveryCallDeny,
@@ -88,8 +89,10 @@ export const runProbe = async (options: ProbeOptions): Promise<never> => {
       status: record.turn?.status,
       error: record.turn?.error,
     })),
-    live_calls_used: context.services.budget.used(),
+    live_calls_used: context.liveCallsUsed(),
   });
   log("done. evidence in", context.dirs.out);
   return context.shutdown(0);
 };
+
+export type { ProbeOptions };

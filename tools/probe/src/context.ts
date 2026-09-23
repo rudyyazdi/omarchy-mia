@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { match } from "ts-pattern";
 import {
   ApprovalBridge,
   ClaudeCodeAdapter,
@@ -7,60 +8,23 @@ import {
   readHookEvidence,
   validateRuntimeConfig,
   type AdapterEvent,
-  type PermissionDecision,
-  type PermissionRequest,
+  type PermissionHandler,
   type RuntimeConfig,
-  type TurnHandle,
-  type TurnResult,
 } from "@mia/agent-adapter";
-import { FixtureHarness, startFixture, type FixtureState } from "@mia/controlled-mcp";
+import { FixtureHarness, startFixture } from "@mia/controlled-mcp";
 import { redactValue } from "@mia/protocol";
-import { describeEvent } from "./checks.ts";
-
-/** The probe's command-line options, as commander parsed them. */
-export interface ProbeOptions {
-  model: string;
-  out: string;
-  examples: string;
-  only?: string;
-}
-
-export interface StepRecord {
-  name: string;
-  session_id: string;
-  first_turn: boolean;
-  prompt: string;
-  events: AdapterEvent[];
-  permission_requests: {
-    /** The runtime's raw permission payload, snake_case as it arrived. */
-    request: unknown;
-    decision: PermissionDecision;
-    abandoned: boolean;
-  }[];
-  turn: TurnResult | null;
-  ledger_after: FixtureState | null;
-  hook_evidence: Record<string, unknown>[] | null;
-  notes: string[];
-  checks: Record<string, boolean | string>;
-}
-
-type Decider = (
-  request: PermissionRequest,
-  step: StepRecord,
-) => Promise<PermissionDecision> | PermissionDecision;
-
-export interface StepSpec {
-  name: string;
-  config: RuntimeConfig;
-  sessionId: string;
-  firstTurn: boolean;
-  prompt: string;
-  turnIndex: number;
-  decide: Decider;
-  during?: (handle: TurnHandle, step: StepRecord) => Promise<void>;
-}
+import type { ProbeOptions, StepRecord, StepSpec } from "./record.ts";
 
 export const log = (...args: unknown[]) => console.log(`[probe]`, ...args);
+
+const describeEvent = (event: AdapterEvent): string =>
+  match(event)
+    .with(
+      { type: "tool_proposed" },
+      (proposed) => `${proposed.toolIdentity} ${proposed.runtimeCallId}`,
+    )
+    .with({ type: "runtime_stderr" }, (stderr) => stderr.text.trim())
+    .otherwise(() => "");
 
 /**
  * Owns one probe run's evidence directory, fixture, approval bridge and live-call budget, and the
@@ -72,7 +36,7 @@ export class ProbeContext {
   private constructor(
     readonly options: ProbeOptions,
     readonly dirs: { out: string; examples: string; fixture: string },
-    readonly services: {
+    private readonly services: {
       budget: LiveCallBudget;
       fixture: Awaited<ReturnType<typeof startFixture>>;
       harness: FixtureHarness;
@@ -101,6 +65,35 @@ export class ProbeContext {
 
   get harness(): FixtureHarness {
     return this.services.harness;
+  }
+
+  runtimeDir(sessionId: string): string {
+    return join(this.dirs.out, "runtime", sessionId);
+  }
+
+  get bridgeUrl(): string {
+    return this.services.bridge.url;
+  }
+
+  /** Counts one live runtime call against the shared budget and logs it; throws once the cap is reached. */
+  takeLiveCall(label: string, model: string): void {
+    const { budget } = this.services;
+    const callNumber = budget.take(`probe:${label}`, model);
+    log(`step ${label} (live call ${callNumber}/${budget.cap})`);
+  }
+
+  liveCallsUsed(): number {
+    return this.services.budget.used();
+  }
+
+  /** Answers every bridge permission request with `handler` while `run` is in flight. */
+  async withBridgeHandler<T>(handler: PermissionHandler, run: () => Promise<T>): Promise<T> {
+    this.services.bridge.setHandler(handler);
+    try {
+      return await run();
+    } finally {
+      this.services.bridge.setHandler(null);
+    }
   }
 
   async shutdown(code: number): Promise<never> {
@@ -159,15 +152,14 @@ export class ProbeContext {
       notes: [],
       checks: {},
     };
-    const { budget, bridge, harness } = this.services;
-    const callNumber = budget.take(`probe:${spec.name}`, spec.config.model);
-    log(`step ${spec.name} (live call ${callNumber}/${budget.cap})`);
+    const { bridge, harness } = this.services;
+    this.takeLiveCall(spec.name, spec.config.model);
     const adapter = new ClaudeCodeAdapter(spec.config, bridge);
     const handle = adapter.submitTurn({
       text: spec.prompt,
       runtimeConversationId: spec.sessionId,
       firstTurn: spec.firstTurn,
-      runtimeDir: join(this.dirs.out, "runtime", spec.sessionId),
+      runtimeDir: this.runtimeDir(spec.sessionId),
       turnIndex: spec.turnIndex,
       onEvent: (event) => {
         step.events.push(event);

@@ -1,6 +1,5 @@
 import { Command } from "commander";
-import type { ProbeOptions } from "./context.ts";
-import { runProbe } from "./probe.ts";
+import { runProbe, type ProbeOptions } from "./probe.ts";
 
 const program = new Command()
   .name("probe")

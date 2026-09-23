@@ -135,7 +135,7 @@ export default tseslint.config(
   {
     // A main.ts only parses arguments and calls an exported function (AGENTS.md).
     files: ["**/main.ts"],
-    rules: { "max-lines": ["error", { max: 60, skipBlankLines: true, skipComments: true }] },
+    rules: { "max-lines": ["error", 60] },
   },
   ...layerOverrides,
 );

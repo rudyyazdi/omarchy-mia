@@ -1,12 +1,11 @@
-import {
-  diagnosticsViews,
-  taskViews,
-  type ConversationSnapshot,
-  type ConversationSummary,
-  type ExportManifest,
+// Text renderings of catalog reads; each returns the lines to print so nothing here writes.
+import type {
+  ConversationSnapshot,
+  ConversationSummary,
+  DiagnosticsView,
+  ExportManifest,
+  TaskView,
 } from "@mia/records";
-
-/** Text renderings of catalog reads; each returns the lines to print so nothing here writes. */
 
 export const formatConversationList = (list: ConversationSummary[]): string[] =>
   list.map(
@@ -14,41 +13,46 @@ export const formatConversationList = (list: ConversationSummary[]): string[] =>
       `${conversation.started_at}  ${conversation.id}  ${conversation.status}  tasks=${conversation.task_count}  events=${conversation.last_sequence}`,
   );
 
-export const formatConversation = (snapshot: ConversationSnapshot): string[] => {
+/** The conversation, provenance and execution lines: everything printed before the first task. */
+export const formatConversationHeader = (snapshot: ConversationSnapshot): string[] => {
   const conv = snapshot.tables.conversations[0];
   if (!conv) throw new Error(`conversation ${snapshot.conversation_id} has no catalog row`);
-  const lines = [
+  return [
     `conversation ${conv.id}  started ${conv.started_at}  status ${conv.status}  cutoff seq ${snapshot.cutoff_sequence}`,
     `provenance:`,
+    ...snapshot.tables.provenance_entries.map(
+      (entry) =>
+        `  ${entry.role}: ${entry.availability}${entry.version ? ` v=${entry.version}` : ""}${entry.artifact_id ? ` artifact=${entry.artifact_id}` : ""}${entry.reason ? ` (${entry.reason})` : ""}`,
+    ),
+    ...snapshot.tables.executions.map(
+      (execution) =>
+        `execution ${execution.id} task=${execution.task_id} epoch=${execution.execution_epoch} model requested=${execution.requested_model} reported=${execution.reported_model ?? "unreported"} effort requested=${execution.requested_effort} reported=${execution.reported_effort ?? "unverified"} status=${execution.status}`,
+    ),
   ];
-  for (const entry of snapshot.tables.provenance_entries)
-    lines.push(
-      `  ${entry.role}: ${entry.availability}${entry.version ? ` v=${entry.version}` : ""}${entry.artifact_id ? ` artifact=${entry.artifact_id}` : ""}${entry.reason ? ` (${entry.reason})` : ""}`,
-    );
-  for (const execution of snapshot.tables.executions)
-    lines.push(
-      `execution ${execution.id} task=${execution.task_id} epoch=${execution.execution_epoch} model requested=${execution.requested_model} reported=${execution.reported_model ?? "unreported"} effort requested=${execution.requested_effort} reported=${execution.reported_effort ?? "unverified"} status=${execution.status}`,
-    );
-  for (const task of taskViews(snapshot)) {
-    lines.push(`\n== task ${task.id} [${task.status}] ${task.created_at}`);
-    lines.push(`user> ${task.text}`);
-    lines.push(`agent${task.partial ? " (partial)" : ""}> ${task.assistant_text || "(no text)"}`);
-    for (const call of task.tool_calls)
-      lines.push(
-        `  tool ${call.tool_identity} call=${call.runtime_call_id} rev=${call.binding_revision} policy=${call.policy} status=${call.status}${call.detail ? ` (${call.detail})` : ""} approvals=${JSON.stringify(call.approvals.map((approval) => `${approval.id}:${approval.status}`))}`,
-      );
-    if (task.interruption) lines.push(`  interruption: ${JSON.stringify(task.interruption)}`);
-    for (const event of task.errors) lines.push(`  ${event.type}: ${event.payload}`);
-  }
-  lines.push(`\ndiagnostics:`);
-  for (const diagnostics of diagnosticsViews(snapshot))
-    lines.push(
-      `  ${diagnostics.received_at} client=${diagnostics.client_id} ${diagnostics.freshness} ${JSON.stringify(diagnostics.state).slice(0, 160)}`,
-    );
-  if (snapshot.unresolved_references.length)
-    lines.push(`unresolved references: ${JSON.stringify(snapshot.unresolved_references)}`);
-  return lines;
 };
+
+export const formatTask = (task: TaskView): string[] => [
+  `\n== task ${task.id} [${task.status}] ${task.created_at}`,
+  `user> ${task.text}`,
+  `agent${task.partial ? " (partial)" : ""}> ${task.assistant_text || "(no text)"}`,
+  ...task.tool_calls.map(
+    (call) =>
+      `  tool ${call.tool_identity} call=${call.runtime_call_id} rev=${call.binding_revision} policy=${call.policy} status=${call.status}${call.detail ? ` (${call.detail})` : ""} approvals=${JSON.stringify(call.approvals.map((approval) => `${approval.id}:${approval.status}`))}`,
+  ),
+  ...(task.interruption ? [`  interruption: ${JSON.stringify(task.interruption)}`] : []),
+  ...task.errors.map((event) => `  ${event.type}: ${event.payload}`),
+];
+
+export const formatDiagnostics = (diagnostics: DiagnosticsView[]): string[] =>
+  diagnostics.map(
+    (view) =>
+      `  ${view.received_at} client=${view.client_id} ${view.freshness} ${JSON.stringify(view.state).slice(0, 160)}`,
+  );
+
+export const formatUnresolved = (snapshot: ConversationSnapshot): string[] =>
+  snapshot.unresolved_references.length
+    ? [`unresolved references: ${JSON.stringify(snapshot.unresolved_references)}`]
+    : [];
 
 export const formatArtifacts = (snapshot: ConversationSnapshot): string[] => [
   ...snapshot.tables.artifacts.map(
