@@ -107,7 +107,7 @@ const ackPayload = (commandId: string, reply: CommandReply): AckPayload =>
  * delivers events.
  */
 export const startGateway = async (options: GatewayOptions): Promise<GatewayHandle> => {
-  // eslint-disable-next-line no-restricted-syntax -- runs before serving: the secret loads before the gateway listens
+  // eslint-disable-next-line no-restricted-syntax -- runs before serving: the secret loads before the gateway listens, and no runtime can reach the bridge yet
   const secret = loadOrCreateSecretSync(options.secretFile);
   const secretBuf = Buffer.from(secret);
   const httpServer: Server = createServer((_, res) => {

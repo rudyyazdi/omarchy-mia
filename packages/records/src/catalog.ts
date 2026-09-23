@@ -79,25 +79,26 @@ export class Catalog {
       paths,
       new DatabaseSync(paths.database, { readOnly: options.readonly === true }),
     );
-    // SQLite requires each connection to opt into foreign-key enforcement.
-    catalog.db.exec("PRAGMA foreign_keys = ON");
-    if (!options.readonly) {
-      catalog.db.exec("PRAGMA journal_mode = WAL");
-      catalog.db.exec("PRAGMA synchronous = FULL");
-      catalog.migrate();
-      try {
-        chmodSync(paths.database, 0o600);
-      } catch {
-        /* best effort */
-      }
-    } else {
-      // A reader cannot migrate, but it must still refuse a catalog whose rows it would misread.
-      try {
+    // A failed open closes the connection, so it leaves no handle (and no write-ahead log) behind.
+    try {
+      // SQLite requires each connection to opt into foreign-key enforcement.
+      catalog.db.exec("PRAGMA foreign_keys = ON");
+      if (!options.readonly) {
+        catalog.db.exec("PRAGMA journal_mode = WAL");
+        catalog.db.exec("PRAGMA synchronous = FULL");
+        catalog.migrate();
+        try {
+          chmodSync(paths.database, 0o600);
+        } catch {
+          /* best effort */
+        }
+      } else {
+        // A reader cannot migrate, but it must still refuse a catalog whose rows it would misread.
         catalog.checkVersion(catalog.storedVersion() ?? "none");
-      } catch (error) {
-        catalog.db.close();
-        throw error;
       }
+    } catch (error) {
+      catalog.db.close();
+      throw error;
     }
     return catalog;
   }

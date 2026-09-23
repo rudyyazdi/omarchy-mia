@@ -36,6 +36,19 @@ const packageVersionSync = (packageJsonPath: string): string | undefined => {
   return undefined;
 };
 
+/** One `sha256  path` line per untracked file, or `unreadable  path` for a file that cannot be read. */
+const digestUntrackedSync = (root: string, files: string[]): string => {
+  const lines: string[] = [];
+  for (const file of files) {
+    try {
+      lines.push(`${sha256Hex(readFileSync(resolve(root, file)))}  ${file}`);
+    } catch {
+      lines.push(`unreadable  ${file}`);
+    }
+  }
+  return lines.join("\n");
+};
+
 /** Identify the running source tree: commit, dirty flag and a retained snapshot of local changes. */
 export const collectBuildInfoSync = (name: string, sourceRoot: string): BuildInfo => {
   const root = resolve(sourceRoot);
@@ -57,17 +70,12 @@ export const collectBuildInfoSync = (name: string, sourceRoot: string): BuildInf
   if (dirty) {
     const diff = gitSync(["diff", "HEAD", "--", ".", ":(exclude)*.sqlite"], root) ?? "";
     // Untracked files are outside `git diff`; retain their names and content digests so the build digest is content-sensitive.
-    const untracked = (gitSync(["ls-files", "--others", "--exclude-standard"], root) ?? "")
-      .split("\n")
-      .filter(Boolean)
-      .map((file) => {
-        try {
-          return `${sha256Hex(readFileSync(resolve(root, file)))}  ${file}`;
-        } catch {
-          return `unreadable  ${file}`;
-        }
-      })
-      .join("\n");
+    const untracked = digestUntrackedSync(
+      root,
+      (gitSync(["ls-files", "--others", "--exclude-standard"], root) ?? "")
+        .split("\n")
+        .filter(Boolean),
+    );
     localChanges = `# git status --porcelain\n${status}\n# untracked files (sha256  path)\n${untracked}\n# git diff HEAD\n${diff}`;
   }
   return {

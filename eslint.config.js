@@ -151,21 +151,28 @@ const SOURCE_RESTRICTED_SYNTAX = [
 
 // Enforces AGENTS.md, Node: synchronous I/O stalls every connection, so it runs only before a process starts
 // serving. Lint cannot tell when a call runs, so each one that runs before serving says so in a bypass. The
-// SQLite catalog (statement calls) is the documented exception and matches no selector. A function that blocks
-// is itself named `*Sync`: calls inside it are exempt, because each call to it is checked instead, so the bypass
-// sits at the call site, where "runs before serving" can be verified. Lint sees a call by its name: a renamed or
-// passed-along `*Sync` function is left to review.
+// SQLite catalog's statement calls are the documented exception and match no selector. A function that blocks
+// is itself named `*Sync`, so the bypass sits at each call to it, where "runs before serving" can be verified:
+// a call directly in the body of a synchronous `*Sync` function or method is exempt, but not one in a callback
+// it creates, which may run later. Lint sees a call by its name: a renamed or passed-along `*Sync` function, and
+// a caller of a function that still blocks without the suffix (the rows #53 has yet to move off the serving
+// path), are left to review.
 const SYNC_NAME = "/Sync$/";
-const INSIDE_SYNC_FUNCTION = [
-  `VariableDeclarator[id.name=${SYNC_NAME}][init.type="ArrowFunctionExpression"] *`,
-  `MethodDefinition[key.name=${SYNC_NAME}] *`,
-].join(", ");
+const SYNC_FUNCTIONS = [
+  `VariableDeclarator[id.name=${SYNC_NAME}] > ArrowFunctionExpression[async=false]`,
+  `MethodDefinition[kind="method"][key.name=${SYNC_NAME}] > FunctionExpression[async=false]`,
+];
+const SYNC_CALLS = [
+  `CallExpression[callee.name=${SYNC_NAME}]`,
+  `CallExpression[callee.property.name=${SYNC_NAME}]`,
+  `NewExpression[callee.name=${SYNC_NAME}]`,
+];
 const NO_SYNC_IO = {
-  selector: [
-    `CallExpression[callee.name=${SYNC_NAME}]:not(${INSIDE_SYNC_FUNCTION})`,
-    `CallExpression[callee.property.name=${SYNC_NAME}]:not(${INSIDE_SYNC_FUNCTION})`,
-  ].join(", "),
-  message: `Synchronous I/O stalls every connection; use node:fs/promises or an async child process. A call that runs before serving takes a bypass that says so (\`-- runs before serving\`); a function that blocks is named \`*Sync\` so its callers are checked instead. ${BYPASS_NOTE}`,
+  selector: SYNC_CALLS.flatMap((call) => [
+    `${call}:not(${SYNC_FUNCTIONS.map((fn) => `${fn} *`).join(", ")})`,
+    ...SYNC_FUNCTIONS.map((fn) => `${fn} :function ${call}`),
+  ]).join(", "),
+  message: `Synchronous I/O stalls every connection; use node:fs/promises or an async child process. A call that runs before serving takes a bypass that says so (\`-- runs before serving\`); a function that blocks is named \`*Sync\` so each call to it is checked instead. ${BYPASS_NOTE}`,
 };
 
 // The workspaces that serve: the server, the libraries it runs, and the text client. Left out are one-shot

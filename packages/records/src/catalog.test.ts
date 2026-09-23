@@ -1,4 +1,4 @@
-import { mkdtempDisposableSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempDisposableSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished } from "vitest";
@@ -36,6 +36,16 @@ describe("read-only catalog", () => {
     const mismatch = `catalog schema version ${SCHEMA_VERSION + 1} does not match ${SCHEMA_VERSION}`;
     expect(() => Catalog.openSync(directory.path, { readonly: true })).toThrow(mismatch);
     expect(() => Catalog.openSync(directory.path)).toThrow(mismatch);
+  });
+
+  it("closes the database when a writable open fails", () => {
+    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-catalog-"));
+    const writer = Catalog.openSync(directory.path);
+    writer.db.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION + 1);
+    writer.close();
+    expect(() => Catalog.openSync(directory.path)).toThrow("does not match");
+    // SQLite removes the write-ahead log when the last connection closes; a leaked connection keeps it.
+    expect(existsSync(join(directory.path, "catalog.sqlite-wal"))).toBe(false);
   });
 });
 
