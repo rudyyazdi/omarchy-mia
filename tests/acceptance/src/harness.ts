@@ -9,7 +9,13 @@ import {
   type Profile,
   type RuntimeFileReader,
 } from "@mia/agent-adapter";
-import { startServer, type MiaServer, type TurnRunner } from "@mia/server";
+import {
+  collectArtifact,
+  startServer,
+  type ArtifactCollector,
+  type MiaServer,
+  type TurnRunner,
+} from "@mia/server";
 import type { AckError, AckPayload } from "@mia/protocol";
 import { describeAck, MiaClient } from "@mia/text-client";
 import { Catalog } from "@mia/records";
@@ -28,6 +34,11 @@ export interface TestServer {
    * `started` resolves once the engine has asked for it. Its deadline or shutdown still abandons it.
    */
   holdEvidenceRead(path: string): HeldRead;
+  /**
+   * Holds the next capture of the tool output declared at `path` until `release`, as a slow disk would;
+   * `started` resolves once the engine has asked for it. Once released, the file is captured for real.
+   */
+  holdArtifactCapture(path: string): HeldRead;
   connect(clientId?: string): Promise<MiaClient>;
   catalog(): Catalog;
   close(): Promise<void>;
@@ -37,6 +48,20 @@ export interface HeldRead {
   started: Promise<void>;
   release(): void;
 }
+
+/** The server side of a HeldRead: what the engine's use of the held path signals, and what it waits for. */
+interface PendingHold {
+  started: () => void;
+  released: Promise<void>;
+}
+
+/** Holds the next use of `path`: `started` resolves once it is reached, and it waits until `release`. */
+const holdOn = (holdsByPath: Map<string, PendingHold>, path: string): HeldRead => {
+  const started = Promise.withResolvers<undefined>();
+  const released = Promise.withResolvers<undefined>();
+  holdsByPath.set(path, { started: () => started.resolve(undefined), released: released.promise });
+  return { started: started.promise, release: () => released.resolve(undefined) };
+};
 
 /** A test's own timeout bounds its waits; connecting gets a shorter deadline so a dead server fails fast. */
 const CONNECT_TIMEOUT_MS = 10_000;
@@ -127,7 +152,7 @@ export const startTestServer = async (
   const logs: string[] = [];
   // Replaced on every expiry, so a read that starts afterwards gets a deadline of its own.
   let evidenceDeadline = new AbortController();
-  const holds = new Map<string, { started: () => void; released: Promise<void> }>();
+  const holds = new Map<string, PendingHold>();
   // Reads for real once released, or with the aborted signal, so an abandoned read is reported as in production.
   const readEvidence: RuntimeFileReader = async (path, options = {}) => {
     const hold = holds.get(path);
@@ -142,12 +167,23 @@ export const startTestServer = async (
     }
     return readRuntimeFile(path, options);
   };
+  const captureHolds = new Map<string, PendingHold>();
+  const captureArtifact: ArtifactCollector = async (declared, outputDirectories) => {
+    const hold = captureHolds.get(declared.path);
+    if (hold) {
+      captureHolds.delete(declared.path);
+      hold.started();
+      await hold.released;
+    }
+    return collectArtifact(declared, outputDirectories);
+  };
   const server = await startServer({
     profile,
     ...(adapter ? { adapter } : {}),
     log: (message) => logs.push(message),
     evidenceReadDeadline: () => evidenceDeadline.signal,
     readEvidence,
+    collectArtifact: captureArtifact,
     env,
   });
   const clients: MiaClient[] = [];
@@ -160,12 +196,8 @@ export const startTestServer = async (
       evidenceDeadline.abort(new DOMException("evidence read deadline", "TimeoutError"));
       evidenceDeadline = new AbortController();
     },
-    holdEvidenceRead: (path) => {
-      const started = Promise.withResolvers<undefined>();
-      const released = Promise.withResolvers<undefined>();
-      holds.set(path, { started: () => started.resolve(undefined), released: released.promise });
-      return { started: started.promise, release: () => released.resolve(undefined) };
-    },
+    holdEvidenceRead: (path) => holdOn(holds, path),
+    holdArtifactCapture: (path) => holdOn(captureHolds, path),
     connect: async (clientId?: string) => {
       const client = new MiaClient({
         url: server.gateway.url,

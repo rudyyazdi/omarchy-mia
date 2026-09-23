@@ -26,7 +26,13 @@ export interface TurnOptions {
   /** Defaults to config.agentPromptFile; the engine passes the conversation's retained snapshot. */
   agentPromptFile?: string;
   permissionHandler: PermissionHandler;
-  onEvent: (event: RuntimeEvent) => void;
+  /**
+   * Handles one runtime event and settles once it is handled; it must not reject. The adapter hands over the next
+   * event read from stdout only after the previous one settled, so a slow handler pauses the runtime's output
+   * instead of queueing events, and they are handled in the order the runtime wrote them. Stderr text and the
+   * adapter's own reports arrive whenever they happen, and the exit is handed over after the last stdout event.
+   */
+  onEvent: (event: RuntimeEvent) => Promise<void>;
 }
 
 interface RuntimeExit {
@@ -230,6 +236,10 @@ export class ClaudeCodeAdapter {
     const { options, launch, streamLogPath } = input;
     const now = () => new Date().toISOString();
     const emit = options.onEvent;
+    /** Hands over an event that nothing waits on; `onEvent` never rejects, so there is no failure to handle. */
+    const report = (event: RuntimeEvent): void => {
+      emit(event).catch(() => undefined);
+    };
 
     let child: ChildProcess;
     try {
@@ -268,7 +278,7 @@ export class ClaudeCodeAdapter {
     let spawnError: string | null = null;
 
     child.once("spawn", () =>
-      emit({
+      report({
         type: "runtime_started",
         pid: child.pid ?? -1,
         launch: launch.description,
@@ -283,21 +293,21 @@ export class ClaudeCodeAdapter {
 
     const translator = new ClaudeTranslator();
     /** The last init and summary the runtime reported become the TurnResult's; every event is forwarded. */
-    const handleEvent = (event: RuntimeEvent): void => {
+    const handleEvent = (event: RuntimeEvent): Promise<void> => {
       if (event.type === "runtime_init") init = event.init;
       if (event.type === "turn_result") summary = event.summary;
-      emit(event);
+      return emit(event);
     };
 
-    /** Emits one stdout line's events and returns its redacted text for the transcript. */
-    const handleLine = (line: string): string | null => {
+    /** Hands over one stdout line's events, each once the last is handled; returns the line's redacted text. */
+    const handleLine = async (line: string): Promise<string | null> => {
       const parsed = parseStreamLine(line);
       if (!parsed) return null;
       const retained = redactLine(parsed);
       if (parsed.ok)
-        for (const event of translator.translate(parsed.message, now)) handleEvent(event);
+        for (const event of translator.translate(parsed.message, now)) await handleEvent(event);
       else
-        emit({
+        await emit({
           type: "malformed_event",
           raw: retained.slice(0, 2000),
           error: parsed.error,
@@ -323,7 +333,7 @@ export class ClaudeCodeAdapter {
           handleLine,
           signal: stopReading.signal,
           reportFailure: (error) =>
-            emit({
+            report({
               type: "runtime_stderr",
               text: `[mia] could not retain the transcript: ${errorMessage(error)}`,
               at: now(),
@@ -333,7 +343,7 @@ export class ClaudeCodeAdapter {
           // A runtime whose output Mia no longer reads could keep acting unobserved, so it is stopped; the turn
           // then ends as failed when the process closes.
           killRuntime();
-          emit({
+          report({
             type: "runtime_stderr",
             text: `[mia] stopped reading runtime output, so the runtime was stopped: ${errorMessage(error)}`,
             at: now(),
@@ -342,7 +352,7 @@ export class ClaudeCodeAdapter {
       : Promise.resolve();
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) =>
-      emit({ type: "runtime_stderr", text: redactString(chunk), at: now() }),
+      report({ type: "runtime_stderr", text: redactString(chunk), at: now() }),
     );
 
     /** Settles once the process is gone; interrupt() judges the kill by it. */
@@ -367,7 +377,7 @@ export class ClaudeCodeAdapter {
       if (interrupted)
         await withinDeadline(interruptSettled.promise, INTERRUPT_SETTLE_MS, undefined);
       this.bridge.setHandler(null);
-      emit({ type: "runtime_exit", code: exit.code, signal: exit.signal, at: now() });
+      await emit({ type: "runtime_exit", code: exit.code, signal: exit.signal, at: now() });
       let status: TurnResult["status"];
       let error: string | null = null;
       if (interrupted) {

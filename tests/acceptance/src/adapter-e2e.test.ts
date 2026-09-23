@@ -70,7 +70,9 @@ const run = async (
         requests.push(request);
         return decide(request);
       },
-      onEvent: (event) => events.push(event),
+      onEvent: async (event) => {
+        events.push(event);
+      },
     }),
   );
   if (during) await during(handle);
@@ -168,13 +170,84 @@ describe("real adapter against a fake runtime process", () => {
     expect(transcript).not.toContain("fake-short-credential");
   });
 
-  it("reports an event handler that throws and still ends the turn, as failed", async () => {
+  it("hands over no later stdout event while one is still being handled", async () => {
+    // One write of every line, so the adapter reads them in a single chunk and only its waiting orders them.
+    const runtime = join(dir, "burst-runtime.mjs");
+    const lines = [
+      {
+        type: "system",
+        subtype: "init",
+        session_id: "burst",
+        model: "scripted-model",
+        tools: [],
+        mcp_servers: [],
+      },
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "one" },
+        },
+        session_id: "burst",
+      },
+      {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        duration_ms: 1,
+        num_turns: 1,
+        result: "done",
+        session_id: "burst",
+        total_cost_usd: 0,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    ];
+    const output = lines.map((line) => `${JSON.stringify(line)}\n`).join("");
+    writeFileSync(
+      runtime,
+      `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(output)});\n`,
+      {
+        mode: 0o755,
+      },
+    );
+    const initStarted = Promise.withResolvers<undefined>();
+    const initRelease = Promise.withResolvers<undefined>();
+    let released = false;
+    const heldBack: string[] = [];
+    const handedOver: string[] = [];
+    const burst = new ClaudeCodeAdapter(
+      testProfile(dir, { executable: runtime }).runtime,
+      bridge,
+      FAKE_RUNTIME_ENV,
+    );
+    const handle = burst.submitTurn(
+      turnOptions("", {
+        permissionHandler: async () => ({ behavior: "deny", message: "unused" }),
+        onEvent: async (event) => {
+          (released ? handedOver : heldBack).push(event.type);
+          if (event.type !== "runtime_init") return;
+          initStarted.resolve(undefined);
+          await initRelease.promise;
+        },
+      }),
+    );
+    // A turn that ends without an init fails the assertions below instead of waiting forever.
+    await Promise.race([initStarted.promise, handle.result]);
+    released = true;
+    initRelease.resolve(undefined);
+    expect((await handle.result).status).toBe("completed");
+    expect(heldBack).toEqual(["runtime_started", "runtime_init"]);
+    expect(handedOver).toEqual(["text_delta", "turn_result", "runtime_exit"]);
+  });
+
+  it("reports an event handler that rejects and still ends the turn, as failed", async () => {
     await harness.reset();
     const events: RuntimeEvent[] = [];
     const handle = adapter().submitTurn(
       turnOptions("SLOW", {
         permissionHandler: async () => ({ behavior: "allow" }),
-        onEvent: (event) => {
+        onEvent: async (event) => {
           if (event.type === "runtime_init") throw new Error("handler failed");
           events.push(event);
         },
@@ -220,7 +293,9 @@ describe("real adapter against a fake runtime process", () => {
     const handle = adapter().submitTurn({
       ...turnOptions("READ", {
         permissionHandler: async () => ({ behavior: "allow" }),
-        onEvent: (event) => events.push(event),
+        onEvent: async (event) => {
+          events.push(event);
+        },
       }),
       runtimeDir: join(notADirectory, "runtime"),
     });

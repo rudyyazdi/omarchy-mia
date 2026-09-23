@@ -42,8 +42,14 @@ export class ScriptedTurn {
     mkdirSync(options.runtimeDir, { recursive: true });
   }
 
-  emit(event: RuntimeEvent): void {
-    this.options.onEvent(event);
+  /** Hands `event` to the engine; settles once it is handled, which for a declared tool output includes reading it. */
+  emit(event: RuntimeEvent): Promise<void> {
+    return this.options.onEvent(event);
+  }
+
+  /** Hands over an event the engine records before `onEvent` returns; `onEvent` never rejects. */
+  private report(event: RuntimeEvent): void {
+    this.emit(event).catch(() => undefined);
   }
 
   /** What the real adapter would have launched: `resume` is whether it passes `--resume` or `--session-id`. */
@@ -62,7 +68,7 @@ export class ScriptedTurn {
   }
 
   text(text: string): void {
-    this.emit({ type: "text_delta", text, at: new Date().toISOString() });
+    this.report({ type: "text_delta", text, at: new Date().toISOString() });
   }
 
   init(model = "scripted-model"): void {
@@ -70,11 +76,11 @@ export class ScriptedTurn {
       model,
       evidence: { scripted: "init", session: this.options.runtimeConversationId, model },
     };
-    this.emit({ type: "runtime_init", init: this.reportedInit, at: new Date().toISOString() });
+    this.report({ type: "runtime_init", init: this.reportedInit, at: new Date().toISOString() });
   }
 
   propose(runtimeCallId: string, toolIdentity: string, args: unknown): void {
-    this.emit({
+    this.report({
       type: "tool_proposed",
       runtimeCallId,
       toolIdentity,
@@ -106,8 +112,9 @@ export class ScriptedTurn {
     return decision;
   }
 
-  toolResult(runtimeCallId: string, content: unknown, isError = false): void {
-    this.emit({
+  /** Settles once the engine has handled the result, including reading any tool output it declares. */
+  toolResult(runtimeCallId: string, content: unknown, isError = false): Promise<void> {
+    return this.emit({
       type: "tool_result",
       runtimeCallId,
       isError,
@@ -157,7 +164,7 @@ export class ScriptedTurn {
             evidence: { scripted: "result", session: this.options.runtimeConversationId },
           }
         : null;
-    if (summary) this.emit({ type: "turn_result", summary, at: new Date().toISOString() });
+    if (summary) this.report({ type: "turn_result", summary, at: new Date().toISOString() });
     const result: TurnResult = {
       status: this.interrupted && !this.survivesInterrupt ? "killed" : status,
       summary,
@@ -170,7 +177,7 @@ export class ScriptedTurn {
       interrupted: this.interrupted,
       runtimeCancellation,
     };
-    this.emit({
+    this.report({
       type: "runtime_exit",
       code: exit.code,
       signal: exit.signal,

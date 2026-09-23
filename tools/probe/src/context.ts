@@ -187,7 +187,7 @@ export class ProbeContext {
       firstTurn: spec.firstTurn,
       runtimeDir: this.runtimeDir(spec.sessionId),
       turnIndex: spec.turnIndex,
-      onEvent: (event) => {
+      onEvent: async (event) => {
         step.events.push(event);
         if (event.type === "text_delta") process.stdout.write(event.text);
         else if (event.type !== "assistant_message") log(event.type, describeEvent(event));
