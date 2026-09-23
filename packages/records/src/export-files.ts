@@ -34,10 +34,13 @@ export class ExportFiles {
       for (const [index, part] of parts.entries()) {
         path = join(path, part);
         const entry = lstatSync(path);
+        const prefix = parts.slice(0, index + 1).join("/");
         if (entry.isSymbolicLink())
-          return { status: "invalid", problem: `symlink not allowed: ${name}` };
-        if (index < parts.length - 1 ? !entry.isDirectory() : !entry.isFile())
-          return { status: "invalid", problem: `not a regular file path: ${name}` };
+          return { status: "invalid", problem: `symlink not allowed: ${prefix}` };
+        if (index < parts.length - 1 && !entry.isDirectory())
+          return { status: "invalid", problem: `not a directory: ${prefix}` };
+        if (index === parts.length - 1 && !entry.isFile())
+          return { status: "invalid", problem: `not a regular file: ${prefix}` };
       }
       return { status: "read", bytes: readFileSync(path) };
     } catch (error) {

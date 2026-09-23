@@ -429,9 +429,9 @@ export const verifyExport = (dir: string): VerificationResult => {
     if (sha256Hex(bytes) !== digest) problems.push(`object corrupt: ${digest}`);
     checkedObjects++;
   }
-  const report = readFile("report.html", null)?.toString("utf8");
-  if (!report) problems.push("report.html missing");
-  else {
+  const report = readFile("report.html", "report.html missing")?.toString("utf8");
+  if (report === "") problems.push("report.html missing");
+  if (report) {
     if (/<script\b/i.test(report)) problems.push("report contains a script tag");
     if (!/Content-Security-Policy/.test(report))
       problems.push("report lacks a Content-Security-Policy");
@@ -441,7 +441,7 @@ export const verifyExport = (dir: string): VerificationResult => {
   return {
     ok: problems.length === 0,
     complete,
-    problems,
+    problems: [...new Set(problems)],
     checked_files: checkedFiles,
     checked_objects: checkedObjects,
   };

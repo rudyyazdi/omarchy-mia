@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -95,7 +96,7 @@ describe("verifyExport input validation", () => {
   };
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), "mia-export-validation-"));
+    root = realpathSync(mkdtempSync(join(tmpdir(), "mia-export-validation-")));
     ({ directory, manifest } = createExport(root));
   });
   afterEach(() => {
@@ -265,6 +266,7 @@ describe("verifyExport input validation", () => {
       const { result, reads } = verifyWithObservedReads();
       expect(result.ok).toBe(false);
       expect(result.problems).toContain(`symlink not allowed: ${name}`);
+      if (name === "report.html") expect(result.problems).not.toContain("report.html missing");
       expect(reads).not.toContain(join(directory, name));
       expect(reads).not.toContain(outside);
     },
@@ -327,7 +329,7 @@ describe("verifyExport input validation", () => {
       mkdirSync(join(directory, name));
       const { result, reads } = verifyWithObservedReads();
       expect(result.ok).toBe(false);
-      expect(result.problems).toContain(`not a regular file path: ${name}`);
+      expect(result.problems).toContain(`not a regular file: ${name}`);
       expect(reads).not.toContain(join(directory, name));
     },
   );
@@ -337,7 +339,7 @@ describe("verifyExport input validation", () => {
     writeFileSync(join(directory, "records"), "not a directory");
     const { result, reads } = verifyWithObservedReads();
     expect(result.ok).toBe(false);
-    expect(result.problems).toContain("not a regular file path: records/tasks.jsonl");
+    expect(result.problems).toContain("not a directory: records");
     expect(reads).not.toContain(join(directory, "records/tasks.jsonl"));
   });
 
@@ -347,8 +349,9 @@ describe("verifyExport input validation", () => {
     execFileSync("mkfifo", [join(directory, name)]);
     const { result, reads } = verifyWithObservedReads();
     expect(result.ok).toBe(false);
-    expect(result.problems).toContain(`not a regular file path: ${name}`);
-    expect(result.problems).toContain(`not a regular file: ${name}`);
+    expect(result.problems.filter((problem) => problem === `not a regular file: ${name}`)).toEqual([
+      `not a regular file: ${name}`,
+    ]);
     expect(reads).not.toContain(join(directory, name));
   });
 
