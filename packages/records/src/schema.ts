@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ApprovalStatus, TaskStatus, ToolCallStatus, ToolPolicy } from "@mia/protocol";
+import type { ApprovalStatus, TaskStatus, ToolCallPolicy, ToolCallStatus } from "@mia/protocol";
 
 export const SCHEMA_VERSION = 1;
 
@@ -264,8 +264,6 @@ export type ExportTable = (typeof EXPORT_TABLES)[number];
 
 export type ConversationStatus = "active" | "closed";
 export type ExecutionStatus = "running" | "completed" | "failed" | "killed";
-/** Missing configuration stays distinct from an explicit deny in the persisted policy audit. */
-export type ToolCallPolicy = ToolPolicy | "unlisted";
 export type ClientKind = "text-client";
 /** Duplicate delivery is an acknowledgement, not a new persisted command outcome. */
 export type CommandDisposition = "accepted" | "rejected";

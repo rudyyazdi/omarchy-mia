@@ -5,7 +5,6 @@ export type {
   ExecutionStatus,
   ProvenanceEntryRow,
   ProvenanceRole,
-  ToolCallPolicy,
 } from "./schema.ts";
 export { Catalog, defaultStateDir, newId, nowIso } from "./catalog.ts";
 export { ObjectStore } from "./objects.ts";

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isSensitiveKey, isTokenCount, ToolPolicySchema } from "@mia/protocol";
+import { isSensitiveKey, isTokenCount, ToolPolicySchema, type ToolCallPolicy } from "@mia/protocol";
 
 export const EffortSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
 export type Effort = z.infer<typeof EffortSchema>;
@@ -66,6 +66,17 @@ export const RuntimeConfigSchema = z
   })
   .strict();
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
+
+/**
+ * The policy for a tool identity, or "unlisted" when the profile names none. Own keys only: the identity comes
+ * unchecked from the runtime, and indexing would resolve `constructor` or `__proto__` through Object.prototype.
+ */
+export const policyFor = (config: RuntimeConfig, identity: string): ToolCallPolicy => {
+  const policy = Object.hasOwn(config.toolPolicy, identity)
+    ? config.toolPolicy[identity]
+    : undefined;
+  return policy ?? "unlisted";
+};
 
 export class ConfigurationError extends Error {
   override readonly name = "ConfigurationError";

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TurnResult } from "@mia/agent-adapter";
-import type { TaskStatus, ToolCallStatus } from "@mia/protocol";
-import type { ToolCallPolicy } from "@mia/records";
+import type { TaskStatus, ToolCallPolicy, ToolCallStatus } from "@mia/protocol";
 import {
   bindPermissionRequest,
   bindStreamProposal,

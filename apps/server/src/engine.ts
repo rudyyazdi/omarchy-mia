@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { match } from "ts-pattern";
 import {
+  policyFor,
   readHookEvidence,
   readRuntimeFile,
   type HookEvidence,
@@ -28,16 +29,10 @@ import {
   type ServerEvent,
   type ServerEventType,
   type TaskStatus,
+  type ToolCallPolicy,
   type ToolCallStatus,
 } from "@mia/protocol";
-import {
-  newId,
-  nowIso,
-  type ArtifactKind,
-  type Catalog,
-  type RecordWriter,
-  type ToolCallPolicy,
-} from "@mia/records";
+import { newId, nowIso, type ArtifactKind, type Catalog, type RecordWriter } from "@mia/records";
 import {
   captureFields,
   extractDeclaredArtifact,
@@ -1007,8 +1002,7 @@ export class Engine {
             }
             const last = revisions.at(-1);
             if (last) this.supersede(task, last, { toolIdentity: proposed.toolIdentity, digest });
-            const policy =
-              this.deps.profile.runtime.toolPolicy[proposed.toolIdentity] ?? "unlisted";
+            const policy = policyFor(this.deps.profile.runtime, proposed.toolIdentity);
             const state = this.proposeCall(task, {
               runtimeCallId: proposed.runtimeCallId,
               toolIdentity: proposed.toolIdentity,
@@ -1194,7 +1188,7 @@ export class Engine {
       });
     // Policy is exactly what the profile says. After an interruption the next turn's Mia note tells the model which
     // effects are unknown; deciding whether a repeat is safe is the model's job, not a reason to re-prompt an allowed tool.
-    const policy = this.deps.profile.runtime.toolPolicy[req.toolName] ?? "unlisted";
+    const policy = policyFor(this.deps.profile.runtime, req.toolName);
     const rule = evaluatePermission({
       policy,
       gateOpen: task.gateOpen,

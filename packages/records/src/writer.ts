@@ -6,6 +6,7 @@ import {
   redactValue,
   type ApprovalStatus,
   type TaskStatus,
+  type ToolCallPolicy,
   type ToolCallStatus,
 } from "@mia/protocol";
 import { Catalog, newId, nowIso } from "./catalog.ts";
@@ -21,7 +22,6 @@ import type {
   LinkRelation,
   ProvenanceEntryRow,
   ProvenanceRole,
-  ToolCallPolicy,
 } from "./schema.ts";
 
 export interface EventInput {
