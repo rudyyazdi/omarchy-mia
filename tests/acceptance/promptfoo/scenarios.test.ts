@@ -2,7 +2,13 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import assertScenario from "./assert.ts";
-import { readScenarioList, readScenarioName, SCENARIOS, ScenarioNameSchema } from "./scenarios.ts";
+import {
+  decisionAckOf,
+  readScenarioList,
+  readScenarioName,
+  SCENARIOS,
+  ScenarioNameSchema,
+} from "./scenarios.ts";
 
 const declared = [...ScenarioNameSchema.options].toSorted();
 
@@ -50,5 +56,24 @@ describe("live scenario names", () => {
         ok: false,
         error: `unknown scenario ${JSON.stringify(entry)}; declared: ${ScenarioNameSchema.options.join(", ")}`,
       });
+  });
+});
+
+describe("decision ack evidence", () => {
+  it("records an accepted ack without a code and a refusal with its error code", () => {
+    expect(decisionAckOf({ command_id: "command", disposition: "accepted" }, false)).toEqual({
+      disposition: "accepted",
+      after_reconnect: false,
+    });
+    expect(
+      decisionAckOf(
+        {
+          command_id: "command",
+          disposition: "failed",
+          error: { code: "internal", message: "boom" },
+        },
+        true,
+      ),
+    ).toEqual({ disposition: "failed", code: "internal", after_reconnect: true });
   });
 });

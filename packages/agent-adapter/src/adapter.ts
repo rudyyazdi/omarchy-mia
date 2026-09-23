@@ -31,7 +31,7 @@ interface RuntimeExit {
 }
 
 export interface TurnResult {
-  /** How the runtime process ended; the execution record stores it as its terminal status. */
+  /** How the runtime process ended; the engine derives the execution's terminal status from it. */
   status: Exclude<ExecutionStatus, "running">;
   summary: TurnSummary | null;
   exit: RuntimeExit | null;

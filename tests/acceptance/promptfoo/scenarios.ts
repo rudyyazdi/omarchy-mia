@@ -18,7 +18,6 @@ import {
   ErrorDispositionSchema,
   ServerEventTypeSchema,
   TaskStatusSchema,
-  type Decision,
   type ServerEvent,
   type TaskStatus,
 } from "@mia/protocol";
@@ -96,15 +95,23 @@ const DecisionAckSchema = z.discriminatedUnion("disposition", [
 ]);
 type DecisionAck = z.infer<typeof DecisionAckSchema>;
 
-const decisionAckOf = (ack: AckPayload, afterReconnect: boolean): DecisionAck =>
+/** The ack as evidence; exported so a unit test pins the mapping the assertion relies on. */
+export const decisionAckOf = (ack: AckPayload, afterReconnect: boolean): DecisionAck =>
   ack.disposition === "accepted"
     ? { disposition: "accepted", after_reconnect: afterReconnect }
     : { disposition: ack.disposition, code: ack.error.code, after_reconnect: afterReconnect };
 
+/** What a decider may do with an approval request: decide it, or send nothing. */
+const DeciderChoiceSchema = z.union([DecisionSchema, z.literal("ignore")]);
+type DeciderChoice = z.infer<typeof DeciderChoiceSchema>;
+
+/** The two server profiles the live lane starts; `provider.ts` picks a server by it. */
+const ScenarioProfileSchema = z.enum(["fixture-test", "fixture-test-interrupt"]);
+
 /** Evidence one scenario produces; also what the promptfoo assertion parses back from the provider's JSON output. */
 export const ScenarioEvidenceSchema = z.object({
   scenario: ScenarioNameSchema,
-  profile: z.string(),
+  profile: ScenarioProfileSchema,
   conversation_id: z.string(),
   task_ids: z.array(z.string()),
   decisions: z.array(
@@ -112,7 +119,7 @@ export const ScenarioEvidenceSchema = z.object({
       approval_id: z.string(),
       tool: z.string(),
       /** The decider's choice; `ignore` sends nothing, so it has no ack. */
-      decision: z.union([DecisionSchema, z.literal("ignore")]),
+      decision: DeciderChoiceSchema,
       ack: DecisionAckSchema.optional(),
       ledger_commits_at_request: z.number(),
     }),
@@ -141,7 +148,7 @@ export type ScenarioEvidence = z.infer<typeof ScenarioEvidenceSchema>;
 
 export interface Scenario {
   name: ScenarioName;
-  profile: "fixture-test" | "fixture-test-interrupt";
+  profile: z.infer<typeof ScenarioProfileSchema>;
   run(
     ctx: ScenarioContext,
   ): Promise<
@@ -152,11 +159,7 @@ export interface Scenario {
   >;
 }
 
-type Decider = (request: {
-  tool: string;
-  approval_id: string;
-  index: number;
-}) => Decision | "ignore";
+type Decider = (request: { tool: string; approval_id: string; index: number }) => DeciderChoice;
 
 /** Commits are the fixture's own count of executed actions; model prose never establishes one. */
 const commitCount = (state: FixtureState): number =>

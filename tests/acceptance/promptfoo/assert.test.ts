@@ -91,4 +91,44 @@ describe("scenario assertion", () => {
       /^provider output does not match the evidence shape/,
     );
   });
+
+  it("fails a decision-driven scenario whose decision the server refused or never answered", () => {
+    const approveReject = (second: Record<string, unknown>) =>
+      evidenceFor("approve-reject", {
+        decisions: [
+          {
+            approval_id: "first",
+            tool: "mcp__d1__change",
+            decision: "approve",
+            ack: { disposition: "accepted", after_reconnect: false },
+            ledger_commits_at_request: 0,
+          },
+          {
+            approval_id: "second",
+            tool: "mcp__d1__change",
+            decision: "reject",
+            ledger_commits_at_request: 1,
+            ...second,
+          },
+        ],
+        ledger_after: {
+          counter: 1,
+          commits: [{ tool: "change", call_id: "call" }],
+          returned: [],
+          entered: [],
+          kinds: { committed: 1 },
+        },
+      });
+    const accepted = { ack: { disposition: "accepted", after_reconnect: false } };
+    const refused = {
+      ack: { disposition: "rejected", code: "invalid_state", after_reconnect: false },
+    };
+    expect(judge("approve-reject", approveReject(accepted)).pass).toBe(true);
+    expect(judge("approve-reject", approveReject(refused)).reason).toBe(
+      "decisions not accepted: reject second rejected:invalid_state",
+    );
+    expect(judge("approve-reject", approveReject({})).reason).toBe(
+      "decisions not accepted: reject second unanswered",
+    );
+  });
 });
