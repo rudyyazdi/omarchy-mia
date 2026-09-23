@@ -1452,6 +1452,13 @@ export class Engine {
   // ---------------------------------------------------------------- turn completion
 
   private async finishTurn(task: TaskState, result: TurnResult): Promise<void> {
+    // Read before the transaction: retaining evidence is best-effort, recording that the task finished is not.
+    // Read before anything else is computed: a command handled while the reads are awaited (an interruption)
+    // changes the task, and the records must reflect it.
+    const [transcript, hookEvidence] = await Promise.all([
+      readRuntimeFile(result.streamLogPath),
+      readHookEvidence(result.hookEvidencePath),
+    ]);
     const conversation = this.conversation;
     if (!conversation) return;
     const opts = this.taskOpts(task);
@@ -1459,9 +1466,6 @@ export class Engine {
     const actions = classifyActions(calls, task.interrupted);
     const unknown = actions.some((action) => action.status === "unknown");
     const { status, error } = classifyTask({ interrupted: task.interrupted, result, unknown });
-    // Read before the transaction: retaining evidence is best-effort, recording that the task finished is not.
-    const transcript = readRuntimeFile(result.streamLogPath);
-    const hookEvidence = readHookEvidence(result.hookEvidencePath);
     const { records: hooks, malformedLines, readError } = hookEvidence;
     const efforts = effortLevels(hooks);
     try {

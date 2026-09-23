@@ -196,7 +196,7 @@ export const effortControl = async (context: ProbeContext): Promise<void> => {
       return { stdout: output, exit: await exited };
     },
   );
-  const hooks = readHookEvidence(plan.files.hookEvidence);
+  const hooks = await readHookEvidence(plan.files.hookEvidence);
   const control = {
     exit,
     efforts: effortsOf(hooks.records),

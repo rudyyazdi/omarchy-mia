@@ -5,42 +5,42 @@ import { describe, expect, it } from "vitest";
 import { probeStaticCapabilities, readHookEvidence } from "./adapter.ts";
 
 describe("readHookEvidence", () => {
-  it("returns no evidence when the hook never wrote a file", () => {
+  it("returns no evidence when the hook never wrote a file", async () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-hooks-"));
-    expect(readHookEvidence(join(directory.path, "absent.jsonl"))).toEqual({
+    expect(await readHookEvidence(join(directory.path, "absent.jsonl"))).toEqual({
       records: [],
       malformedLines: 0,
       readError: null,
     });
   });
 
-  it("keeps every object line and counts the lines that are not one", () => {
+  it("keeps every object line and counts the lines that are not one", async () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-hooks-"));
     const path = join(directory.path, "hook-evidence.jsonl");
     writeFileSync(path, '{"effort":"low"}\n42\n\n{"effort":"high"}\n{"effort":"me');
-    expect(readHookEvidence(path)).toEqual({
+    expect(await readHookEvidence(path)).toEqual({
       records: [{ effort: "low" }, { effort: "high" }],
       malformedLines: 2,
       readError: null,
     });
   });
 
-  it("reports a file it cannot read instead of throwing", () => {
+  it("reports a file it cannot read instead of throwing", async () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-hooks-"));
     const path = join(directory.path, "hook-evidence.jsonl");
     mkdirSync(path);
-    expect(readHookEvidence(path)).toEqual({
+    expect(await readHookEvidence(path)).toEqual({
       records: [],
       malformedLines: 0,
       readError: expect.stringContaining("EISDIR"),
     });
   });
 
-  it("reports a path it cannot reach instead of treating it as absent", () => {
+  it("reports a path it cannot reach instead of treating it as absent", async () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-hooks-"));
     const notADirectory = join(directory.path, "runtime");
     writeFileSync(notADirectory, "");
-    expect(readHookEvidence(join(notADirectory, "hook-evidence.jsonl"))).toEqual({
+    expect(await readHookEvidence(join(notADirectory, "hook-evidence.jsonl"))).toEqual({
       records: [],
       malformedLines: 0,
       readError: expect.stringContaining("ENOTDIR"),

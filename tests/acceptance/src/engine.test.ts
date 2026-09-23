@@ -1,3 +1,5 @@
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import { writeFileSync, mkdirSync, mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -351,6 +353,83 @@ describe("streaming and commands", () => {
       read_error: expect.stringContaining("EISDIR"),
       note: expect.stringContaining("hook evidence unreadable (EISDIR"),
     });
+  });
+
+  /**
+   * Makes the turn's hook evidence a FIFO whose writer holds it open, so the engine's turn-end read cannot
+   * finish until `release`. The writer releases on its own after a while only so that a server blocked in a
+   * synchronous read (which could never reach `release`) fails the test instead of hanging it.
+   */
+  const holdHookEvidenceOpen = (turn: ScriptedTurn, line: string) => {
+    const path = join(turn.options.runtimeDir, "hook-evidence.jsonl");
+    execFileSync("mkfifo", [path]);
+    const writer = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const fs = require("node:fs");
+         const fd = fs.openSync(process.argv[1], "w");
+         fs.writeSync(fd, process.argv[2]);
+         const release = () => { fs.closeSync(fd); process.exit(0); };
+         process.stdin.on("end", release).resume();
+         setTimeout(release, 10_000);`,
+        path,
+        line,
+      ],
+      { stdio: ["pipe", "ignore", "inherit"] },
+    );
+    const exited = once(writer, "exit");
+    return {
+      release: async (): Promise<void> => {
+        writer.stdin.end();
+        await exited;
+      },
+      dispose: async (): Promise<void> => {
+        if (writer.exitCode !== null || writer.signalCode !== null) return;
+        writer.kill("SIGKILL");
+        await exited;
+      },
+    };
+  };
+
+  it("answers another connection while a turn-end read is held open, then records the turn", async () => {
+    const { turn, taskId } = await submit("hello");
+    turn.init();
+    const held = holdHookEvidenceOpen(turn, `${JSON.stringify({ effort: "medium" })}\n`);
+    try {
+      turn.end();
+      const other = await ts.connect("client-B");
+      expect((await other.sendDiagnostics()).disposition).toBe("accepted");
+      expect(taskStatus(taskId)).toBe("running");
+      await held.release();
+      expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
+      const execution = must(
+        rows<{ effort_evidence: string }>(
+          "SELECT effort_evidence FROM executions WHERE task_id = ?",
+          taskId,
+        )[0],
+      );
+      expect(JSON.parse(execution.effort_evidence)).toMatchObject({ values: ["medium"] });
+    } finally {
+      await held.dispose();
+    }
+  });
+
+  it("records an interruption accepted while the turn-end evidence is read", async () => {
+    const { turn, taskId } = await submit("hello");
+    turn.init();
+    const held = holdHookEvidenceOpen(turn, "");
+    try {
+      turn.end();
+      ackResult(await client.interrupt(taskId));
+      await held.release();
+      const outcome = await client.waitFor("interruption_outcome");
+      expect(outcome.payload.task_status).toBe("interrupted");
+      expect((await client.waitFor("task_finished")).payload.status).toBe("interrupted");
+      expect(taskStatus(taskId)).toBe("interrupted");
+    } finally {
+      await held.dispose();
+    }
   });
 
   /** Ends a turn after `prepare` has set it up to lose its transcript; returns the transcript artifacts. */
