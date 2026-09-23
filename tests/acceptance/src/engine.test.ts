@@ -101,6 +101,19 @@ const failDelivery = (type: string): void => {
 const approvalStatuses = (): string[] =>
   rows<{ status: string }>("SELECT status FROM approvals").map((row) => row.status);
 
+/** End a turn whose one call's prompt was abandoned: the call ends invalidated, and the next turn is told it never ran. */
+const expectAbandonedAtTurnEnd = async (turn: ScriptedTurn): Promise<void> => {
+  turn.end();
+  expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
+  expect(must(rows<{ status: string }>("SELECT status FROM tool_calls")[0]).status).toBe(
+    "invalidated",
+  );
+  expect(approvalStatuses()).toEqual(["expired"]);
+  const { turn: next } = await submit("did it run?");
+  expect(next.options.text).toContain("abandoned the approval prompt");
+  next.end();
+};
+
 describe("streaming and commands", () => {
   it("streams deltas in order before completion and deduplicates command ids", async () => {
     const { turn, taskId } = await submit("hello", "cmd-1");
@@ -461,14 +474,64 @@ describe("approval path", () => {
     expect((await held).behavior).toBe("deny");
     expect(approvalStatuses()).toEqual(["expired"]);
     await expectResumed(taskId);
-    turn.end();
-    expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
-    expect(must(rows<{ status: string }>("SELECT status FROM tool_calls")[0]).status).toBe(
-      "invalidated",
-    );
-    const { turn: next } = await submit("did it run?");
-    expect(next.options.text).toContain("abandoned the approval prompt");
-    next.end();
+    await expectAbandonedAtTurnEnd(turn);
+  });
+
+  describe("when an abandonment cannot be recorded", () => {
+    /** Hold a call, then have the runtime abandon its prompt while the expiry fails to commit. */
+    const abandonUnrecorded = async () => {
+      const held = await submitHeldCall("change");
+      failNextCommit();
+      must(held.turn.pendingAbandons[0], "held prompt").abort();
+      expect((await held.held).behavior).toBe("deny");
+      expect(approvalStatuses()).toEqual(["pending"]);
+      return held;
+    };
+
+    it("refuses a later decision, resumes the task, and ends the call invalidated", async () => {
+      const { turn, taskId, requested } = await abandonUnrecorded();
+      const late = await decide(taskId, requested.payload.approval_id, "approve");
+      expect(late.error).toMatchObject({
+        code: "invalid_state",
+        message: expect.stringContaining("can no longer be decided; its call was not released"),
+      });
+      await tick();
+      expect(turn.decisions.map(({ decision }) => decision.behavior)).toEqual(["deny"]);
+      expect(rows("SELECT id FROM events WHERE type = 'tool_dispatched'")).toHaveLength(0);
+      const busy = await client.submitText("another");
+      expect(busy.error?.message).toContain("is running; wait for it to finish or interrupt it");
+      await expectAbandonedAtTurnEnd(turn);
+    });
+
+    it("lets the runtime ask again for the same call, as a new revision", async () => {
+      const { turn, taskId, requested } = await abandonUnrecorded();
+      const retry = turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
+      const again = await client.waitFor(
+        "approval_requested",
+        (event) => event.payload.approval_id !== requested.payload.approval_id,
+      );
+      expect(again.payload.binding_revision).toBe(2);
+      await decide(taskId, again.payload.approval_id, "approve");
+      expect((await retry).behavior).toBe("allow");
+      turn.toolResult("toolu_1", "changed");
+      turn.end();
+      expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
+      const calls = rows<{ status: string }>(
+        "SELECT status FROM tool_calls ORDER BY binding_revision",
+      );
+      expect(calls.map((call) => call.status)).toEqual(["invalidated", "completed"]);
+      expect(approvalStatuses().sort()).toEqual(["approved", "expired"]);
+    });
+
+    it("ends the call invalidated, not gate-blocked, when the task is then interrupted", async () => {
+      const { taskId } = await abandonUnrecorded();
+      expect((await client.interrupt(taskId)).disposition).toBe("accepted");
+      expect((await client.waitFor("task_finished")).payload.status).toBe("interrupted");
+      expect(must(rows<{ status: string }>("SELECT status FROM tool_calls")[0]).status).toBe(
+        "invalidated",
+      );
+      expect(approvalStatuses()).toEqual(["expired"]);
+    });
   });
 
   it("resumes the task when a request the policy allows supersedes its last pending approval", async () => {
