@@ -40,6 +40,23 @@ export const readScenarioName = (
     : { ok: false, error: `unknown scenario ${JSON.stringify(value)}` };
 };
 
+/** Reads a comma-separated `--scenarios` value; any entry that is not a declared name is an error naming it. */
+export const readScenarioList = (
+  value: string,
+): { ok: true; names: ScenarioName[] } | { ok: false; error: string } => {
+  const names: ScenarioName[] = [];
+  for (const entry of value.split(",")) {
+    const read = readScenarioName(entry);
+    if (!read.ok)
+      return {
+        ok: false,
+        error: `${read.error}; declared: ${ScenarioNameSchema.options.join(", ")}`,
+      };
+    names.push(read.name);
+  }
+  return { ok: true, names };
+};
+
 const LedgerRefSchema = z.object({ tool: z.string(), call_id: z.string() });
 
 /** Evidence one scenario produces; also what the promptfoo assertion parses back from the provider's JSON output. */
