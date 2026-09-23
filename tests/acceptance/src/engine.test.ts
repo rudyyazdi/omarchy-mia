@@ -237,6 +237,37 @@ describe("approval path", () => {
     expect(revisions.map((row) => row.status)).toEqual(["invalidated", "unknown"]);
   });
 
+  it("refuses a repeated request for a call already awaiting approval and keeps one approval", async () => {
+    const { turn, taskId, held, requested } = await submitHeldCall("change");
+    // The approvals table's unique key would also refuse a second approval, but only as a record failure
+    // that leaves no trace in the journal; the refusal is a decision, recorded as such.
+    const duplicate = await turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
+    expect(duplicate).toMatchObject({
+      behavior: "deny",
+      message: expect.stringContaining("already awaiting the user's approval"),
+    });
+    expect(
+      rows<{ payload: string }>("SELECT payload FROM events WHERE type = 'error'").map(
+        (row) => JSON.parse(row.payload).message,
+      ),
+    ).toEqual([expect.stringContaining("(toolu_1) repeats a request already awaiting approval")]);
+    expect(approvalStatuses()).toEqual(["pending"]);
+    // The refused request dropping its own prompt afterwards abandons nothing: the first one stays held.
+    must(turn.pendingAbandons[1], "refused prompt").abort();
+    await tick();
+    expect(approvalStatuses()).toEqual(["pending"]);
+    const ack = await decide(taskId, requested.payload.approval_id, "approve");
+    expect(ack.result?.released).toBe(true);
+    expect((await held).behavior).toBe("allow");
+    expect(turn.decisions.map(({ decision }) => decision.behavior)).toEqual(["deny", "allow"]);
+    expect(approvalStatuses()).toEqual(["approved"]);
+    expect(
+      rows<{ status: string }>("SELECT status FROM tool_calls").map((row) => row.status),
+    ).toEqual(["dispatched"]);
+    turn.end();
+    await client.waitFor("task_finished");
+  });
+
   it("rejects decisions with wrong task, wrong client, or foreign ids", async () => {
     const { turn, taskId, held, requested } = await submitHeldCall("change");
     expect((await decide("task_wrong", requested.payload.approval_id, "approve")).error?.code).toBe(

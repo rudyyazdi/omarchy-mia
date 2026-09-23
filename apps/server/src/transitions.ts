@@ -79,14 +79,43 @@ const detailFor = (status: ToolCallStatus): string | undefined =>
 
 // ---------------------------------------------------------------- binding
 
-/** A permission request reuses the latest revision only if it is still held with the same tool and arguments. */
-export const bindsToLatest = (
-  latest: { status: ToolCallStatus; toolIdentity: string; digest: string },
+/**
+ * How a permission request binds to its runtime call id. It reuses the latest revision while that is still
+ * only proposed with the same tool and arguments (the stream announced the call before the runtime asked).
+ * A request identical to a revision already awaiting approval is a duplicate: it is refused without a second
+ * approval, so a call never has two pending approvals and the first request stays held until the user
+ * decides. Anything else (no revision yet, changed arguments, or a revision already released or refused)
+ * proposes a new revision. Denying assumes the runtime still honours the first prompt: a runtime that gives
+ * up on a prompt aborts it, which abandons the held call, so its retry proposes afresh instead.
+ */
+export type PermissionBinding<Latest> =
+  | { kind: "reuse"; call: Latest }
+  | { kind: "propose" }
+  | { kind: "duplicate"; detail: string; settle: PermissionDecision };
+
+export const bindPermissionRequest = <
+  Latest extends { status: ToolCallStatus; toolIdentity: string; digest: string },
+>(
+  latest: Latest | undefined,
   request: { toolIdentity: string; digest: string },
-): boolean =>
-  isHeld(latest.status) &&
-  latest.digest === request.digest &&
-  latest.toolIdentity === request.toolIdentity;
+): PermissionBinding<Latest> => {
+  if (
+    !latest ||
+    !isHeld(latest.status) ||
+    latest.digest !== request.digest ||
+    latest.toolIdentity !== request.toolIdentity
+  )
+    return { kind: "propose" };
+  if (latest.status === "proposed") return { kind: "reuse", call: latest };
+  return {
+    kind: "duplicate",
+    detail: "repeats a request already awaiting approval",
+    settle: {
+      behavior: "deny",
+      message: `Mia denied this duplicate request for ${request.toolIdentity}: the same call is already awaiting the user's approval, and that request stays held.`,
+    },
+  };
+};
 
 /**
  * Changed arguments under the same runtime call id: a held earlier binding, and its pending approval, can
