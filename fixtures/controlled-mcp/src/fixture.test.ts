@@ -60,6 +60,16 @@ describe("controlled fixture", () => {
     }
   });
 
+  it("answers a failed harness request with a 500 and keeps serving", async () => {
+    const response = await fetch(`${fixture.harnessUrl}/release`, {
+      method: "POST",
+      body: "{not json",
+    });
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: expect.any(String) });
+    await expect(harness.state()).resolves.toHaveProperty("counter");
+  });
+
   it("lists exactly the five tools", async () => {
     const mcpClient = await client();
     const tools = await mcpClient.listTools();

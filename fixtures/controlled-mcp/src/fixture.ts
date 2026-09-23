@@ -293,8 +293,6 @@ export const startFixture = async (options: FixtureOptions): Promise<FixtureHand
     sendJson(res, 404, { error: "unknown harness endpoint" });
   };
 
-  // http.createServer ignores a handler's result, so the handler stays synchronous and owns the
-  // failure: an async handler's rejection would go unhandled and exit the process.
   const harnessServer: Server = createServer((req, res) => {
     handleHarnessRequest(req, res).catch((error: unknown) => endWithError(res, error));
   });

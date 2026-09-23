@@ -12,8 +12,6 @@ const { config } = program.opts<{ config: string }>();
 
 try {
   const server = await startServer({ profilePath: config });
-  // Signal handlers ignore their result, so this one owns the failure rather than leaving an
-  // unhandled rejection to exit the process.
   const shutdown = () => {
     server.close().then(
       () => process.exit(0),

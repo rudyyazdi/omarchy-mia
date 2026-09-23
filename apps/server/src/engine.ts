@@ -678,9 +678,10 @@ export class Engine {
           this.commitCallChange(call, change);
         }
         this.afterCommit(() => {
-          void task.handle
-            ?.interrupt()
-            .catch((error) => this.deps.log(`interrupt failed: ${String(error)}`));
+          if (task.handle)
+            task.handle
+              .interrupt()
+              .catch((error) => this.deps.log(`interrupt failed: ${String(error)}`));
         });
       });
     } catch (error) {

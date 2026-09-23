@@ -25,8 +25,6 @@ const handle = await startFixture({
 console.log(
   JSON.stringify({ mcp_url: handle.mcpUrl, harness_url: handle.harnessUrl, dir: values.dir }),
 );
-// Signal handlers ignore their result, so this one owns the failure rather than leaving an
-// unhandled rejection to exit the process.
 const shutdown = () => {
   handle.close().then(
     () => process.exit(0),

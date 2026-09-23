@@ -254,8 +254,7 @@ export const runTextClient = async (options: ConnectionOptions): Promise<void> =
       session.terminal.prompt();
     }
   };
-  // readline ignores a listener's result, so the listener stays synchronous; the .catch covers
-  // the terminal itself failing, which onLine cannot report through the terminal.
+  // The .catch covers the terminal itself failing, which onLine cannot report through it.
   rl.on("line", (line) => {
     onLine(line).catch((error: unknown) => console.error(`✗ ${errorMessage(error)}`));
   });

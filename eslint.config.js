@@ -158,7 +158,8 @@ export default tseslint.config(
     },
     rules: {
       "@typescript-eslint/no-misused-promises": ["error", { checksVoidReturn: true }],
-      "@typescript-eslint/no-floating-promises": "error",
+      // `void` is allowed only on a promise that cannot reject, which the rule cannot tell apart.
+      "@typescript-eslint/no-floating-promises": ["error", { ignoreVoid: false }],
     },
   },
   {
