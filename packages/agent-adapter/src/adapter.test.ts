@@ -1,4 +1,4 @@
-import { mkdtempDisposableSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempDisposableSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -10,6 +10,7 @@ describe("readHookEvidence", () => {
     expect(readHookEvidence(join(directory.path, "absent.jsonl"))).toEqual({
       records: [],
       malformedLines: 0,
+      readError: null,
     });
   });
 
@@ -20,6 +21,29 @@ describe("readHookEvidence", () => {
     expect(readHookEvidence(path)).toEqual({
       records: [{ effort: "low" }, { effort: "high" }],
       malformedLines: 2,
+      readError: null,
+    });
+  });
+
+  it("reports a file it cannot read instead of throwing", () => {
+    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-hooks-"));
+    const path = join(directory.path, "hook-evidence.jsonl");
+    mkdirSync(path);
+    expect(readHookEvidence(path)).toEqual({
+      records: [],
+      malformedLines: 0,
+      readError: expect.stringContaining("EISDIR"),
+    });
+  });
+
+  it("reports a path it cannot reach instead of treating it as absent", () => {
+    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-hooks-"));
+    const notADirectory = join(directory.path, "runtime");
+    writeFileSync(notADirectory, "");
+    expect(readHookEvidence(join(notADirectory, "hook-evidence.jsonl"))).toEqual({
+      records: [],
+      malformedLines: 0,
+      readError: expect.stringContaining("ENOTDIR"),
     });
   });
 });

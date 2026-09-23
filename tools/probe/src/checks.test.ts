@@ -39,6 +39,7 @@ const step = (overrides: Partial<StepRecord>): StepRecord => ({
   ledger_after: null,
   hook_evidence: null,
   hook_evidence_malformed_lines: null,
+  hook_evidence_read_error: null,
   notes: [],
   checks: {},
   ...overrides,
@@ -114,6 +115,16 @@ describe("probe evidence readings", () => {
       effort_evidence: "no hook evidence captured",
       effort_flag_beats_settings_layer: false,
     });
+  });
+
+  it("says why effort is missing when the hook evidence could not be read", () => {
+    const record = step({
+      hook_evidence: [],
+      hook_evidence_read_error: "EACCES: permission denied",
+    });
+    expect(streamApproveChecks(record).effort_evidence).toBe(
+      "hook evidence unreadable: EACCES: permission denied",
+    );
   });
 
   it("wants two distinct change requests and a forbidden tool that neither reached the bridge nor ran", () => {

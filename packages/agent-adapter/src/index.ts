@@ -10,6 +10,7 @@ export {
   readHookEvidence,
 } from "./adapter.ts";
 export type {
+  HookEvidence,
   RuntimeCancellation,
   StaticCapabilities,
   TurnHandle,

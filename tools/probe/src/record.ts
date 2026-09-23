@@ -33,6 +33,8 @@ export interface StepRecord {
   hook_evidence: Record<string, unknown>[] | null;
   /** Hook evidence lines that did not parse and are missing from `hook_evidence`. */
   hook_evidence_malformed_lines: number | null;
+  /** Why the hook evidence file could not be read, when `hook_evidence` is empty for that reason. */
+  hook_evidence_read_error: string | null;
   notes: string[];
   checks: Record<string, boolean | string>;
 }

@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { match } from "ts-pattern";
 import {
   readHookEvidence,
+  type HookEvidence,
   type RuntimeEvent,
   type PermissionDecision,
   type PermissionRequest,
@@ -177,8 +178,10 @@ const effortLevelOf = (hook: Record<string, unknown>): unknown => {
 };
 
 /** Why the effort evidence holds no effort level, or null when the hook reported samples. */
-const effortNote = (samples: number, malformedLines: number): string | null => {
-  if (samples > 0) return null;
+const effortNote = ({ records, malformedLines, readError }: HookEvidence): string | null => {
+  if (records.length > 0) return null;
+  if (readError !== null)
+    return `hook evidence unreadable (${readError}); effective effort unreported`;
   if (malformedLines > 0)
     return `hook evidence unreadable (${malformedLines} malformed lines); effective effort unreported`;
   return "no tool use in this turn; effective effort unreported";
@@ -1353,7 +1356,8 @@ export class Engine {
     const actions = classifyActions(calls, task.interrupted);
     const unknown = actions.some((action) => action.status === "unknown");
     const { status, error } = classifyTask({ interrupted: task.interrupted, result, unknown });
-    const { records: hooks, malformedLines } = readHookEvidence(result.hookEvidencePath);
+    const hookEvidence = readHookEvidence(result.hookEvidencePath);
+    const { records: hooks, malformedLines, readError } = hookEvidence;
     const efforts = effortLevels(hooks);
     try {
       this.tx(() => {
@@ -1413,7 +1417,8 @@ export class Engine {
             values: efforts,
             samples: hooks.length,
             malformed_lines: malformedLines,
-            note: effortNote(hooks.length, malformedLines),
+            read_error: readError,
+            note: effortNote(hookEvidence),
           },
         });
         if (task.interrupted)
