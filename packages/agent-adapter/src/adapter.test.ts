@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempDisposableSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempDisposableSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -83,7 +83,7 @@ describe("probeStaticCapabilities", () => {
     using bin = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
     using empty = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
     // Prints the version only when the environment it runs with carries the marker. /bin stays on
-    // PATH for `sh`, which the probe runs the lookup in and the script's shebang already assumes.
+    // PATH for the script's shebang.
     writeFileSync(join(bin.path, "mia-fake-runtime"), '#!/bin/sh\necho "v-$MIA_MARKER"\n', {
       mode: 0o755,
     });
@@ -96,5 +96,20 @@ describe("probeStaticCapabilities", () => {
     expect(
       probe({ PATH: `${empty.path}${delimiter}/bin` }, "mia-fake-runtime").executable_resolved,
     ).toBeNull();
+  });
+
+  it("reports a runtime missing from PATH", () => {
+    using empty = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
+    const missing = probe({ PATH: empty.path }, "mia-fake-runtime");
+    expect(missing.executable_resolved).toBeNull();
+    expect(missing.errors).toContain('runtime executable "mia-fake-runtime" not found on PATH');
+  });
+
+  it("never runs the executable name as shell code", () => {
+    using bin = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
+    const marker = join(bin.path, "ran");
+    const found = probe({ PATH: `${bin.path}${delimiter}/bin` }, `$(touch ${marker})`);
+    expect(found.executable_resolved).toBeNull();
+    expect(existsSync(marker)).toBe(false);
   });
 });

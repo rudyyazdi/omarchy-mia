@@ -9,6 +9,7 @@ import type { ApprovalBridge, PermissionHandler } from "./bridge.ts";
 import type { RuntimeConfig } from "./config.ts";
 import { withinDeadline } from "./deadline.ts";
 import { prepareLaunch, type LaunchPlan } from "./launch.ts";
+import { resolveExecutable } from "./resolve-executable.ts";
 import { ClaudeTranslator } from "./claude-translate.ts";
 import type { RuntimeEvent, RuntimeInit, TurnSummary } from "./runtime-events.ts";
 import { LineSplitter, parseStreamLine, redactLine } from "./stream.ts";
@@ -97,11 +98,11 @@ export const probeStaticCapabilities = (
   env: NodeJS.ProcessEnv,
 ): StaticCapabilities => {
   const errors: string[] = [];
-  const which = spawnSync("sh", ["-c", `command -v ${JSON.stringify(config.executable)}`], {
-    encoding: "utf8",
-    env,
+  // The launch spawns the runtime in config.workingDirectory with this env, so resolve it the same way.
+  const resolved = resolveExecutable(config.executable, {
+    path: env.PATH,
+    cwd: config.workingDirectory,
   });
-  const resolved = which.status === 0 ? which.stdout.trim() : null;
   if (!resolved) errors.push(`runtime executable "${config.executable}" not found on PATH`);
   let version: string | null = null;
   const flags: Record<string, boolean> = {};
