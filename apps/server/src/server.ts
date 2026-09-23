@@ -17,9 +17,13 @@ export interface MiaServer {
 
 export const SOURCE_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 
-const resolveProfile = (input: { profilePath?: string; profile?: Profile }): Profile => {
+const resolveProfile = (input: {
+  profilePath?: string;
+  profile?: Profile;
+  env: NodeJS.ProcessEnv;
+}): Profile => {
   if (input.profile) return input.profile;
-  if (input.profilePath !== undefined) return loadProfile(input.profilePath);
+  if (input.profilePath !== undefined) return loadProfile(input.profilePath, input.env);
   throw new Error("startServer needs a profile or a profilePath");
 };
 
@@ -28,6 +32,11 @@ export const startServer = async (input: {
   profile?: Profile;
   adapter?: TurnRunner;
   log?: (message: string) => void;
+  /**
+   * The server process's environment: fills a profile's `${ENV}` placeholders, is what the runtime
+   * inherits, and names the bridge's request log (`MIA_MCP_HTTP_LOG`). The entry point passes its own.
+   */
+  env: NodeJS.ProcessEnv;
 }): Promise<MiaServer> => {
   const profile = resolveProfile(input);
   const log = input.log ?? ((message: string) => process.stderr.write(`[mia-server] ${message}\n`));
@@ -36,16 +45,18 @@ export const startServer = async (input: {
   const catalog = new Catalog(profile.stateDirectory);
   try {
     const writer = new RecordWriter(catalog);
-    const bridge = new ApprovalBridge();
+    const bridge = new ApprovalBridge({ logFile: input.env.MIA_MCP_HTTP_LOG });
     await bridge.start();
     try {
-      const adapter: TurnRunner = input.adapter ?? new ClaudeCodeAdapter(profile.runtime, bridge);
+      const adapter: TurnRunner =
+        input.adapter ?? new ClaudeCodeAdapter(profile.runtime, bridge, input.env);
       const engine = new Engine({
         profile,
         catalog,
         writer,
         adapter,
         sourceRoot: SOURCE_ROOT,
+        env: input.env,
         log,
       });
       const gateway = await startGateway({

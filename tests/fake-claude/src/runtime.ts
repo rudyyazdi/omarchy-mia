@@ -170,8 +170,11 @@ class FakeTurn {
   }
 }
 
-/** Reads the prompt from stdin, plays the behaviours it names, and exits as the real runtime would. */
-export const runFakeClaude = async (flags: FakeClaudeFlags): Promise<void> => {
+/**
+ * Reads the prompt from stdin and plays the behaviours it names; resolves to the exit code the real
+ * runtime would exit with.
+ */
+export const runFakeClaude = async (flags: FakeClaudeFlags): Promise<number> => {
   const turn = new FakeTurn(flags);
   let prompt = "";
   process.stdin.setEncoding("utf8");
@@ -209,7 +212,7 @@ export const runFakeClaude = async (flags: FakeClaudeFlags): Promise<void> => {
     });
   }
   if (/MALFORMED/.test(prompt)) turn.malformed();
-  if (/CRASH/.test(prompt)) process.exit(3);
+  if (/CRASH/.test(prompt)) return 3;
   turn.result(Date.now() - start);
-  process.exit(0);
+  return 0;
 };

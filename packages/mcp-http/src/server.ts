@@ -16,7 +16,7 @@ export interface McpHttpServerOptions {
   host?: string;
   port?: number;
   /**
-   * JSON-lines file for request/response lifecycle diagnostics; defaults to MIA_MCP_HTTP_LOG.
+   * JSON-lines file for request/response lifecycle diagnostics; unset or empty logs nothing.
    * A write failure is reported once on stderr and turns logging off; it never fails a request.
    */
   logFile?: string;
@@ -80,7 +80,7 @@ const readBody = async (req: IncomingMessage, limitBytes: number): Promise<strin
 /**
  * Serve an MCP server over Streamable HTTP on loopback, in stateless mode: each POST gets a fresh
  * McpServer + transport so tool handlers can observe their own connection lifetime.
- * Set MIA_MCP_HTTP_LOG=<file> (or `logFile`) to log request/response lifecycle for diagnostics.
+ * Set `logFile` to log request/response lifecycle for diagnostics.
  */
 export const startMcpHttpServer = async (
   options: McpHttpServerOptions,
@@ -88,7 +88,7 @@ export const startMcpHttpServer = async (
   const host = options.host ?? "127.0.0.1";
   const path = "/mcp";
   let requestCounter = 0;
-  const logFile = options.logFile ?? process.env.MIA_MCP_HTTP_LOG;
+  const { logFile } = options;
   let boundPort: number | null = null;
   const reportLogFailure =
     options.reportLogFailure ??

@@ -27,6 +27,8 @@ export const createConversationProvenance = (input: {
   /** Client build as reported at connection time. */
   clientBuild: unknown;
   sourceRoot: string;
+  /** The environment the runtime inherits, for the static probe's credential check. */
+  env: NodeJS.ProcessEnv;
 }): ProvenanceSummary => {
   const { writer, profile, clientBuild, sourceRoot } = input;
   const setId = writer.createProvenanceSet(
@@ -135,7 +137,7 @@ export const createConversationProvenance = (input: {
   });
 
   // Runtime and adapter identity.
-  const staticCaps = probeStaticCapabilities(profile.runtime);
+  const staticCaps = probeStaticCapabilities(profile.runtime, input.env);
   add("runtime_identity", {
     text: JSON.stringify(
       {

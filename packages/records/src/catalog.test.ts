@@ -2,9 +2,22 @@ import { mkdtempDisposableSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished } from "vitest";
-import { Catalog } from "./catalog.ts";
+import { Catalog, defaultStateDir } from "./catalog.ts";
 import { RecordWriter } from "./writer.ts";
 import { SCHEMA_VERSION } from "./schema.ts";
+
+describe("defaultStateDir", () => {
+  it("resolves from the environment it is given, not the process's", () => {
+    expect(defaultStateDir({ MIA_STATE_DIR: "/state/override", XDG_STATE_HOME: "/xdg" })).toBe(
+      "/state/override",
+    );
+    expect(defaultStateDir({ XDG_STATE_HOME: "/xdg", HOME: "/home/someone" })).toBe("/xdg/mia");
+    expect(defaultStateDir({ XDG_STATE_HOME: "", HOME: "/home/someone" })).toBe(
+      "/home/someone/.local/state/mia",
+    );
+    expect(defaultStateDir({})).toBe(join(".", ".local", "state", "mia"));
+  });
+});
 
 describe("read-only catalog", () => {
   it("opens a catalog at the current schema version", () => {

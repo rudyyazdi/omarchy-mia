@@ -92,6 +92,23 @@ const SOURCE_RESTRICTED_SYNTAX = [
   },
 ];
 
+// Enforces AGENTS.md, Node: only the file a process starts from reads the environment, installs
+// signal handlers or exits; every other module takes what it needs as an argument.
+const PROCESS_ENTRY_ONLY = ["env", "exit", "on", "once"].map((property) => ({
+  object: "process",
+  property,
+  message: `Only the file a process starts from (a main.ts, or a module a host loads as a plugin) uses process.${property}; take the value as an argument or return it to the entry point. ${BYPASS_NOTE}`,
+}));
+
+// The files a process starts from other than a main.ts: the runtime's hook script, the promptfoo
+// provider plugin and the live-lane runner script.
+const PROCESS_ENTRY_FILES = [
+  "**/main.ts",
+  "packages/agent-adapter/src/hook-capture.mjs",
+  "tests/acceptance/promptfoo/provider.ts",
+  "tests/acceptance/promptfoo/run.ts",
+];
+
 // Enforces AGENTS.md, Design: `export *` makes every helper a module exports public contract.
 const NO_EXPORT_ALL = {
   selector: "ExportAllDeclaration",
@@ -136,6 +153,7 @@ export default tseslint.config(
       "prefer-arrow-callback": "error",
       "id-length": ["error", { min: 2, exceptions: ["_"], properties: "never" }],
       "no-restricted-syntax": ["error", ...RESTRICTED_SYNTAX],
+      "no-restricted-properties": ["error", ...PROCESS_ENTRY_ONLY],
       "@typescript-eslint/no-non-null-assertion": "error",
       "@typescript-eslint/consistent-type-assertions": ["error", { assertionStyle: "never" }],
       // Off: `type` and `interface` are both allowed.
@@ -187,5 +205,6 @@ export default tseslint.config(
     files: ["**/main.ts"],
     rules: { "max-lines": ["error", 60] },
   },
+  { files: PROCESS_ENTRY_FILES, rules: { "no-restricted-properties": "off" } },
   ...layerOverrides,
 );

@@ -47,7 +47,12 @@ describe("server lifecycle", () => {
       expect(before).toBeGreaterThan(0); // the blocker itself, so the count below means something
 
       await expect(
-        startServer({ profile, adapter: new ScriptedRuntime(), log: () => undefined }),
+        startServer({
+          profile,
+          adapter: new ScriptedRuntime(),
+          log: () => undefined,
+          env: {},
+        }),
       ).rejects.toThrow();
 
       // The catalog is usable again right away: nothing holds the database open.

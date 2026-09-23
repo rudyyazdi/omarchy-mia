@@ -81,7 +81,12 @@ export const startTestServer = async (
   const dir = mkdtempSync(join(tmpdir(), "mia-acceptance-"));
   const profile = testProfile(dir, overrides);
   const logs: string[] = [];
-  const server = await startServer({ profile, adapter, log: (message) => logs.push(message) });
+  const server = await startServer({
+    profile,
+    adapter,
+    log: (message) => logs.push(message),
+    env: {},
+  });
   const clients: MiaClient[] = [];
   return {
     server,

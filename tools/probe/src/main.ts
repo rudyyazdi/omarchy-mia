@@ -21,4 +21,4 @@ const program = new Command()
   )
   .option("--only <names>", "comma-separated step names to run");
 program.parse();
-await runProbe(program.opts<ProbeOptions>(), process.env, deadlines);
+process.exit(await runProbe(program.opts<ProbeOptions>(), process.env, deadlines));

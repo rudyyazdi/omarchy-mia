@@ -19,11 +19,14 @@ export const nowIso = (): string => new Date().toISOString();
 /** Parse stored JSON. The result is unknown; callers that need a shape validate it. */
 export const parseJson = (text: string): unknown => JSON.parse(text);
 
+/** The environment variables that choose the default state directory. */
+type StateDirEnv = Readonly<Partial<Record<"MIA_STATE_DIR" | "XDG_STATE_HOME" | "HOME", string>>>;
+
 /** Resolve the private state directory: $XDG_STATE_HOME/mia or ~/.local/state/mia unless overridden. */
-export const defaultStateDir = (): string => {
-  if (process.env.MIA_STATE_DIR) return process.env.MIA_STATE_DIR;
-  const xdg = process.env.XDG_STATE_HOME;
-  const base = xdg && xdg.length > 0 ? xdg : join(process.env.HOME ?? ".", ".local", "state");
+export const defaultStateDir = (env: StateDirEnv): string => {
+  if (env.MIA_STATE_DIR) return env.MIA_STATE_DIR;
+  const xdg = env.XDG_STATE_HOME;
+  const base = xdg && xdg.length > 0 ? xdg : join(env.HOME ?? ".", ".local", "state");
   return join(base, "mia");
 };
 

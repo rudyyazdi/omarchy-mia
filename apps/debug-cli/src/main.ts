@@ -3,6 +3,7 @@
  * runtime or provider, never approves or replays anything.
  */
 import { Command } from "commander";
+import { defaultStateDir } from "@mia/records";
 import {
   exportToDirectory,
   reconcile,
@@ -33,7 +34,10 @@ const program = new Command()
   })
   .configureOutput({ writeErr: () => undefined })
   .configureHelp({ showGlobalOptions: true });
-const options = () => program.opts<GlobalOptions>();
+const options = (): GlobalOptions => {
+  const { state, ...rest } = program.opts<Omit<GlobalOptions, "state"> & { state?: string }>();
+  return { ...rest, state: state ?? defaultStateDir(process.env) };
+};
 
 const debug = program.command("debug").allowExcessArguments();
 const subcommand = (spec: string) => debug.command(spec).allowExcessArguments();

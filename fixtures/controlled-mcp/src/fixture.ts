@@ -41,6 +41,8 @@ export interface FixtureOptions {
   host?: string;
   mcpPort?: number;
   harnessPort?: number;
+  /** Receives the MCP endpoint's request/response lifecycle log; unset logs nothing. */
+  mcpLogFile?: string;
 }
 
 export interface FixtureHandle {
@@ -244,6 +246,7 @@ export const startFixture = async (options: FixtureOptions): Promise<FixtureHand
   const mcp = await startMcpHttpServer({
     host,
     port: options.mcpPort ?? 0,
+    logFile: options.mcpLogFile,
     createServer: createServerForRequest,
   });
 

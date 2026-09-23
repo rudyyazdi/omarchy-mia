@@ -1,7 +1,6 @@
 import { resolve } from "node:path";
 import {
   Catalog,
-  defaultStateDir,
   diagnosticsViews,
   exportConversation,
   listConversations,
@@ -22,9 +21,12 @@ import {
   formatUnresolved,
 } from "./format.ts";
 
-/** The global options every `mia debug` subcommand receives, as commander parsed them. */
+/**
+ * The global options every `mia debug` subcommand receives: commander's, with `state` already
+ * defaulted from the environment by the entry point.
+ */
 export interface GlobalOptions {
-  state?: string;
+  state: string;
   output?: string;
   json: boolean;
 }
@@ -41,7 +43,7 @@ const printLines = (lines: string[]) => {
  * writable open would create and migrate an empty catalog at a mistyped `--state`.
  */
 const withCatalog = (options: GlobalOptions, run: (catalog: Catalog) => void): void => {
-  const catalog = new Catalog(resolve(options.state ?? defaultStateDir()), { readonly: true });
+  const catalog = new Catalog(resolve(options.state), { readonly: true });
   try {
     run(catalog);
   } finally {

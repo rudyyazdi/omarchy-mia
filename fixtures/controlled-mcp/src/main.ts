@@ -21,6 +21,7 @@ const handle = await startFixture({
   dir: values.dir,
   mcpPort: Number(values.mcpPort),
   harnessPort: Number(values.harnessPort),
+  mcpLogFile: process.env.MIA_MCP_HTTP_LOG,
 });
 console.log(
   JSON.stringify({ mcp_url: handle.mcpUrl, harness_url: handle.harnessUrl, dir: values.dir }),
