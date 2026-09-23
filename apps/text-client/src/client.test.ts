@@ -1,18 +1,8 @@
 import { once } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WebSocketServer } from "ws";
-import { PROTOCOL_VERSION, type ServerEventOf } from "@mia/protocol";
+import { WebSocket, WebSocketServer } from "ws";
+import { ackEvent } from "./ack-fixture.ts";
 import { MiaClient } from "./client.ts";
-
-const ackEvent = (commandId: string): ServerEventOf<"ack"> => ({
-  protocol_version: PROTOCOL_VERSION,
-  message_id: `event_${commandId}`,
-  conversation_id: null,
-  sequence: null,
-  server_time: new Date().toISOString(),
-  type: "ack",
-  payload: { command_id: commandId, disposition: "accepted" },
-});
 
 const makeClient = (url = "ws://127.0.0.1:1") =>
   new MiaClient({
@@ -22,6 +12,29 @@ const makeClient = (url = "ws://127.0.0.1:1") =>
   });
 
 afterEach(() => vi.restoreAllMocks());
+
+/** Runs `test` with a client connected to a bare server, and tears both down even if it fails. */
+const withConnectedClient = async (
+  test: (client: MiaClient, socket: WebSocket) => Promise<void>,
+): Promise<void> => {
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("no TCP address");
+  const connected = once(server, "connection");
+  const client = makeClient(`ws://127.0.0.1:${address.port}`);
+  try {
+    await client.connect();
+    const [socket] = await connected;
+    if (!(socket instanceof WebSocket)) throw new Error("no connected socket");
+    await test(client, socket);
+  } finally {
+    client.close();
+    const closed = once(server, "close");
+    server.close();
+    await closed;
+  }
+};
 
 describe("client deadlines", () => {
   it("rejects an event wait on deadline and keeps independent predicates working", async () => {
@@ -36,18 +49,8 @@ describe("client deadlines", () => {
     await expect(wanted).resolves.toEqual(event);
   });
 
-  it("an acknowledged send's old deadline cannot expire a resend with the same id", async () => {
-    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
-    await once(server, "listening");
-    const address = server.address();
-    if (address === null || typeof address === "string") throw new Error("no TCP address");
-    const connected = once(server, "connection");
-    const client = makeClient(`ws://127.0.0.1:${address.port}`);
-    try {
-      await client.connect();
-      await connected;
-      const socket = server.clients.values().next().value;
-      if (!socket) throw new Error("no connected client");
+  it("an acknowledged send's old deadline cannot expire a resend with the same id", () =>
+    withConnectedClient(async (client, socket) => {
       const oldDeadline = new AbortController();
       vi.spyOn(AbortSignal, "timeout").mockReturnValueOnce(oldDeadline.signal);
       const first = client.send("start_conversation", {}, "same_id");
@@ -57,11 +60,14 @@ describe("client deadlines", () => {
       oldDeadline.abort();
       socket.send(JSON.stringify(ackEvent("same_id")));
       await expect(second).resolves.toMatchObject({ disposition: "accepted" });
-    } finally {
-      client.close();
-      const closed = once(server, "close");
-      server.close();
-      await closed;
-    }
-  });
+    }));
+
+  it("rejects a send still waiting for its ack as soon as the connection closes", () =>
+    withConnectedClient(async (client, socket) => {
+      const pending = client.send("start_conversation", {}, "cmd_1");
+      socket.close();
+      await expect(pending).rejects.toThrow(
+        "connection closed before start_conversation (cmd_1) was acknowledged",
+      );
+    }));
 });
