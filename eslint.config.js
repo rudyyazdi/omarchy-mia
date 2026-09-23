@@ -1,3 +1,4 @@
+import comments from "@eslint-community/eslint-plugin-eslint-comments";
 import js from "@eslint/js";
 import prettier from "eslint-config-prettier";
 import globals from "globals";
@@ -100,6 +101,7 @@ export default tseslint.config(
   {
     files: ["**/*.ts", "**/*.js", "**/*.mjs"],
     languageOptions: { globals: globals.node, ecmaVersion: 2025, sourceType: "module" },
+    plugins: { "@eslint-community/eslint-comments": comments },
     linterOptions: { reportUnusedDisableDirectives: "error" },
     rules: {
       // Repo style rules; each has a rationale in AGENTS.md.
@@ -109,6 +111,9 @@ export default tseslint.config(
       "prefer-arrow-callback": "error",
       "id-length": ["error", { min: 2, exceptions: ["_"], properties: "never" }],
       "no-restricted-syntax": ["error", ...RESTRICTED_SYNTAX],
+      // A bypass records why it is needed, and names the rules it silences.
+      "@eslint-community/eslint-comments/require-description": "error",
+      "@eslint-community/eslint-comments/no-unlimited-disable": "error",
       "@typescript-eslint/no-non-null-assertion": "error",
       "@typescript-eslint/consistent-type-assertions": ["error", { assertionStyle: "never" }],
       "@typescript-eslint/consistent-type-definitions": "off",
