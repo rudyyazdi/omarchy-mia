@@ -14,7 +14,7 @@ let writer: RecordWriter;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "mia-records-"));
-  catalog = new Catalog(dir);
+  catalog = Catalog.openSync(dir);
   writer = new RecordWriter(catalog);
 });
 afterEach(() => {
@@ -84,7 +84,7 @@ describe("record writer", () => {
     expect(one.artifactId).not.toBe(two.artifactId);
     expect(catalog.all("SELECT * FROM objects")).toHaveLength(1);
     if (!one.digest) throw new Error("artifact bytes were not stored");
-    expect(writer.objects.verify(one.digest)).toBe("verified");
+    expect(writer.objects.verifySync(one.digest)).toBe("verified");
   });
 
   it("rejects duplicate approvals for the same binding and epoch, and duplicate command IDs", () => {

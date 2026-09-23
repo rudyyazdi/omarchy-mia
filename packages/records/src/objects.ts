@@ -76,17 +76,14 @@ export class ObjectStore {
     return { digest, byteCount: bytes.byteLength, storageKey: this.storageKey(digest) };
   }
 
-  read(digest: string): Buffer {
-    // eslint-disable-next-line no-restricted-syntax -- only export and tests read an object
+  readSync(digest: string): Buffer {
     return readFileSync(this.pathFor(digest));
   }
 
   /** Verify bytes on disk still match the digest. */
-  verify(digest: string, expectedBytes?: number): ObjectIntegrity {
+  verifySync(digest: string, expectedBytes?: number): ObjectIntegrity {
     const path = this.pathFor(digest);
-    // eslint-disable-next-line no-restricted-syntax -- only export and tests verify an object
     if (!existsSync(path)) return "missing";
-    // eslint-disable-next-line no-restricted-syntax -- only export and tests verify an object
     const bytes = readFileSync(path);
     if (expectedBytes !== undefined && bytes.byteLength !== expectedBytes) return "corrupt";
     return ObjectStore.digestOf(bytes) === digest ? "verified" : "corrupt";

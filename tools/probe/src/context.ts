@@ -99,12 +99,12 @@ export class ProbeContext {
   /** Counts one live runtime call against the shared budget and logs it; throws once the cap is reached. */
   takeLiveCall(label: string, model: string): void {
     const { budget } = this.services;
-    const callNumber = budget.take(`probe:${label}`, model);
+    const callNumber = budget.takeSync(`probe:${label}`, model);
     log(`step ${label} (live call ${callNumber}/${budget.cap})`);
   }
 
   liveCallsUsed(): number {
-    return this.services.budget.used();
+    return this.services.budget.usedSync();
   }
 
   /** Answers every bridge permission request with `handler` while `run` is in flight. */

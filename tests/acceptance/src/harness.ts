@@ -201,7 +201,7 @@ export const startTestServer = async (
     connect: async (clientId?: string) => {
       const client = new MiaClient({
         url: server.gateway.url,
-        secret: MiaClient.readSecret(profile.server.secretFile),
+        secret: MiaClient.readSecretSync(profile.server.secretFile),
         ...(clientId ? { clientId } : {}),
         build: { name: "test-client", version: "0", commit: null, dirty: null },
       });
@@ -209,7 +209,7 @@ export const startTestServer = async (
       clients.push(client);
       return client;
     },
-    catalog: () => new Catalog(profile.stateDirectory, { readonly: true }),
+    catalog: () => Catalog.openSync(profile.stateDirectory, { readonly: true }),
     close: async () => {
       for (const client of clients) client.close();
       try {

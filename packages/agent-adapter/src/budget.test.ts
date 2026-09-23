@@ -9,12 +9,12 @@ describe("live call budget", () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-budget-"));
     const file = join(directory.path, "nested", "calls.jsonl");
     const budget = new LiveCallBudget(file, 2);
-    expect(budget.used()).toBe(0);
-    expect(budget.take("first", "model-one")).toBe(1);
+    expect(budget.usedSync()).toBe(0);
+    expect(budget.takeSync("first", "model-one")).toBe(1);
     const first = readFileSync(file, "utf8");
     writeFileSync(file, `${first}\n  \n`);
-    expect(budget.used()).toBe(1);
-    expect(budget.take("second", "model-two")).toBe(2);
+    expect(budget.usedSync()).toBe(1);
+    expect(budget.takeSync("second", "model-two")).toBe(2);
     const contents = readFileSync(file, "utf8");
     expect(contents.startsWith(first)).toBe(true);
     expect(
@@ -26,7 +26,7 @@ describe("live call budget", () => {
       { at: expect.any(String), label: "first", model: "model-one" },
       { at: expect.any(String), label: "second", model: "model-two" },
     ]);
-    expect(() => budget.take("third", "model-three")).toThrow("live call cap reached (2/2)");
+    expect(() => budget.takeSync("third", "model-three")).toThrow("live call cap reached (2/2)");
     expect(readFileSync(file, "utf8")).toBe(contents);
   });
 

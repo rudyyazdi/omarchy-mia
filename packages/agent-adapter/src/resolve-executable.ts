@@ -11,11 +11,9 @@ export interface ExecutableLookup {
 /** Where `spawn` (libuv) looks a name up when the environment it is given has no PATH. */
 const DEFAULT_SEARCH_PATH = "/usr/bin:/bin";
 
-const isExecutableFile = (candidate: string): boolean => {
+const isExecutableFileSync = (candidate: string): boolean => {
   try {
-    // eslint-disable-next-line no-restricted-syntax -- runs before serving: only the startup probe resolves the executable
     accessSync(candidate, constants.X_OK);
-    // eslint-disable-next-line no-restricted-syntax -- runs before serving
     return statSync(candidate).isFile();
   } catch {
     return false;
@@ -27,17 +25,19 @@ const isExecutableFile = (candidate: string): boolean => {
  * shell's `command -v` so the name is only ever a path, never shell code. Follows execvp: a name containing "/" is a
  * path, any other name is looked up in each PATH entry in order (an empty entry is the working directory), and an
  * unset PATH falls back to spawn's default search path.
- * Synchronous: it runs only in the startup probe.
  */
-export const resolveExecutable = (executable: string, lookup: ExecutableLookup): string | null => {
+export const resolveExecutableSync = (
+  executable: string,
+  lookup: ExecutableLookup,
+): string | null => {
   if (executable.includes("/")) {
     const candidate = resolve(lookup.cwd, executable);
-    return isExecutableFile(candidate) ? candidate : null;
+    return isExecutableFileSync(candidate) ? candidate : null;
   }
   return (
     (lookup.path ?? DEFAULT_SEARCH_PATH)
       .split(delimiter)
       .map((entry) => resolve(lookup.cwd, entry, executable))
-      .find(isExecutableFile) ?? null
+      .find(isExecutableFileSync) ?? null
   );
 };

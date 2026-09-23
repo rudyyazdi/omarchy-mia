@@ -3,8 +3,8 @@ import { resolve } from "node:path";
 import {
   ApprovalBridge,
   ClaudeCodeAdapter,
-  loadProfile,
-  probeStaticCapabilities,
+  loadProfileSync,
+  probeStaticCapabilitiesSync,
   readRuntimeFile,
   type Profile,
   type RuntimeFileReader,
@@ -12,7 +12,7 @@ import {
 import { errorMessage } from "@mia/protocol";
 import { Catalog, RecordWriter } from "@mia/records";
 import { collectArtifact, type ArtifactCollector } from "./artifact-collector.ts";
-import { collectBuildInfo } from "./build-info.ts";
+import { collectBuildInfoSync } from "./build-info.ts";
 import { Engine, type TurnRunner } from "./engine.ts";
 import { startGateway, type GatewayHandle } from "./gateway.ts";
 import type { ServerIdentity } from "./provenance.ts";
@@ -47,13 +47,13 @@ export const EVIDENCE_READ_TIMEOUT_MS = 10_000;
 
 export const SOURCE_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 
-const resolveProfile = (input: {
+const resolveProfileSync = (input: {
   profilePath?: string;
   profile?: Profile;
   env: NodeJS.ProcessEnv;
 }): Profile => {
   if (input.profile) return input.profile;
-  if (input.profilePath !== undefined) return loadProfile(input.profilePath, input.env);
+  if (input.profilePath !== undefined) return loadProfileSync(input.profilePath, input.env);
   throw new Error("startServer needs a profile or a profilePath");
 };
 
@@ -78,17 +78,20 @@ export const startServer = async (input: {
    */
   env: NodeJS.ProcessEnv;
 }): Promise<MiaServer> => {
-  const profile = resolveProfile(input);
+  // eslint-disable-next-line no-restricted-syntax -- runs before serving
+  const profile = resolveProfileSync(input);
   const log = input.log ?? ((message: string) => process.stderr.write(`[mia-server] ${message}\n`));
-  // Synchronous child processes are acceptable here only because nothing is serving yet.
   const identity: ServerIdentity = {
-    runtime: probeStaticCapabilities(profile.runtime, input.env),
-    build: collectBuildInfo("mia-server", SOURCE_ROOT),
+    // eslint-disable-next-line no-restricted-syntax -- runs before serving
+    runtime: probeStaticCapabilitiesSync(profile.runtime, input.env),
+    // eslint-disable-next-line no-restricted-syntax -- runs before serving
+    build: collectBuildInfoSync("mia-server", SOURCE_ROOT),
   };
   // eslint-disable-next-line no-restricted-syntax -- runs before serving
   mkdirSync(profile.stateDirectory, { recursive: true, mode: 0o700 });
   // Acquire in order; on any throw release what is already held, in reverse, before rethrowing.
-  const catalog = new Catalog(profile.stateDirectory);
+  // eslint-disable-next-line no-restricted-syntax -- runs before serving
+  const catalog = Catalog.openSync(profile.stateDirectory);
   try {
     const writer = new RecordWriter(catalog);
     const bridge = new ApprovalBridge({ logFile: input.env.MIA_MCP_HTTP_LOG });

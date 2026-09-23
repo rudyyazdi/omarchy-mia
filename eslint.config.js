@@ -151,12 +151,21 @@ const SOURCE_RESTRICTED_SYNTAX = [
 
 // Enforces AGENTS.md, Node: synchronous I/O stalls every connection, so it runs only before a process starts
 // serving. Lint cannot tell when a call runs, so each one that runs before serving says so in a bypass. The
-// SQLite catalog (`new DatabaseSync`, statement calls) is the documented exception and matches no selector.
-// Lint sees a call by its name: a renamed or passed-along `*Sync` function, and a caller of a function that
-// blocks without the suffix, are left to review.
+// SQLite catalog (statement calls) is the documented exception and matches no selector. A function that blocks
+// is itself named `*Sync`: calls inside it are exempt, because each call to it is checked instead, so the bypass
+// sits at the call site, where "runs before serving" can be verified. Lint sees a call by its name: a renamed or
+// passed-along `*Sync` function is left to review.
+const SYNC_NAME = "/Sync$/";
+const INSIDE_SYNC_FUNCTION = [
+  `VariableDeclarator[id.name=${SYNC_NAME}][init.type="ArrowFunctionExpression"] *`,
+  `MethodDefinition[key.name=${SYNC_NAME}] *`,
+].join(", ");
 const NO_SYNC_IO = {
-  selector: "CallExpression[callee.name=/Sync$/], CallExpression[callee.property.name=/Sync$/]",
-  message: `Synchronous I/O stalls every connection; use node:fs/promises or an async child process. A call that runs before serving takes a bypass that says so (\`-- runs before serving\`). ${BYPASS_NOTE}`,
+  selector: [
+    `CallExpression[callee.name=${SYNC_NAME}]:not(${INSIDE_SYNC_FUNCTION})`,
+    `CallExpression[callee.property.name=${SYNC_NAME}]:not(${INSIDE_SYNC_FUNCTION})`,
+  ].join(", "),
+  message: `Synchronous I/O stalls every connection; use node:fs/promises or an async child process. A call that runs before serving takes a bypass that says so (\`-- runs before serving\`); a function that blocks is named \`*Sync\` so its callers are checked instead. ${BYPASS_NOTE}`,
 };
 
 // The workspaces that serve: the server, the libraries it runs, and the text client. Left out are one-shot

@@ -81,7 +81,7 @@ describe("server lifecycle", () => {
       ).rejects.toThrow();
 
       // The catalog is usable again right away: nothing holds the database open.
-      const catalog = new Catalog(profile.stateDirectory);
+      const catalog = Catalog.openSync(profile.stateDirectory);
       expect(catalog.nextSequence("conversation-that-does-not-exist")).toBe(1);
       catalog.close();
 

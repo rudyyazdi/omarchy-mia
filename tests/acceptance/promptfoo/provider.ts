@@ -63,7 +63,7 @@ export default class MiaScenarioProvider {
     const connect = async () => {
       const connected = new MiaClient({
         url,
-        secret: MiaClient.readSecret(secretFile),
+        secret: MiaClient.readSecretSync(secretFile),
         clientId,
         build: { name: "promptfoo-provider", version: "0.1.0", commit: null, dirty: null },
       });
@@ -84,7 +84,7 @@ export default class MiaScenarioProvider {
           extra.push(reconnected);
           return reconnected;
         },
-        budget: (label) => budget.take(`live:${scenarioName}:${label}`, scenario.profile),
+        budget: (label) => budget.takeSync(`live:${scenarioName}:${label}`, scenario.profile),
       };
       const evidence = await runScenario(scenario, ctx);
       return {

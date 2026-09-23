@@ -325,7 +325,7 @@ describe("records, report and export", () => {
 
   it("verify fails when an exported file is tampered", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mia-export-"));
-    const catalog = new Catalog(join(dir, "state"));
+    const catalog = Catalog.openSync(join(dir, "state"));
     const writer = new RecordWriter(catalog);
     const prov = writer.createProvenanceSet("t");
     const conv = writer.createConversation({ provenanceSetId: prov, runtimeConversationId: "rt" });

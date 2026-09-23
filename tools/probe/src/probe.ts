@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { probeStaticCapabilities, type StaticCapabilities } from "@mia/agent-adapter";
+import { probeStaticCapabilitiesSync, type StaticCapabilities } from "@mia/agent-adapter";
 import { redactValue } from "@mia/protocol";
 import { firstEvent } from "./checks.ts";
 import { log, ProbeContext } from "./context.ts";
@@ -54,7 +54,7 @@ const freezeExamples = (context: ProbeContext, staticReport: StaticCapabilities)
 
 /** Runs the static probe and then every wanted live step; resolves to the process exit code. */
 const runSteps = async (context: ProbeContext): Promise<number> => {
-  const staticReport = probeStaticCapabilities(context.baseConfig(), context.env);
+  const staticReport = probeStaticCapabilitiesSync(context.baseConfig(), context.env);
   context.save("static-capabilities", staticReport);
   log("static:", JSON.stringify(staticReport, null, 1));
   if (staticReport.errors.length > 0) {

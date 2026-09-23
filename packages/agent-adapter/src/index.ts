@@ -5,7 +5,7 @@ export {
   validateRuntimeConfig,
 } from "./config.ts";
 export type { RuntimeConfig } from "./config.ts";
-export { loadProfile, ProfileSchema } from "./profile.ts";
+export { loadProfileSync, ProfileSchema } from "./profile.ts";
 export type { Profile } from "./profile.ts";
 export { ApprovalBridge } from "./bridge.ts";
 export type { PermissionDecision, PermissionHandler, PermissionRequest } from "./bridge.ts";
@@ -14,7 +14,7 @@ export {
   ADAPTER_VERSION,
   ClaudeCodeAdapter,
   hookEvidenceFrom,
-  probeStaticCapabilities,
+  probeStaticCapabilitiesSync,
   readRuntimeFile,
   writeLaunchFiles,
 } from "./adapter.ts";
