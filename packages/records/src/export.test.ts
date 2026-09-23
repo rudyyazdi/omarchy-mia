@@ -238,6 +238,17 @@ describe("verifyExport input validation", () => {
     expect(verifyExport(directory).problems).toContain(`checksum mismatch: ${file}`);
   });
 
+  it.each(["stray.txt", "constructor", "toString", "hasOwnProperty", "__proto__"])(
+    "reports an unlisted file named %s",
+    (name) => {
+      writeFileSync(join(directory, name), "stray");
+      expect(verifyExport(directory)).toMatchObject({
+        ok: false,
+        problems: [`unlisted file: ${name}`],
+      });
+    },
+  );
+
   it.each(["../secret", "nested/../../secret", "/absolute/secret", "C:\\secret"])(
     "rejects manifest filename %s before reading it",
     (name) => {
