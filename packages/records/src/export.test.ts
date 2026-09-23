@@ -249,6 +249,27 @@ describe("verifyExport input validation", () => {
     },
   );
 
+  it.each([false, true])(
+    "rejects a manifest listing the reserved name __proto__ (file present: %s)",
+    (present) => {
+      const files = { ...manifest.files };
+      // JSON.parse keeps an own `__proto__` key, which an assignment would not create.
+      Object.defineProperty(files, "__proto__", {
+        value: { sha256: sha256Hex(Buffer.from("expected")), bytes: 8 },
+        enumerable: true,
+      });
+      writeManifest({ ...manifest, files });
+      if (present) writeFileSync(join(directory, "__proto__"), "wrong checksum");
+      expect(verifyExport(directory)).toEqual({
+        ok: false,
+        complete: false,
+        problems: ["manifest.json invalid: reserved file name __proto__"],
+        checked_files: 0,
+        checked_objects: 0,
+      });
+    },
+  );
+
   it.each(["../secret", "nested/../../secret", "/absolute/secret", "C:\\secret"])(
     "rejects manifest filename %s before reading it",
     (name) => {
