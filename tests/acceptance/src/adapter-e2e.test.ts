@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -9,6 +9,7 @@ import {
   type PermissionDecision,
   type PermissionRequest,
 } from "@mia/agent-adapter";
+import { REDACTED } from "@mia/protocol";
 import { FixtureHarness, startFixture, type FixtureHandle } from "@mia/controlled-mcp";
 import { REPO_ROOT, testProfile } from "./harness.ts";
 
@@ -133,6 +134,18 @@ describe("real adapter against a fake runtime process", () => {
     expect(state.ledger.some((entry) => entry.kind === "cancelled")).toBe(true);
     expect(state.counter).toBe(0);
     expect(requests.map((request) => request.toolName)).toEqual(["mcp__d1__slow"]);
+  });
+
+  it("redacts a schema-invalid JSON line by key in the transcript and the malformed event", async () => {
+    const { result, events } = await run("MALFORMED", () => ({ behavior: "allow" }));
+    expect(result.status).toBe("completed");
+    const malformed = events.find((event) => event.type === "malformed_event");
+    expect(malformed && malformed.type === "malformed_event" && JSON.parse(malformed.raw)).toEqual(
+      expect.objectContaining({ type: "assistant", api_key: REDACTED }),
+    );
+    const transcript = readFileSync(result.streamLogPath, "utf8");
+    expect(transcript).toContain(`"api_key":"${REDACTED}"`);
+    expect(transcript).not.toContain("fake-short-credential");
   });
 
   it("reports a runtime crash as a failed turn with no result message", async () => {

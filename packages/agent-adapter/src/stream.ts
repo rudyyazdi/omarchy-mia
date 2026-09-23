@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { errorMessage } from "@mia/protocol";
+import { errorMessage, redactString, redactValue } from "@mia/protocol";
 
 /**
  * Loose schemas for the Claude Code stream-json output. Only the fields Mia relies on are typed;
@@ -120,8 +120,14 @@ export type RuntimeMessage = KnownMessage | OtherMessage;
 export type InitMessage = z.infer<typeof InitMessageSchema>;
 export type ResultMessage = z.infer<typeof ResultMessageSchema>;
 
+/**
+ * `json` is present exactly when the line was valid JSON, including a line that failed its schema, so
+ * that line can still be redacted by key rather than only by value.
+ */
 export type ParsedLine =
-  { ok: true; message: RuntimeMessage; raw: string } | { ok: false; raw: string; error: string };
+  | { ok: true; message: RuntimeMessage; json: unknown; raw: string }
+  | { ok: false; json: unknown; raw: string; error: string }
+  | { ok: false; raw: string; error: string };
 
 export const parseStreamLine = (line: string): ParsedLine | null => {
   const trimmed = line.trim();
@@ -137,21 +143,31 @@ export const parseStreamLine = (line: string): ParsedLine | null => {
     };
   }
   const parsed = KnownMessageSchema.safeParse(json);
-  if (parsed.success) return { ok: true, message: parsed.data, raw: trimmed };
+  if (parsed.success) return { ok: true, message: parsed.data, json, raw: trimmed };
   const other = base.safeParse(json);
   const knownTypes = new Set(["system", "assistant", "user", "stream_event", "result"]);
   if (other.success && !knownTypes.has(other.data.type))
     return {
       ok: true,
       message: { type: "other", original_type: other.data.type, raw: json },
+      json,
       raw: trimmed,
     };
   return {
     ok: false,
+    json,
     raw: trimmed,
     error: `malformed runtime message: ${parsed.error.message.slice(0, 300)}`,
   };
 };
+
+/**
+ * The line as it may be retained or shown: a line that parsed as JSON is redacted by key and by value,
+ * even when it failed its schema, because a credential under a sensitive key need not look like a secret.
+ * Only a line that is not JSON falls back to value redaction.
+ */
+export const redactLine = (parsed: ParsedLine): string =>
+  "json" in parsed ? JSON.stringify(redactValue(parsed.json)) : redactString(parsed.raw);
 
 /** Incremental newline-delimited JSON splitter. */
 export class LineSplitter {

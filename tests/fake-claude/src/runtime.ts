@@ -1,6 +1,6 @@
 /**
  * Everything the fake writes to stdout imitates the real runtime's wire format, so those payloads stay
- * snake_case. The prompt text selects the behaviour: READ, CHANGE, SLOW, CRASH.
+ * snake_case. The prompt text selects the behaviour: READ, CHANGE, SLOW, MALFORMED, CRASH.
  */
 import { readFileSync } from "node:fs";
 import { z } from "zod";
@@ -110,6 +110,11 @@ class FakeTurn {
     }
   }
 
+  /** A line that is valid JSON but fails the adapter's schema, with a credential under a sensitive key. */
+  malformed(): void {
+    emit({ type: "assistant", api_key: "fake-short-credential", session_id: this.#sessionId });
+  }
+
   result(durationMs: number): void {
     emit({
       type: "result",
@@ -203,6 +208,7 @@ export const runFakeClaude = async (flags: FakeClaudeFlags): Promise<void> => {
       toolUseId: "toolu_fake_change_after_slow",
     });
   }
+  if (/MALFORMED/.test(prompt)) turn.malformed();
   if (/CRASH/.test(prompt)) process.exit(3);
   turn.result(Date.now() - start);
   process.exit(0);
