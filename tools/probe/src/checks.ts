@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AdapterEvent } from "@mia/agent-adapter";
+import type { RuntimeEvent } from "@mia/agent-adapter";
 import type { StepRecord } from "./record.ts";
 
 // Pure readings of recorded step evidence, and the checks each step derives from them.
@@ -30,11 +30,11 @@ export const effortsOf = (hooks: Record<string, unknown>[]): (string | undefined
   });
 
 /** The first event of a type across the recorded steps, in step order. */
-export const firstEvent = <T extends AdapterEvent["type"]>(
+export const firstEvent = <T extends RuntimeEvent["type"]>(
   records: StepRecord[],
   type: T,
-): Extract<AdapterEvent, { type: T }> | undefined => {
-  const isWanted = (event: AdapterEvent): event is Extract<AdapterEvent, { type: T }> =>
+): Extract<RuntimeEvent, { type: T }> | undefined => {
+  const isWanted = (event: RuntimeEvent): event is Extract<RuntimeEvent, { type: T }> =>
     event.type === type;
   for (const record of records) {
     const found = record.events.find(isWanted);
@@ -97,7 +97,7 @@ export const followupChecks = (step: StepRecord): StepChecks => {
     forbidden_proposed_by_model: step.events.some(
       (event) => event.type === "tool_proposed" && event.toolIdentity === "mcp__d1__forbidden",
     ),
-    runtime_reported_denials: JSON.stringify(step.turn?.result?.permission_denials ?? null).slice(
+    runtime_reported_denials: JSON.stringify(step.turn?.summary?.permissionDenials ?? null).slice(
       0,
       500,
     ),
@@ -117,7 +117,7 @@ export const interruptCancellableChecks = (step: StepRecord): StepChecks => {
     ),
     runtime_exit: JSON.stringify(step.turn?.exit),
     runtime_cancellation: step.turn?.runtimeCancellation ?? "",
-    result_message_received: step.turn?.result !== null,
+    result_message_received: step.turn?.summary !== null,
   };
 };
 

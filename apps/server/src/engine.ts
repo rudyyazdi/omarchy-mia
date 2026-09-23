@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { match } from "ts-pattern";
 import {
   readHookEvidence,
-  type AdapterEvent,
+  type RuntimeEvent,
   type PermissionDecision,
   type PermissionRequest,
   type TurnHandle,
@@ -506,7 +506,7 @@ export class Engine {
       turnIndex,
       agentPromptFile: conversation.promptFile,
       permissionHandler: (req) => this.handlePermission(task, req),
-      onEvent: (event) => this.onAdapterEvent(task, event),
+      onEvent: (event) => this.onRuntimeEvent(task, event),
     });
     task.handle = handle;
     void handle.result
@@ -848,7 +848,7 @@ export class Engine {
 
   // ---------------------------------------------------------------- runtime events
 
-  private onAdapterEvent(task: TaskState, event: AdapterEvent): void {
+  private onRuntimeEvent(task: TaskState, event: RuntimeEvent): void {
     const conversation = this.conversation;
     if (!conversation) return;
     const opts = { taskId: task.id, executionId: task.executionId };
@@ -858,10 +858,10 @@ export class Engine {
           .with({ type: "runtime_started" }, (started) => {
             this.record("runtime_started", { pid: started.pid, launch: started.launch }, opts);
           })
-          .with({ type: "runtime_init" }, (init) => {
-            task.reportedModel = init.init.model;
-            this.record("runtime_init", init.init, opts);
-            this.deps.writer.updateExecution(task.executionId, { reportedModel: init.init.model });
+          .with({ type: "runtime_init" }, ({ init }) => {
+            task.reportedModel = init.model;
+            this.record("runtime_init", init.evidence, opts);
+            this.deps.writer.updateExecution(task.executionId, { reportedModel: init.model });
           })
           .with({ type: "text_delta" }, (delta) => {
             this.emit(
@@ -951,15 +951,15 @@ export class Engine {
               });
             this.afterCommit.push(() => this.notifyToolCall(task, call));
           })
-          .with({ type: "turn_result" }, (turn) => {
-            this.record("runtime_result", turn.result, opts);
+          .with({ type: "turn_result" }, ({ summary }) => {
+            this.record("runtime_result", summary.evidence, opts);
             this.deps.writer.updateExecution(task.executionId, {
               usage: {
-                usage: turn.result.usage,
-                total_cost_usd: turn.result.total_cost_usd,
-                duration_ms: turn.result.duration_ms,
-                duration_api_ms: turn.result.duration_api_ms,
-                num_turns: turn.result.num_turns,
+                usage: summary.usage,
+                totalCostUsd: summary.totalCostUsd,
+                durationMs: summary.durationMs,
+                durationApiMs: summary.durationApiMs,
+                numTurns: summary.numTurns,
               },
             });
           })
@@ -1414,7 +1414,7 @@ export class Engine {
               task_id: task.id,
               status,
               ...(error ? { error } : {}),
-              usage: result.result?.usage ?? undefined,
+              usage: result.summary?.usage ?? undefined,
             },
           },
           opts,

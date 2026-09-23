@@ -7,7 +7,7 @@ import {
   LiveCallBudget,
   readHookEvidence,
   validateRuntimeConfig,
-  type AdapterEvent,
+  type RuntimeEvent,
   type PermissionHandler,
   type RuntimeConfig,
 } from "@mia/agent-adapter";
@@ -17,7 +17,7 @@ import type { ProbeOptions, StepRecord, StepSpec } from "./record.ts";
 
 export const log = (...args: unknown[]) => console.log(`[probe]`, ...args);
 
-const describeEvent = (event: AdapterEvent): string =>
+const describeEvent = (event: RuntimeEvent): string =>
   match(event)
     .with(
       { type: "tool_proposed" },

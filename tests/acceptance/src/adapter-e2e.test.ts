@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ApprovalBridge,
   ClaudeCodeAdapter,
-  type AdapterEvent,
+  type RuntimeEvent,
   type PermissionDecision,
   type PermissionRequest,
 } from "@mia/agent-adapter";
@@ -44,7 +44,7 @@ const run = async (
   decide: (request: PermissionRequest) => PermissionDecision,
   during?: (handle: ReturnType<ClaudeCodeAdapter["submitTurn"]>) => Promise<void>,
 ) => {
-  const events: AdapterEvent[] = [];
+  const events: RuntimeEvent[] = [];
   const requests: PermissionRequest[] = [];
   const handle = adapter().submitTurn({
     text,
@@ -71,6 +71,10 @@ describe("real adapter against a fake runtime process", () => {
     }));
     expect(result.status).toBe("completed");
     expect(result.init?.model).toBe("scripted-model");
+    // The runtime's own messages stay available as evidence behind the normalized facts.
+    expect(result.init?.evidence).toMatchObject({ type: "system", subtype: "init" });
+    expect(result.summary).toMatchObject({ isError: false, outcome: "success", numTurns: 1 });
+    expect(result.summary?.evidence).toMatchObject({ type: "result", subtype: "success" });
     expect(events.map((event) => event.type)).toEqual(
       expect.arrayContaining([
         "runtime_started",

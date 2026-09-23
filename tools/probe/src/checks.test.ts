@@ -1,4 +1,4 @@
-import type { AdapterEvent, PermissionDecision } from "@mia/agent-adapter";
+import type { RuntimeEvent, PermissionDecision } from "@mia/agent-adapter";
 import { describe, expect, it } from "vitest";
 import type { FixtureState } from "@mia/controlled-mcp";
 import {
@@ -73,7 +73,7 @@ describe("probe evidence readings", () => {
   });
 
   it("finds the first event of a type in step order", () => {
-    const delta = (text: string): AdapterEvent => ({ type: "text_delta", text, at });
+    const delta = (text: string): RuntimeEvent => ({ type: "text_delta", text, at });
     const records = [
       step({ events: [{ type: "runtime_stderr", text: "warn", at }] }),
       step({ events: [delta("first")] }),

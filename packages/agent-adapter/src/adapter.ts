@@ -2,46 +2,14 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { match } from "ts-pattern";
 import { z } from "zod";
 import { errorMessage, redactString, redactValue } from "@mia/protocol";
 import type { ApprovalBridge, PermissionHandler } from "./bridge.ts";
 import type { RuntimeConfig } from "./config.ts";
 import { prepareLaunch, type LaunchPlan } from "./launch.ts";
-import {
-  InitMessageSchema,
-  LineSplitter,
-  parseStreamLine,
-  type InitMessage,
-  type ResultMessage,
-  type RuntimeMessage,
-} from "./stream.ts";
-
-export type AdapterEvent =
-  | { type: "runtime_started"; pid: number; launch: LaunchPlan["description"]; at: string }
-  | { type: "runtime_init"; init: InitMessage; at: string }
-  | { type: "text_delta"; text: string; at: string }
-  | {
-      type: "tool_proposed";
-      runtimeCallId: string;
-      toolIdentity: string;
-      arguments: unknown;
-      complete: boolean;
-      at: string;
-    }
-  | { type: "assistant_message"; message: unknown; at: string }
-  | {
-      type: "tool_result";
-      runtimeCallId: string;
-      isError: boolean;
-      content: unknown;
-      raw: unknown;
-      at: string;
-    }
-  | { type: "turn_result"; result: ResultMessage; at: string }
-  | { type: "runtime_stderr"; text: string; at: string }
-  | { type: "malformed_event"; raw: string; error: string; at: string }
-  | { type: "runtime_exit"; code: number | null; signal: NodeJS.Signals | null; at: string };
+import { ClaudeTranslator } from "./claude-translate.ts";
+import type { RuntimeEvent, RuntimeInit, TurnSummary } from "./runtime-events.ts";
+import { LineSplitter, parseStreamLine } from "./stream.ts";
 
 export interface TurnOptions {
   text: string;
@@ -52,7 +20,7 @@ export interface TurnOptions {
   /** Defaults to config.agentPromptFile; the engine passes the conversation's retained snapshot. */
   agentPromptFile?: string;
   permissionHandler: PermissionHandler;
-  onEvent: (event: AdapterEvent) => void;
+  onEvent: (event: RuntimeEvent) => void;
 }
 
 /** not_needed: no interruption; forced_kill: SIGKILL delivered and exit observed; unknown: kill sent, exit not observed in time. */
@@ -65,13 +33,13 @@ interface RuntimeExit {
 
 export interface TurnResult {
   status: "completed" | "failed" | "killed";
-  result: ResultMessage | null;
+  summary: TurnSummary | null;
   exit: RuntimeExit | null;
   error: string | null;
   streamLogPath: string;
   hookEvidencePath: string;
   launch: LaunchPlan["description"];
-  init: InitMessage | null;
+  init: RuntimeInit | null;
   interrupted: boolean;
   runtimeCancellation: RuntimeCancellation;
 }
@@ -208,7 +176,7 @@ export class ClaudeCodeAdapter {
         pid: undefined,
         result: Promise.resolve({
           status: "failed",
-          result: null,
+          summary: null,
           exit: null,
           error: `failed to spawn runtime: ${errorMessage(error)}`,
           streamLogPath,
@@ -223,12 +191,11 @@ export class ClaudeCodeAdapter {
     }
 
     this.bridge.setHandler(options.permissionHandler);
-    let init: InitMessage | null = null;
-    let result: ResultMessage | null = null;
+    let init: RuntimeInit | null = null;
+    let summary: TurnSummary | null = null;
     let interrupted = false;
     let runtimeCancellation: RuntimeCancellation = "not_needed";
     let spawnError: string | null = null;
-    const proposedComplete = new Set<string>();
 
     child.once("spawn", () =>
       emit({
@@ -244,86 +211,13 @@ export class ClaudeCodeAdapter {
     child.stdin?.on("error", () => undefined);
     child.stdin?.end(options.text);
 
-    const handleMessage = (message: RuntimeMessage): void =>
-      match(message)
-        .with({ type: "system" }, (systemMessage) => {
-          if (systemMessage.subtype !== "init") return;
-          // The union parsed InitMessageSchema first, so a system/init message that reached here satisfies it.
-          const parsedInit = InitMessageSchema.safeParse(systemMessage);
-          if (!parsedInit.success) return;
-          init = parsedInit.data;
-          emit({ type: "runtime_init", init, at: now() });
-        })
-        .with({ type: "stream_event" }, ({ event }) => {
-          if (
-            event.type === "content_block_delta" &&
-            event.delta?.type === "text_delta" &&
-            event.delta.text
-          ) {
-            emit({ type: "text_delta", text: event.delta.text, at: now() });
-          } else if (
-            event.type === "content_block_start" &&
-            event.content_block?.type === "tool_use" &&
-            event.content_block.id &&
-            event.content_block.name
-          ) {
-            emit({
-              type: "tool_proposed",
-              runtimeCallId: event.content_block.id,
-              toolIdentity: event.content_block.name,
-              arguments: event.content_block.input ?? {},
-              complete: false,
-              at: now(),
-            });
-          }
-        })
-        .with({ type: "assistant" }, (assistantMessage) => {
-          emit({
-            type: "assistant_message",
-            message: redactValue(assistantMessage.message),
-            at: now(),
-          });
-          for (const block of assistantMessage.message.content) {
-            if (
-              block.type === "tool_use" &&
-              block.id &&
-              block.name &&
-              !proposedComplete.has(block.id)
-            ) {
-              proposedComplete.add(block.id);
-              emit({
-                type: "tool_proposed",
-                runtimeCallId: block.id,
-                toolIdentity: block.name,
-                arguments: block.input ?? {},
-                complete: true,
-                at: now(),
-              });
-            }
-          }
-        })
-        .with({ type: "user" }, (userMessage) => {
-          const content = userMessage.message.content;
-          if (!Array.isArray(content)) return;
-          for (const block of content) {
-            if (block.type === "tool_result" && block.tool_use_id) {
-              emit({
-                type: "tool_result",
-                runtimeCallId: block.tool_use_id,
-                isError: block.is_error === true,
-                content: redactValue(block.content ?? null),
-                raw: redactValue(userMessage.tool_use_result ?? null),
-                at: now(),
-              });
-            }
-          }
-        })
-        .with({ type: "result" }, (resultMessage) => {
-          result = resultMessage;
-          emit({ type: "turn_result", result, at: now() });
-        })
-        .with({ type: "other" }, () => undefined)
-        .exhaustive();
+    const translator = new ClaudeTranslator();
+    /** The last init and summary the runtime reported become the TurnResult's; every event is forwarded. */
+    const handleEvent = (event: RuntimeEvent): void => {
+      if (event.type === "runtime_init") init = event.init;
+      if (event.type === "turn_result") summary = event.summary;
+      emit(event);
+    };
 
     const splitter = new LineSplitter();
     const consume = (lines: string[]) => {
@@ -343,7 +237,8 @@ export class ClaudeCodeAdapter {
             at: now(),
           });
         }
-        if (parsed.ok) handleMessage(parsed.message);
+        if (parsed.ok)
+          for (const event of translator.translate(parsed.message, now)) handleEvent(event);
         else
           emit({
             type: "malformed_event",
@@ -381,17 +276,17 @@ export class ClaudeCodeAdapter {
       } else if (spawnError) {
         status = "failed";
         error = `runtime process error: ${spawnError}`;
-      } else if (result && !result.is_error && exit.code === 0) {
+      } else if (summary && !summary.isError && exit.code === 0) {
         status = "completed";
       } else {
         status = "failed";
-        error = result
-          ? `runtime reported ${result.subtype}${result.result ? `: ${redactString(result.result).slice(0, 500)}` : ""}`
+        error = summary
+          ? `runtime reported ${summary.outcome}${summary.finalText ? `: ${redactString(summary.finalText).slice(0, 500)}` : ""}`
           : `runtime exited with code ${exit.code} signal ${exit.signal} without a result message`;
       }
       return {
         status,
-        result,
+        summary,
         exit,
         error,
         streamLogPath,

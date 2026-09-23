@@ -23,7 +23,7 @@ const freezeExamples = (context: ProbeContext, staticReport: StaticCapabilities)
     runtime_version: staticReport.runtime_version,
     adapter_version: staticReport.adapter_version,
     model: context.options.model,
-    init: firstEvent(records, "runtime_init")?.init ?? null,
+    init: firstEvent(records, "runtime_init")?.init.evidence ?? null,
     tool_proposed: firstEvent(records, "tool_proposed") ?? null,
     permission_request_payload:
       records.find((record) => record.permission_requests.length > 0)?.permission_requests[0]
@@ -33,7 +33,7 @@ const freezeExamples = (context: ProbeContext, staticReport: StaticCapabilities)
       { behavior: "deny", message: "The user rejected this call." },
     ],
     tool_result: firstEvent(records, "tool_result") ?? null,
-    turn_result: firstEvent(records, "turn_result")?.result ?? null,
+    turn_result: firstEvent(records, "turn_result")?.summary.evidence ?? null,
     hook_evidence: records[0]?.hook_evidence ?? null,
     launch_description: records[0]?.turn?.launch ?? null,
   };
