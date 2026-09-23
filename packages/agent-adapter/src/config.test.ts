@@ -28,8 +28,7 @@ describe("validateRuntimeConfig", () => {
       overrides: { toolPolicy: { mcp__missing__read: "allow" } },
       message: 'no MCP server "missing"',
     },
-    // `in` would find these on Object.prototype and accept a server nobody configured.
-    ...["constructor", "toString", "hasOwnProperty"].map((server) => ({
+    ...["constructor", "toString", "hasOwnProperty", "__proto__"].map((server) => ({
       name: `policy for inherited name ${server}`,
       overrides: { toolPolicy: { [`mcp__${server}__x`]: "allow" as const } },
       message: `no MCP server "${server}"`,
