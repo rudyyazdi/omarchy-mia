@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { startServer } from "@mia/server";
 import { Catalog } from "@mia/records";
-import { ScriptedRuntime } from "./scripted-runtime.ts";
+import { ScriptedRuntime, type ScriptedTurn } from "./scripted-runtime.ts";
 import {
   ackError,
   ackResult,
@@ -168,12 +168,13 @@ describe("shutdown mid-turn", () => {
   it("refuses commands while it waits for the interrupted turn, and closes only once the turn has finished", async () => {
     const runtime = new ScriptedRuntime();
     const testServer = await startTestServer(runtime);
+    let turn: ScriptedTurn | null = null;
     try {
       const client = await testServer.connect("client-A");
       await client.startConversation();
       const next = runtime.nextTurn();
       const taskId = mustString(ackResult(await client.submitText("hello")).task_id, "task_id");
-      const turn = await next;
+      turn = await next;
       turn.survivesInterrupt = true; // the turn ends only when the test ends it
 
       let closed = false;
@@ -200,6 +201,7 @@ describe("shutdown mid-turn", () => {
         catalog.close();
       }
     } finally {
+      turn?.end(); // a failed assertion must not leave the shutdown waiting on this turn forever
       await testServer.close();
     }
   });
@@ -222,6 +224,8 @@ describe("shutdown mid-turn", () => {
       await testServer.server.close(unbounded());
 
       expect(processGroupExists(pid)).toBe(false);
+      // The gateway closed only after the turn finished, so the client already holds its outcome.
+      expect((await client.waitFor("task_finished")).payload.status).toBe("interrupted");
       expect(process.getActiveResourcesInfo()).not.toContain("Timeout");
       const catalog = testServer.catalog();
       try {

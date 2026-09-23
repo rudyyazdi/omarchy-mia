@@ -1,12 +1,12 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 import { match } from "ts-pattern";
 import { z } from "zod";
 import { errorMessage, redactString } from "@mia/protocol";
 import type { ApprovalBridge, PermissionHandler } from "./bridge.ts";
 import type { RuntimeConfig } from "./config.ts";
+import { withinDeadline } from "./deadline.ts";
 import { prepareLaunch, type LaunchPlan } from "./launch.ts";
 import { ClaudeTranslator } from "./claude-translate.ts";
 import type { RuntimeEvent, RuntimeInit, TurnSummary } from "./runtime-events.ts";
@@ -59,26 +59,6 @@ export interface TurnHandle {
 const EXIT_WAIT_MS = 5_000;
 /** How long the turn result waits for a pending interrupt() to settle after the process exit is observed. */
 const INTERRUPT_SETTLE_MS = 6_000;
-
-/**
- * `promise`'s value, or `fallback` once `ms` pass. The deadline is cancelled as soon as the race settles and
- * never holds the process open, so a server shutting down after a kill is not kept alive by it.
- */
-const withinDeadline = async <T, F>(
-  promise: Promise<T>,
-  ms: number,
-  fallback: F,
-): Promise<T | F> => {
-  const settled = new AbortController();
-  try {
-    return await Promise.race([
-      promise,
-      sleep(ms, fallback, { signal: settled.signal, ref: false }),
-    ]);
-  } finally {
-    settled.abort();
-  }
-};
 
 /** Printed verbatim as a JSON report by the probe tool, hence snake_case. */
 export interface StaticCapabilities {

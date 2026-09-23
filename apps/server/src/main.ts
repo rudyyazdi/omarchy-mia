@@ -16,7 +16,7 @@ try {
     server.close(AbortSignal.timeout(SHUTDOWN_TURN_WAIT_MS)).then(
       () => process.exit(0),
       (error: unknown) => {
-        console.error(`mia-server: shutdown failed: ${errorMessage(error)}`);
+        console.error(`mia-server: ${errorMessage(error)}`);
         process.exit(1);
       },
     );

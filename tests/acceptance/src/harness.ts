@@ -24,7 +24,7 @@ export interface TestServer {
 /** A test's own timeout bounds its waits; connecting gets a shorter deadline so a dead server fails fast. */
 const CONNECT_TIMEOUT_MS = 10_000;
 /** How long closing waits for a turn the test left running; a scripted turn that survives interruption never ends. */
-const SHUTDOWN_TURN_WAIT_MS = 3_000;
+const TEARDOWN_TURN_WAIT_MS = 3_000;
 
 export const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 /** The fake Claude Code executable the real adapter launches in offline tests. */
@@ -133,8 +133,11 @@ export const startTestServer = async (
     catalog: () => new Catalog(profile.stateDirectory, { readonly: true }),
     close: async () => {
       for (const client of clients) client.close();
-      await server.close(AbortSignal.timeout(SHUTDOWN_TURN_WAIT_MS));
-      rmSync(dir, { recursive: true, force: true });
+      try {
+        await server.close(AbortSignal.timeout(TEARDOWN_TURN_WAIT_MS));
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     },
   };
 };

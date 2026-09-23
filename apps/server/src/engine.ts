@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { aborted } from "node:util";
 import { match } from "ts-pattern";
 import {
   policyFor,
@@ -1702,10 +1701,14 @@ export class Engine {
         ?.interrupt()
         .catch((error: unknown) => this.deps.log(`interrupt failed: ${errorMessage(error)}`));
     }
+    const timedOut = Promise.withResolvers<"timed_out">();
+    const onAbort = () => timedOut.resolve("timed_out");
+    if (turnWait.aborted) onAbort();
+    else turnWait.addEventListener("abort", onAbort, { once: true });
     const outcome = await Promise.race([
       task.finished.then(() => "finished" as const),
-      aborted(turnWait, task).then(() => "timed_out" as const),
-    ]);
+      timedOut.promise,
+    ]).finally(() => turnWait.removeEventListener("abort", onAbort));
     if (outcome === "timed_out")
       this.deps.log(`shutdown: task ${task.id} did not finish in time; its outcome is unrecorded`);
   }

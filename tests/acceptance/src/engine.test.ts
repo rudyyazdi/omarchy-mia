@@ -926,7 +926,9 @@ describe("interruption path", () => {
       await closing;
     }
     expect(ts.logs).toContainEqual(
-      expect.stringContaining("interruption not recorded: simulated commit failure"),
+      expect.stringContaining(
+        "interruption not recorded: simulated commit failure; killing the runtime anyway",
+      ),
     );
   });
 
