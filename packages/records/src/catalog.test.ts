@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { Catalog, defaultStateDir } from "./catalog.ts";
 import { RecordWriter } from "./writer.ts";
-import { SCHEMA_VERSION } from "./schema.ts";
+import { SCHEMA_VERSION, type JournalEventType } from "./schema.ts";
 
 describe("defaultStateDir", () => {
   it("resolves from the environment it is given, not the process's", () => {
@@ -53,11 +53,11 @@ describe("savepoint", () => {
       provenanceSetId: writer.createProvenanceSet("test"),
       runtimeConversationId: "rt-1",
     });
-    const append = (type: string) =>
+    const append = (type: JournalEventType) =>
       writer.appendEvent({ conversationId: conversation.id, type, payload: {} });
     const eventTypes = () =>
       catalog
-        .all<{ type: string }>("SELECT type FROM events ORDER BY sequence")
+        .all<{ type: JournalEventType }>("SELECT type FROM events ORDER BY sequence")
         .map((row) => row.type);
     return { catalog, append, eventTypes };
   };
@@ -65,15 +65,15 @@ describe("savepoint", () => {
   it("undoes only a failed savepoint's writes and commits the rest of the transaction", () => {
     const { catalog, append, eventTypes } = openCatalog();
     catalog.transaction(() => {
-      append("before");
+      append("task_submitted");
       const undone = catalog.savepoint(() => {
-        append("undone");
+        append("tool_dispatched");
         throw new Error("simulated write failure");
       });
       expect(undone).toMatchObject({ ok: false, error: new Error("simulated write failure") });
-      expect(catalog.savepoint(() => append("kept")).ok).toBe(true);
+      expect(catalog.savepoint(() => append("runtime_exit")).ok).toBe(true);
     });
-    expect(eventTypes()).toEqual(["before", "kept"]);
+    expect(eventTypes()).toEqual(["task_submitted", "runtime_exit"]);
   });
 
   it("refuses to run outside a transaction", () => {
@@ -85,7 +85,7 @@ describe("savepoint", () => {
     const { catalog, append, eventTypes } = openCatalog();
     expect(() =>
       catalog.transaction(() => {
-        append("before");
+        append("task_submitted");
         catalog.savepoint(() => {
           // SQLite ends the transaction itself on some I/O errors; ROLLBACK stands in for one.
           catalog.db.exec("ROLLBACK");

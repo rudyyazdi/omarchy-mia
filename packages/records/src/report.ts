@@ -1,4 +1,5 @@
 import { parseJson } from "./catalog.ts";
+import type { ObjectIntegrity } from "./schema.ts";
 import {
   diagnosticsViews,
   taskViews,
@@ -103,7 +104,7 @@ ${errors}
  */
 export const renderReport = (
   snapshot: ConversationSnapshot,
-  options: { objectStatus?: Record<string, string> } = {},
+  options: { objectStatus?: Record<string, ObjectIntegrity> } = {},
 ): string => {
   const conv = snapshot.tables.conversations[0];
   if (!conv) throw new Error(`snapshot ${snapshot.conversation_id} has no conversation row`);

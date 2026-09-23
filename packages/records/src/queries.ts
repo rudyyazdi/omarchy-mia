@@ -15,6 +15,7 @@ import {
   type DiagnosticsRow,
   type EventRow,
   type ExecutionRow,
+  type JournalEventType,
   type ObjectRow,
   type ProvenanceEntryRow,
   type ProvenanceSetRow,
@@ -242,7 +243,7 @@ export interface TaskView {
   errors: EventRow[];
 }
 
-const ERROR_EVENT_TYPES = new Set(["error", "runtime_stderr", "malformed_event"]);
+const ERROR_EVENT_TYPES = new Set<JournalEventType>(["error", "runtime_stderr"]);
 
 /** Shapes of stored payloads this view reads back. */
 const TextDeltaPayload = z.object({ text: z.string() });

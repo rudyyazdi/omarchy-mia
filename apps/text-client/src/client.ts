@@ -11,6 +11,7 @@ import {
   type Cancellable,
   type ClientCommand,
   type ClientDiagnostics,
+  type ConnectionState,
   type Decision,
   type ServerEvent,
   type ServerEventOf,
@@ -78,7 +79,7 @@ export class MiaClient extends EventEmitter {
   private pendingWaits = new Set<() => void>();
   readonly recentInteractionIds: string[] = [];
   readonly recentErrors: { at: string; message: string }[] = [];
-  connectionState: ClientDiagnostics["connection_state"] = "disconnected";
+  connectionState: ConnectionState = "disconnected";
   conversationId: string | null = null;
   readonly events: ServerEvent[] = [];
 

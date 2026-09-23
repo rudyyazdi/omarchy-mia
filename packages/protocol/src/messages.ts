@@ -14,6 +14,22 @@ const isoTime = z.string().datetime({ offset: true });
 export const DecisionSchema = z.enum(["approve", "reject"]);
 export type Decision = z.infer<typeof DecisionSchema>;
 
+/** The runtime effort a profile requests; what the runtime reports back stays open text. */
+export const EffortSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
+export type Effort = z.infer<typeof EffortSchema>;
+
+export const ConnectionStateSchema = z.enum([
+  "connecting",
+  "connected",
+  "reconnecting",
+  "disconnected",
+]);
+export type ConnectionState = z.infer<typeof ConnectionStateSchema>;
+
+/** not_needed: no interruption; forced_kill: SIGKILL delivered and exit observed; unknown: kill sent, exit not observed in time. */
+export const RuntimeCancellationSchema = z.enum(["not_needed", "forced_kill", "unknown"]);
+export type RuntimeCancellation = z.infer<typeof RuntimeCancellationSchema>;
+
 export const ToolPolicySchema = z.enum(["allow", "ask", "deny"]);
 export type ToolPolicy = z.infer<typeof ToolPolicySchema>;
 /** Missing configuration stays distinct from an explicit deny in the persisted policy audit. */
@@ -47,7 +63,7 @@ export const ClientDiagnosticsSchema = z.object({
     commit: z.string().nullable(),
     dirty: z.boolean().nullable(),
   }),
-  connection_state: z.enum(["connecting", "connected", "reconnecting", "disconnected"]),
+  connection_state: ConnectionStateSchema,
   recent_interaction_ids: z.array(IdSchema).max(50),
   recent_errors: z.array(z.object({ at: isoTime, message: z.string().max(2000) })).max(20),
   timing: z.record(z.string(), z.number()).optional(),
@@ -100,7 +116,7 @@ export const HeartbeatCommand = command(
     .object({
       conversation_id: IdSchema.nullable(),
       captured_at: isoTime,
-      connection_state: z.string().max(32),
+      connection_state: ConnectionStateSchema,
     })
     .strict(),
 );
@@ -260,7 +276,7 @@ const eventPayloads = {
         detail: z.string().optional(),
       }),
     ),
-    runtime_cancellation: z.enum(["not_needed", "forced_kill", "unknown"]),
+    runtime_cancellation: RuntimeCancellationSchema,
   }),
   task_finished: z.object({
     conversation_id: IdSchema,
@@ -278,6 +294,10 @@ const eventPayloads = {
 } as const;
 
 export type ServerEventType = keyof typeof eventPayloads;
+/** Reads a server event type back from stored evidence; derived from the payload map, so no list repeats it. */
+export const ServerEventTypeSchema = z.custom<ServerEventType>(
+  (value) => typeof value === "string" && Object.hasOwn(eventPayloads, value),
+);
 
 const serverEvent = <T extends ServerEventType>(type: T) =>
   z.object({

@@ -29,7 +29,11 @@ describe("record writer", () => {
     });
     expect(() =>
       catalog.transaction(() => {
-        writer.appendEvent({ conversationId: conv.id, type: "a", payload: { ok: true } });
+        writer.appendEvent({
+          conversationId: conv.id,
+          type: "task_submitted",
+          payload: { ok: true },
+        });
         writer.createTask({ conversationId: "conv_does_not_exist", text: "x", clientId: null });
       }),
     ).toThrow();
@@ -44,10 +48,14 @@ describe("record writer", () => {
     });
     const first = writer.appendEvent({
       conversationId: conv.id,
-      type: "x",
+      type: "task_submitted",
       payload: { api_key: "sk-ant-abcdefghijklmnop", text: "Bearer abcdefghijklmnopqrstuvwxyz" },
     });
-    const second = writer.appendEvent({ conversationId: conv.id, type: "y", payload: {} });
+    const second = writer.appendEvent({
+      conversationId: conv.id,
+      type: "runtime_exit",
+      payload: {},
+    });
     expect([first.sequence, second.sequence]).toEqual([1, 2]);
     const row = catalog.get<{ payload: string }>(
       "SELECT payload FROM events WHERE id = ?",
@@ -117,7 +125,7 @@ describe("record writer", () => {
       connectionId: "conn-1",
       clientId: "client-1",
       clientCommandId: "cmd-1",
-      type: "submit_text",
+      type: "submit_text" as const,
       payload: { text: "a" },
     };
     expect(writer.recordCommand(command).kind).toBe("new");
@@ -131,7 +139,7 @@ describe("record writer", () => {
       connectionId,
       clientId: "client-1",
       clientCommandId,
-      type: "start_conversation",
+      type: "start_conversation" as const,
       payload: {},
     });
     const recordNew = (clientCommandId: string): string => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PROTOCOL_VERSION, ServerEventSchema } from "./messages.ts";
+import { PROTOCOL_VERSION, ServerEventSchema, ServerEventTypeSchema } from "./messages.ts";
 
 const ack = (payload: Record<string, unknown>) => ({
   protocol_version: PROTOCOL_VERSION,
@@ -44,4 +44,17 @@ describe("ack payload", () => {
   ])("refuses $name", ({ payload }) => {
     expect(ServerEventSchema.safeParse(ack(payload)).success).toBe(false);
   });
+});
+
+describe("server event type", () => {
+  it.each(["ack", "task_finished", "error"])("reads back %s", (type) => {
+    expect(ServerEventTypeSchema.safeParse(type).success).toBe(true);
+  });
+
+  it.each(["malformed_event", "runtime_stderr", "constructor", "__proto__", 7])(
+    "refuses %s, which is not a server event type",
+    (type) => {
+      expect(ServerEventTypeSchema.safeParse(type).success).toBe(false);
+    },
+  );
 });

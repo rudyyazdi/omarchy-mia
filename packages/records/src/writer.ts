@@ -9,6 +9,8 @@ import {
   redactString,
   redactValue,
   type ApprovalStatus,
+  type ClientCommand,
+  type Effort,
   type TaskStatus,
   type ToolCallPolicy,
   type ToolCallStatus,
@@ -22,7 +24,9 @@ import type {
   CommandReply,
   CommandRow,
   ConversationStatus,
+  DependencyRelation,
   ExecutionStatus,
+  JournalEventType,
   LinkRelation,
   ProvenanceEntryRow,
   ProvenanceRole,
@@ -83,7 +87,7 @@ const storedReply = (row: unknown): CommandReply | null => {
 
 export interface EventInput {
   conversationId: string;
-  type: string;
+  type: JournalEventType;
   payload: unknown;
   taskId?: string | null;
   executionId?: string | null;
@@ -191,7 +195,7 @@ export class RecordWriter {
     connectionId: string;
     clientId: string;
     clientCommandId: string;
-    type: string;
+    type: ClientCommand["type"];
     payload: unknown;
     conversationId?: string | null;
   }): RecordedCommand {
@@ -342,7 +346,11 @@ export class RecordWriter {
     return id;
   }
 
-  addDependency(parentArtifactId: string, requiredArtifactId: string, relation: string): void {
+  addDependency(
+    parentArtifactId: string,
+    requiredArtifactId: string,
+    relation: DependencyRelation,
+  ): void {
     this.catalog.insert("artifact_dependencies", {
       parent_artifact_id: parentArtifactId,
       required_artifact_id: requiredArtifactId,
@@ -417,7 +425,7 @@ export class RecordWriter {
     runtimeIdentity: string;
     runtimeConversationId: string;
     requestedModel: string;
-    requestedEffort: string;
+    requestedEffort: Effort;
     provenanceSetId: string | null;
     executionEpoch: number;
   }): string {
@@ -444,6 +452,7 @@ export class RecordWriter {
       status?: ExecutionStatus;
       endedAt?: string | null;
       reportedModel?: string | null;
+      // eslint-disable-next-line no-restricted-syntax -- whatever the runtime reported, kept as reported
       reportedEffort?: string | null;
       effortEvidence?: unknown;
       usage?: ExecutionUsage;

@@ -70,7 +70,35 @@ const layerOverrides = LAYERS.flatMap((layer, index) =>
       ],
 );
 
+// Enforces AGENTS.md, Design: a domain vocabulary is a union declared once and imported, never retyped as
+// `string`. Lint sees only names, so a field that is meant to stay open (a value the runtime reports) takes a
+// bypass that says so; a union spelled out twice, and fields named `type`, are left to review.
+const VOCABULARY_NAME =
+  "/(status|kind|policy|role|disposition|mode|relation|decision|effort|integrity|cancellation|_state|[a-z]State)$/i";
+const STRING_TYPE = ["TSStringKeyword", "TSUnionType > TSStringKeyword"];
+// `z.string()`, alone or followed by up to two chained calls such as `.max(32).optional()`.
+const Z_STRING = [
+  'CallExpression[callee.object.name="z"][callee.property.name="string"]',
+  'CallExpression[callee.object.callee.object.name="z"][callee.object.callee.property.name="string"]',
+  'CallExpression[callee.object.callee.object.callee.object.name="z"][callee.object.callee.object.callee.property.name="string"]',
+];
+const VOCABULARY_AS_STRING = {
+  selector: [
+    ...["TSPropertySignature", "PropertyDefinition"].flatMap((node) =>
+      STRING_TYPE.map(
+        (type) => `${node}[key.name=${VOCABULARY_NAME}] > TSTypeAnnotation > ${type}`,
+      ),
+    ),
+    ...STRING_TYPE.map(
+      (type) => `Identifier[name=${VOCABULARY_NAME}] > TSTypeAnnotation > ${type}`,
+    ),
+    ...Z_STRING.map((call) => `Property[key.name=${VOCABULARY_NAME}] > ${call}`),
+  ].join(", "),
+  message: `A domain vocabulary (status, kind, policy, mode, effort, ...) is a union declared once and imported, never \`string\`. ${BYPASS_NOTE}`,
+};
+
 const RESTRICTED_SYNTAX = [
+  VOCABULARY_AS_STRING,
   {
     selector: "FunctionDeclaration",
     message: `Use an arrow function assigned to a const. ${BYPASS_NOTE}`,

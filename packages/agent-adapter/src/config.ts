@@ -1,8 +1,11 @@
 import { z } from "zod";
-import { isSensitiveKey, isTokenCount, ToolPolicySchema, type ToolCallPolicy } from "@mia/protocol";
-
-export const EffortSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
-export type Effort = z.infer<typeof EffortSchema>;
+import {
+  EffortSchema,
+  isSensitiveKey,
+  isTokenCount,
+  ToolPolicySchema,
+  type ToolCallPolicy,
+} from "@mia/protocol";
 
 /** The two network transports differ only in their discriminator; the shape they accept is one definition. */
 const remoteMcpServerSchema = <Transport extends "http" | "sse">(transport: Transport) =>

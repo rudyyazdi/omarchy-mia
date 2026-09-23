@@ -4,6 +4,8 @@ export type {
   CommandReply,
   CaptureStatus,
   ExecutionStatus,
+  JournalEventType,
+  LinkRelation,
   ProvenanceEntryRow,
   ProvenanceRole,
 } from "./schema.ts";

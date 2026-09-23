@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { startServer } from "@mia/server";
+import type { ApprovalStatus, TaskStatus } from "@mia/protocol";
 import { Catalog } from "@mia/records";
 import { ScriptedRuntime, type ScriptedTurn } from "./scripted-runtime.ts";
 import {
@@ -195,7 +196,7 @@ describe("shutdown mid-turn", () => {
       const catalog = testServer.catalog();
       try {
         expect(
-          catalog.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId),
+          catalog.get<{ status: TaskStatus }>("SELECT status FROM tasks WHERE id = ?", taskId),
         ).toEqual({ status: "interrupted" });
       } finally {
         catalog.close();
@@ -230,9 +231,9 @@ describe("shutdown mid-turn", () => {
       const catalog = testServer.catalog();
       try {
         expect(
-          catalog.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId),
+          catalog.get<{ status: TaskStatus }>("SELECT status FROM tasks WHERE id = ?", taskId),
         ).toEqual({ status: "interrupted" });
-        expect(catalog.all<{ status: string }>("SELECT status FROM approvals")).toEqual([
+        expect(catalog.all<{ status: ApprovalStatus }>("SELECT status FROM approvals")).toEqual([
           { status: "invalidated" },
         ]);
       } finally {

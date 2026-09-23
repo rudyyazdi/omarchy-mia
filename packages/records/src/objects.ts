@@ -13,6 +13,7 @@ import {
 import { dirname, join } from "node:path";
 import { sha256Hex } from "@mia/protocol";
 import type { CatalogPaths } from "./catalog.ts";
+import type { ObjectIntegrity } from "./schema.ts";
 
 export interface StoredObject {
   digest: string;
@@ -71,7 +72,7 @@ export class ObjectStore {
   }
 
   /** Verify bytes on disk still match the digest. */
-  verify(digest: string, expectedBytes?: number): "verified" | "missing" | "corrupt" {
+  verify(digest: string, expectedBytes?: number): ObjectIntegrity {
     const path = this.pathFor(digest);
     if (!existsSync(path)) return "missing";
     const bytes = readFileSync(path);

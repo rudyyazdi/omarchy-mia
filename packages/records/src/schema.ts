@@ -3,8 +3,11 @@ import type {
   AckDisposition,
   AckError,
   ApprovalStatus,
+  ClientCommand,
+  Effort,
   ErrorCode,
   ErrorDisposition,
+  ServerEventType,
   TaskStatus,
   ToolCallPolicy,
   ToolCallStatus,
@@ -289,6 +292,31 @@ export type CommandReply =
   | { disposition: "accepted"; result: Record<string, unknown> | null }
   | { disposition: ErrorDisposition; error: AckError };
 export type ArtifactKind = "snapshot" | "tool_output" | "runtime_transcript" | "effort_evidence";
+/** What ObjectStore.verify found on disk for a digest. */
+export type ObjectIntegrity = "verified" | "missing" | "corrupt";
+/**
+ * Every event type the journal holds: the client protocol's events plus the internal and runtime evidence the
+ * engine records without sending it to a client.
+ */
+export type JournalEventType =
+  | ServerEventType
+  | "provenance_recorded"
+  | "task_submitted"
+  | "client_diagnostics"
+  | "client_disconnected"
+  | "tool_dispatched"
+  | "tool_proposal_started"
+  | "tool_proposed"
+  | "tool_result"
+  | "tool_result_unmatched"
+  | "policy_evaluated"
+  | "assistant_message"
+  | "runtime_started"
+  | "runtime_init"
+  | "runtime_result"
+  | "runtime_stderr"
+  | "runtime_exit"
+  | "artifact_registered";
 export type ProvenanceRole =
   | "agent_prompt"
   | "runtime_instructions"
@@ -305,7 +333,7 @@ export interface ObjectRow {
   digest: string;
   byte_count: number;
   storage_key: string;
-  integrity: "verified" | "missing" | "corrupt";
+  integrity: ObjectIntegrity;
   created_at: string;
 }
 
@@ -396,7 +424,8 @@ export interface ExecutionRow {
   runtime_conversation_id: string | null;
   requested_model: string;
   reported_model: string | null;
-  requested_effort: string;
+  requested_effort: Effort;
+  // eslint-disable-next-line no-restricted-syntax -- whatever effort level the runtime reported, kept as reported
   reported_effort: string | null;
   effort_evidence: string | null;
   provenance_set_id: string | null;
@@ -411,8 +440,7 @@ export interface EventRow {
   id: string;
   conversation_id: string;
   sequence: number;
-  /** Open: the journal also records internal and runtime events outside the client protocol. */
-  type: string;
+  type: JournalEventType;
   payload_version: number;
   payload: string;
   task_id: string | null;
@@ -434,7 +462,7 @@ export interface CommandRow {
   client_id: string;
   client_connection_id: string;
   client_command_id: string;
-  type: string;
+  type: ClientCommand["type"];
   payload_digest: string;
   disposition: CommandDisposition;
   error_code: ErrorCode | null;
@@ -513,10 +541,14 @@ export interface ArtifactLinkRow {
   provenance_set_id: string | null;
 }
 
+/** Why one artifact requires another: a build artifact requires the diff of its local changes. */
+export const DependencyRelationSchema = z.enum(["local_changes"]);
+export type DependencyRelation = z.infer<typeof DependencyRelationSchema>;
+
 export interface ArtifactDependencyRow {
   parent_artifact_id: string;
   required_artifact_id: string;
-  relation: string;
+  relation: DependencyRelation;
 }
 
 /** The rows of every export table, keyed by table name; the shape of a conversation snapshot and of a verified export. */

@@ -95,7 +95,7 @@ export const snapshotFixture = (
       id: "other",
       conversation_id: conversationId,
       task_id: taskId,
-      type: text("task-event-type"),
+      type: "tool_dispatched",
       sequence: 4,
       received_at: text("other-received"),
       payload: JSON.stringify({ detail: text("event-payload") }),
@@ -104,7 +104,7 @@ export const snapshotFixture = (
       id: "conversation-event",
       conversation_id: conversationId,
       task_id: null,
-      type: text("conversation-event-type"),
+      type: "client_disconnected",
       sequence: 5,
       received_at: text("conversation-event-time"),
       payload: JSON.stringify({ detail: text("conversation-event-payload") }),
@@ -119,7 +119,7 @@ export const snapshotFixture = (
       runtime_conversation_id: null,
       requested_model: text("requested-model"),
       reported_model: text("reported-model"),
-      requested_effort: text("requested-effort"),
+      requested_effort: "medium",
       reported_effort: text("reported-effort"),
       effort_evidence: JSON.stringify({ detail: text("effort-evidence") }),
       provenance_set_id: "provenance",
@@ -227,7 +227,7 @@ export const snapshotFixture = (
     {
       parent_artifact_id: artifactId,
       required_artifact_id: text("required-artifact"),
-      relation: text("dependency-relation"),
+      relation: "local_changes",
     },
   ];
   return snapshot;

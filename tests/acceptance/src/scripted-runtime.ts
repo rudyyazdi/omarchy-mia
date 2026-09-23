@@ -2,13 +2,13 @@ import type {
   RuntimeEvent,
   PermissionDecision,
   PermissionRequest,
-  RuntimeCancellation,
   RuntimeInit,
   TurnHandle,
   TurnOptions,
   TurnResult,
   TurnSummary,
 } from "@mia/agent-adapter";
+import type { RuntimeCancellation } from "@mia/protocol";
 import type { TurnRunner } from "@mia/server";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

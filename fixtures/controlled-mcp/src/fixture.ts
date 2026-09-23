@@ -16,9 +16,13 @@ import {
 import { sha256Hex, type Cancellable } from "@mia/protocol";
 import { Ledger, LedgerEntrySchema } from "./ledger.ts";
 
+/** Whether the slow tool honours cancellation while it waits at its barrier. */
+export const SlowModeSchema = z.enum(["cancellable", "uncancellable"]);
+export type SlowMode = z.infer<typeof SlowModeSchema>;
+
 export const PendingSlowCallSchema = z.object({
   call_id: z.string(),
-  mode: z.enum(["cancellable", "uncancellable"]),
+  mode: SlowModeSchema,
   entered_at: z.string(),
   released: z.boolean(),
   cancelled: z.boolean(),
@@ -33,7 +37,7 @@ export const FixtureStateSchema = z.object({
 });
 export type FixtureState = z.infer<typeof FixtureStateSchema>;
 
-const EnteredSchema = z.object({ call_id: z.string(), mode: z.string() });
+const EnteredSchema = z.object({ call_id: z.string(), mode: SlowModeSchema });
 const ReleaseBodySchema = z.object({ call_id: z.string().optional() });
 
 export interface FixtureOptions {
@@ -130,7 +134,7 @@ export const startFixture = async (options: FixtureOptions): Promise<FixtureHand
       {
         description:
           "Long-running consequential action. Signals entered, waits at a barrier, then increments the counter once when released.",
-        inputSchema: { mode: z.enum(["cancellable", "uncancellable"]) },
+        inputSchema: { mode: SlowModeSchema },
       },
       async ({ mode }, extra) => {
         const id = callId();
@@ -368,7 +372,7 @@ export class FixtureHarness {
    */
   async waitEntered({ signal }: Cancellable = {}): Promise<{
     call_id: string;
-    mode: string;
+    mode: SlowMode;
   }> {
     for (;;) {
       const res = await fetch(`${this.baseUrl}/wait-entered`, { method: "POST", signal });

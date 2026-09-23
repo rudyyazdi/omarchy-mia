@@ -1,5 +1,6 @@
 export {
   ClientCommandSchema,
+  EffortSchema,
   EnvelopeHeadSchema,
   ErrorCodeSchema,
   ErrorDispositionSchema,
@@ -7,7 +8,9 @@ export {
   LIMITS,
   PROTOCOL_VERSION,
   ServerEventSchema,
+  ServerEventTypeSchema,
   TaskStatusSchema,
+  ToolCallStatusSchema,
   ToolPolicySchema,
 } from "./messages.ts";
 export type {
@@ -18,11 +21,14 @@ export type {
   ApprovalStatus,
   ClientCommand,
   ClientDiagnostics,
+  ConnectionState,
   Decision,
+  Effort,
   ErrorCode,
   ErrorDisposition,
   EventPayload,
   RefusedAck,
+  RuntimeCancellation,
   ServerEvent,
   ServerEventOf,
   ServerEventType,

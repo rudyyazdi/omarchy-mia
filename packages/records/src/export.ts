@@ -19,9 +19,11 @@ import { snapshotConversation, UnresolvedReferenceSchema } from "./queries.ts";
 import { renderReport } from "./report.ts";
 import {
   CaptureStatusSchema,
+  DependencyRelationSchema,
   EXPORT_TABLES,
   SCHEMA_VERSION,
   type ExportTable,
+  type ObjectIntegrity,
   type ObjectRow,
   type ArtifactRow,
   type ProvenanceEntryRow,
@@ -124,7 +126,7 @@ export const exportConversation = (
 
   const missing: string[] = [];
   const corrupt: string[] = [];
-  const objectStatus: Record<string, string> = {};
+  const objectStatus: Record<string, ObjectIntegrity> = {};
   let included = 0;
   for (const object of snapshot.tables.objects) {
     const digest = object.digest;
@@ -383,7 +385,7 @@ export const verifyExport = (dir: string): VerificationResult => {
       z.object({
         parent_artifact_id: z.string(),
         required_artifact_id: z.string(),
-        relation: z.string(),
+        relation: DependencyRelationSchema,
       }) satisfies z.ZodType<ArtifactDependencyRow>,
     ),
   };
