@@ -1,14 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { clearLine, createInterface, cursorTo, type Interface } from "node:readline";
-import { resolve } from "node:path";
 import { match, P } from "ts-pattern";
-import { z } from "zod";
+import { loadProfile } from "@mia/agent-adapter";
 import { errorMessage, type EventPayload, type ServerEventOf } from "@mia/protocol";
 import { MiaClient } from "./client.ts";
 
-/** Where to connect: read from a server profile, or given directly. */
-export type ConnectionOptions = { config: string } | { url: string; secretFile: string };
+/** Where to connect: read from a server profile (loaded by `loadProfile`, whose placeholders `env` fills), or given directly. */
+export type ConnectionOptions =
+  { config: string; env: NodeJS.ProcessEnv } | { url: string; secretFile: string };
 
 /**
  * Each call builds a fresh deadline for one step, so how long a step may take is main.ts's to decide and a test can
@@ -27,18 +27,10 @@ export interface TextClientIo {
   output: NodeJS.WritableStream & { isTTY?: boolean };
 }
 
-const ProfileConnectionSchema = z.object({
-  server: z.object({ host: z.string(), port: z.number(), secretFile: z.string() }),
-});
-
 const resolveConnection = (options: ConnectionOptions): { url: string; secretFile: string } => {
   if (!("config" in options)) return options;
-  const profile = ProfileConnectionSchema.parse(JSON.parse(readFileSync(options.config, "utf8")));
-  const base = resolve(options.config, "..");
-  return {
-    url: `ws://${profile.server.host}:${profile.server.port}`,
-    secretFile: resolve(base, profile.server.secretFile),
-  };
+  const { server } = loadProfile(options.config, options.env);
+  return { url: `ws://${server.host}:${server.port}`, secretFile: server.secretFile };
 };
 
 /**

@@ -1,9 +1,9 @@
 import { mkdtempDisposableSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ConfigurationError } from "@mia/agent-adapter";
 import { describe, expect, it } from "vitest";
-import { loadProfile, type Profile } from "./config.ts";
+import { ConfigurationError } from "./config.ts";
+import { loadProfile, type Profile } from "./profile.ts";
 
 const profileInput = (): Profile => ({
   profile: "unit",
@@ -54,6 +54,30 @@ describe("loadProfile", () => {
     });
   });
 
+  // Each value would break or rewrite the profile if it were pasted into the raw JSON text.
+  it.each([
+    { name: "a quote", value: 'x","executable":"injected' },
+    { name: "a backslash", value: "C:\\models\\" },
+    { name: "a brace", value: '}{"executable":"injected"}' },
+  ])("keeps a substituted value holding $name as the literal string", ({ value }) => {
+    withProfileFile(JSON.stringify(profileInput()), (path) => {
+      const { runtime } = loadProfile(path, { MODEL: value });
+      expect(runtime.model).toBe(value);
+      expect(runtime.executable).toBe("claude");
+    });
+  });
+
+  it("substitutes placeholders inside arrays and nested values", () => {
+    const input = profileInput();
+    input.notes = ["model ${MODEL}"];
+    input.runtime.env = { SELECTED: "${MODEL}" };
+    withProfileFile(JSON.stringify(input), (path) => {
+      const profile = loadProfile(path, { MODEL: "m" });
+      expect(profile.notes).toEqual(["model m"]);
+      expect(profile.runtime.env).toEqual({ SELECTED: "m" });
+    });
+  });
+
   it("reports missing files as configuration errors", () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-missing-profile-"));
     expect(() => loadProfile(join(directory.path, "absent.json"), {})).toThrow(ConfigurationError);
@@ -66,7 +90,15 @@ describe("loadProfile", () => {
       name: "unresolved environment",
       env: {},
       contents: JSON.stringify(profileInput()),
-      message: "MODEL} but it is not set",
+      message: "runtime.model references ${MODEL} but it is not set",
+    },
+    {
+      name: "a placeholder in a key",
+      contents: JSON.stringify({
+        ...profileInput(),
+        runtime: { ...profileInput().runtime, env: { ["${MODEL}"]: "x" } },
+      }),
+      message: "runtime.env.${MODEL} has a placeholder in its key",
     },
     {
       name: "non-loopback host",

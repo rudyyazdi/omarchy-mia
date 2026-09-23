@@ -35,7 +35,7 @@ const { url, secretFile, config } = program.opts<{
 }>();
 
 const connection = (): ConnectionOptions => {
-  if (config) return { config };
+  if (config) return { config, env: process.env };
   if (url && secretFile) return { url, secretFile };
   return usage();
 };

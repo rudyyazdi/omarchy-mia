@@ -10,6 +10,7 @@ import {
   type RuntimeEvent,
   type PermissionDecision,
   type PermissionRequest,
+  type Profile,
   type TurnHandle,
   type TurnOptions,
   type TurnResult,
@@ -44,7 +45,6 @@ import {
   type DeclaredArtifact,
 } from "./artifact-capture.ts";
 import { collectArtifact } from "./artifact-collector.ts";
-import type { Profile } from "./config.ts";
 import { createConversationProvenance } from "./provenance.ts";
 import {
   bindPermissionRequest,

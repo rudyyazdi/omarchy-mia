@@ -1,10 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
-import { ADAPTER_VERSION, probeStaticCapabilities } from "@mia/agent-adapter";
+import { ADAPTER_VERSION, probeStaticCapabilities, type Profile } from "@mia/agent-adapter";
 import { PROTOCOL_VERSION, redactValue, sha256Hex } from "@mia/protocol";
 import type { ProvenanceEntryRow, ProvenanceRole, RecordWriter } from "@mia/records";
 import { collectBuildInfo, type BuildInfo } from "./build-info.ts";
-import type { Profile } from "./config.ts";
 
 export interface ProvenanceSummary {
   provenance_set_id: string;

@@ -10,7 +10,8 @@ import { z } from "zod";
 import { startFixture } from "@mia/controlled-mcp";
 import { errorMessage, isRecord } from "@mia/protocol";
 import { Catalog, exportConversation, snapshotConversation, verifyExport } from "@mia/records";
-import { loadProfile, startServer, type MiaServer } from "@mia/server";
+import { loadProfile } from "@mia/agent-adapter";
+import { startServer, type MiaServer } from "@mia/server";
 import { readScenarioName, ScenarioNameSchema, type ScenarioName } from "./scenarios.ts";
 
 /** What `npm run live` was asked to run; `main.ts` reads it from the command line. */
