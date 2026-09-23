@@ -29,6 +29,7 @@ describe("redactValue", () => {
     expect(
       redactValue({
         usage: { input_tokens: 1200, cache_read_input_tokens: 3, inputTokens: 5 },
+        env: { MAX_THINKING_TOKENS: "8000", API_TOKENS: "abc", CACHE_TOKENS: "1234567890" },
         access_token: "abc",
         refresh_token: "def",
         id_token: "ghi",
@@ -37,11 +38,14 @@ describe("redactValue", () => {
         authTokens: ["mno"],
         output_tokens: { value: "pqr" },
         tokenSet: { access: "stu" },
+        secret_tokens: 1234,
+        passwordTokens: 99,
         password: 123456,
         secret: true,
       }),
     ).toEqual({
       usage: { input_tokens: 1200, cache_read_input_tokens: 3, inputTokens: 5 },
+      env: { MAX_THINKING_TOKENS: "8000", API_TOKENS: REDACTED, CACHE_TOKENS: REDACTED },
       access_token: REDACTED,
       refresh_token: REDACTED,
       id_token: REDACTED,
@@ -50,6 +54,8 @@ describe("redactValue", () => {
       authTokens: REDACTED,
       output_tokens: REDACTED,
       tokenSet: REDACTED,
+      secret_tokens: REDACTED,
+      passwordTokens: REDACTED,
       password: REDACTED,
       secret: REDACTED,
     });

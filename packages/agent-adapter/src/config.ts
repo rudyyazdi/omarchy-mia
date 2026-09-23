@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isCountKey, isSensitiveKey, ToolPolicySchema } from "@mia/protocol";
+import { isSensitiveKey, isTokenCount, ToolPolicySchema } from "@mia/protocol";
 
 export { ToolPolicySchema, type ToolPolicy } from "@mia/protocol";
 
@@ -96,8 +96,7 @@ export const validateRuntimeConfig = (config: RuntimeConfig): void => {
     );
   }
   for (const [key, value] of Object.entries(config.env)) {
-    // Env values are strings, so a token count (MAX_THINKING_TOKENS=8000) is one written in digits.
-    if (isSensitiveKey(key) && !(isCountKey(key) && /^\d+$/.test(value)))
+    if (isSensitiveKey(key) && !isTokenCount(key, value))
       throw new ConfigurationError(`env must not carry credentials (found key ${key})`);
   }
 };

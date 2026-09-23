@@ -86,6 +86,9 @@ describe("validateRuntimeConfig", () => {
     ["API_TOKENS", "abc"],
     ["MAX_THINKING_TOKENS", ""],
     ["MAX_THINKING_TOKENS", "8000 abc"],
+    ["MAX_THINKING_TOKENS", "1234567890"],
+    ["SECRET_TOKENS", "12345678"],
+    ["DB_PASSWORD_TOKENS", "424242"],
   ])("rejects %s=%j, which is not a token count", (key, value) => {
     const validate = () => validateRuntimeConfig({ ...validRuntime(), env: { [key]: value } });
     expect(validate).toThrow(`found key ${key}`);
