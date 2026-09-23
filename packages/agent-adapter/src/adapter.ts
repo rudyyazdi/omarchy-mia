@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, appendFileSync, constants } from "node:fs";
+import { existsSync, constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { join } from "node:path";
 import { match } from "ts-pattern";
@@ -13,7 +13,8 @@ import { prepareLaunch, runtimeEnvironment, type LaunchPlan } from "./launch.ts"
 import { resolveExecutable } from "./resolve-executable.ts";
 import { ClaudeTranslator } from "./claude-translate.ts";
 import type { RuntimeEvent, RuntimeInit, TurnSummary } from "./runtime-events.ts";
-import { LineSplitter, parseStreamLine, redactLine } from "./stream.ts";
+import { parseStreamLine, redactLine } from "./stream.ts";
+import { retainStdout } from "./transcript.ts";
 
 export interface TurnOptions {
   text: string;
@@ -237,43 +238,52 @@ export class ClaudeCodeAdapter {
       emit(event);
     };
 
-    const splitter = new LineSplitter();
-    const consume = (lines: string[]) => {
-      for (const line of lines) {
-        const parsed = parseStreamLine(line);
-        if (!parsed) continue;
-        const retained = redactLine(parsed);
-        try {
-          appendFileSync(streamLogPath, retained + "\n", { mode: 0o600 });
-        } catch (error) {
+    /** Emits one stdout line's events and returns its redacted text for the transcript. */
+    const handleLine = (line: string): string | null => {
+      const parsed = parseStreamLine(line);
+      if (!parsed) return null;
+      const retained = redactLine(parsed);
+      if (parsed.ok)
+        for (const event of translator.translate(parsed.message, now)) handleEvent(event);
+      else
+        emit({
+          type: "malformed_event",
+          raw: retained.slice(0, 2000),
+          error: parsed.error,
+          at: now(),
+        });
+      return retained;
+    };
+    // A failure to read stdout is reported like one to retain it, and the turn still ends (see "close" below).
+    const stdoutRead = child.stdout
+      ? retainStdout({
+          stdout: child.stdout,
+          file: streamLogPath,
+          handleLine,
+          reportFailure: (error) =>
+            emit({
+              type: "runtime_stderr",
+              text: `[mia] could not retain the transcript: ${errorMessage(error)}`,
+              at: now(),
+            }),
+        }).catch((error: unknown) =>
           emit({
             type: "runtime_stderr",
-            text: `[mia] could not retain transcript line: ${errorMessage(error)}`,
+            text: `[mia] stopped reading runtime output: ${errorMessage(error)}`,
             at: now(),
-          });
-        }
-        if (parsed.ok)
-          for (const event of translator.translate(parsed.message, now)) handleEvent(event);
-        else
-          emit({
-            type: "malformed_event",
-            raw: retained.slice(0, 2000),
-            error: parsed.error,
-            at: now(),
-          });
-      }
-    };
-    child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => consume(splitter.push(chunk)));
+          }),
+        )
+      : Promise.resolve();
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) =>
       emit({ type: "runtime_stderr", text: redactString(chunk), at: now() }),
     );
 
     const exitSettled = Promise.withResolvers<RuntimeExit>();
+    // The turn ends only once every stdout line has been handled and retained, so a turn-end read sees them all.
     child.once("close", (code, signal) => {
-      consume(splitter.flush());
-      exitSettled.resolve({ code, signal });
+      const settle = () => exitSettled.resolve({ code, signal });
+      void stdoutRead.then(settle, settle);
     });
     child.once("error", () => exitSettled.resolve({ code: null, signal: null }));
     const exited = exitSettled.promise;
