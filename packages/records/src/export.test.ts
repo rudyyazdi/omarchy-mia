@@ -1,12 +1,34 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { sha256Hex } from "@mia/protocol";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Catalog } from "./catalog.ts";
 import { exportConversation, verifyExport, type ExportManifest } from "./export.ts";
 import { EXPORT_TABLES, SCHEMA_VERSION } from "./schema.ts";
 import { RecordWriter } from "./writer.ts";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const filesystem = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...filesystem,
+    readFileSync: vi.fn(filesystem.readFileSync),
+    readdirSync: vi.fn(filesystem.readdirSync),
+    lstatSync: vi.fn(filesystem.lstatSync),
+  };
+});
 
 const createExport = (root: string) => {
   const catalog = new Catalog(join(root, "catalog"));
@@ -58,6 +80,12 @@ describe("verifyExport input validation", () => {
 
   const writeManifest = (value: unknown) =>
     writeFileSync(join(directory, "manifest.json"), JSON.stringify(value));
+  const omitListedFile = (name: string) => {
+    manifest.files = Object.fromEntries(
+      Object.entries(manifest.files).filter(([file]) => file !== name),
+    );
+    writeManifest(manifest);
+  };
   const replaceRecords = (file: string, contents: string) => {
     writeFileSync(join(directory, file), contents);
     manifest.files[file] = {
@@ -68,10 +96,26 @@ describe("verifyExport input validation", () => {
   };
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), "mia-export-validation-"));
+    root = realpathSync(mkdtempSync(join(tmpdir(), "mia-export-validation-")));
     ({ directory, manifest } = createExport(root));
   });
-  afterEach(() => rmSync(root, { recursive: true, force: true }));
+  afterEach(() => {
+    vi.mocked(readFileSync).mockReset();
+    vi.mocked(readdirSync).mockReset();
+    vi.mocked(lstatSync).mockReset();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const verifyWithObservedReads = () => {
+    vi.mocked(readFileSync).mockClear();
+    vi.mocked(readdirSync).mockClear();
+    const result = verifyExport(directory);
+    return {
+      result,
+      reads: vi.mocked(readFileSync).mock.calls.map(([path]) => path),
+      traversals: vi.mocked(readdirSync).mock.calls.map(([path]) => path),
+    };
+  };
 
   it("verifies a valid export including digest and composite-key rows without id columns", () => {
     expect(manifest.record_counts.objects).toBe(2);
@@ -192,5 +236,158 @@ describe("verifyExport input validation", () => {
     const file = "events.jsonl";
     writeFileSync(join(directory, file), `${readFileSync(join(directory, file), "utf8")}\n`);
     expect(verifyExport(directory).problems).toContain(`checksum mismatch: ${file}`);
+  });
+
+  it.each(["../secret", "nested/../../secret", "/absolute/secret", "C:\\secret"])(
+    "rejects manifest filename %s before reading it",
+    (name) => {
+      writeFileSync(join(root, "secret"), "secret");
+      manifest.files[name] = { sha256: sha256Hex(Buffer.from("secret")), bytes: 6 };
+      writeManifest(manifest);
+      const { result, reads } = verifyWithObservedReads();
+      expect(result.ok).toBe(false);
+      expect(result.problems).toContain(`invalid file path: ${name}`);
+      expect(reads).not.toContain(join(directory, name));
+      expect(
+        reads.every((path) => typeof path === "string" && path.startsWith(`${directory}/`)),
+      ).toBe(true);
+    },
+  );
+
+  it.each(["manifest.json", "events.jsonl", "report.html", "records/tasks.jsonl"])(
+    "does not read a symlink at %s, including paths omitted from manifest.files",
+    (name) => {
+      const outside = join(root, "outside");
+      renameSync(join(directory, name), outside);
+      symlinkSync(outside, join(directory, name));
+      if (name !== "manifest.json") {
+        omitListedFile(name);
+      }
+      const { result, reads } = verifyWithObservedReads();
+      expect(result.ok).toBe(false);
+      expect(result.problems).toContain(`symlink not allowed: ${name}`);
+      if (name === "report.html") expect(result.problems).not.toContain("report.html missing");
+      expect(reads).not.toContain(join(directory, name));
+      expect(reads).not.toContain(outside);
+    },
+  );
+
+  it.each(["records", "objects"])("does not enter symlinked %s directories", (name) => {
+    const outside = join(root, name);
+    renameSync(join(directory, name), outside);
+    symlinkSync(outside, join(directory, name));
+    const { result, reads, traversals } = verifyWithObservedReads();
+    expect(result.ok).toBe(false);
+    expect(result.problems).toContain(`symlink not allowed: ${name}`);
+    expect(reads.some((path) => String(path).startsWith(`${directory}/${name}/`))).toBe(false);
+    expect(traversals).not.toContain(join(directory, name));
+    expect(traversals).not.toContain(outside);
+  });
+
+  it("rejects a retained object symlink even when omitted from manifest.files", () => {
+    const name = Object.keys(manifest.files).find((file) => file.startsWith("objects/"));
+    if (!name) throw new Error("fixture must contain a retained object");
+    const outside = join(root, "outside-object");
+    renameSync(join(directory, name), outside);
+    symlinkSync(outside, join(directory, name));
+    omitListedFile(name);
+    const { result, reads } = verifyWithObservedReads();
+    expect(result.problems).toContain(`symlink not allowed: ${name}`);
+    expect(reads).not.toContain(join(directory, name));
+    expect(reads).not.toContain(outside);
+  });
+
+  it("never follows unlisted directory symlinks, including loops", () => {
+    symlinkSync(directory, join(directory, "loop"));
+    symlinkSync(root, join(directory, "outside"));
+    const { result, traversals } = verifyWithObservedReads();
+    expect(result.ok).toBe(false);
+    expect(result.problems).toContain("symlink not allowed: loop");
+    expect(result.problems).toContain("symlink not allowed: outside");
+    expect(traversals).not.toContain(join(directory, "loop"));
+    expect(traversals).not.toContain(join(directory, "outside"));
+    expect(traversals).not.toContain(root);
+  });
+
+  it("rejects traversal in retained object digests before normalizing the path", () => {
+    const digest = "../../secret";
+    writeFileSync(join(root, "secret"), "secret");
+    replaceRecords(
+      "records/artifacts.jsonl",
+      `${JSON.stringify({ id: "artifact", capture_status: "retained", object_digest: digest })}\n`,
+    );
+    const { result, reads } = verifyWithObservedReads();
+    expect(result.ok).toBe(false);
+    expect(result.problems).toContain(`invalid file path: objects/sha256/../${digest}`);
+    expect(reads).not.toContain(join(root, "secret"));
+  });
+
+  it.each(["manifest.json", "events.jsonl", "report.html"])(
+    "reports a directory replacing %s without reading it",
+    (name) => {
+      rmSync(join(directory, name));
+      mkdirSync(join(directory, name));
+      const { result, reads } = verifyWithObservedReads();
+      expect(result.ok).toBe(false);
+      expect(result.problems).toContain(`not a regular file: ${name}`);
+      expect(reads).not.toContain(join(directory, name));
+    },
+  );
+
+  it("reports a non-directory parent without attempting a descendant read", () => {
+    rmSync(join(directory, "records"), { recursive: true });
+    writeFileSync(join(directory, "records"), "not a directory");
+    const { result, reads } = verifyWithObservedReads();
+    expect(result.ok).toBe(false);
+    expect(result.problems).toContain("not a directory: records");
+    expect(reads).not.toContain(join(directory, "records/tasks.jsonl"));
+  });
+
+  it("rejects a FIFO before reading it and reports nonregular inventory entries", () => {
+    const name = "events.jsonl";
+    rmSync(join(directory, name));
+    execFileSync("mkfifo", [join(directory, name)]);
+    const { result, reads } = verifyWithObservedReads();
+    expect(result.ok).toBe(false);
+    expect(result.problems.filter((problem) => problem === `not a regular file: ${name}`)).toEqual([
+      `not a regular file: ${name}`,
+    ]);
+    expect(reads).not.toContain(join(directory, name));
+  });
+
+  it("reports missing files", () => {
+    rmSync(join(directory, "events.jsonl"));
+    expect(verifyExport(directory).problems).toContain("file missing: events.jsonl");
+  });
+
+  it("returns filesystem failures through problems", () => {
+    vi.mocked(readFileSync).mockImplementationOnce(() => {
+      throw new Error("read denied");
+    });
+    expect(verifyExport(directory).problems).toContain("file unreadable: manifest.json");
+    vi.mocked(lstatSync).mockImplementationOnce(() => {
+      throw new Error("stat denied");
+    });
+    expect(verifyExport(directory).problems).toContain("export directory unreadable");
+    vi.mocked(readdirSync).mockImplementationOnce(() => {
+      throw new Error("inventory denied");
+    });
+    expect(verifyExport(directory).problems).toContain("directory unreadable: .");
+  });
+
+  it("verifies listed regular files in nested directories", () => {
+    const name = "extra/nested/evidence.txt";
+    mkdirSync(dirname(join(directory, name)), { recursive: true });
+    replaceRecords(name, "evidence");
+    expect(verifyExport(directory).ok).toBe(true);
+  });
+
+  it("checks unsupported versions before reading or traversing other entries", () => {
+    writeManifest({ export_version: 0, schema_version: SCHEMA_VERSION });
+    symlinkSync(root, join(directory, "outside"));
+    const { result, reads, traversals } = verifyWithObservedReads();
+    expect(result.problems).toEqual(["export_version 0 is not supported (expected 1)"]);
+    expect(reads).toEqual([join(directory, "manifest.json")]);
+    expect(traversals).toEqual([]);
   });
 });
