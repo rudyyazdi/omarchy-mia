@@ -48,7 +48,7 @@ import {
   type Capture,
   type DeclaredArtifact,
 } from "./artifact-capture.ts";
-import { collectArtifact } from "./artifact-collector.ts";
+import type { ArtifactCollector } from "./artifact-collector.ts";
 import { createConversationProvenance, type ServerIdentity } from "./provenance.ts";
 import {
   bindPermissionRequest,
@@ -178,6 +178,8 @@ export interface EngineDeps {
   evidenceReadDeadline: () => AbortSignal;
   /** Reads the transcript and the hook evidence at turn end: `readRuntimeFile`, or a test's own. */
   readEvidence: RuntimeFileReader;
+  /** Captures a tool output a completed call declared: `collectArtifact`, or a test's own. */
+  collectArtifact: ArtifactCollector;
   log: (message: string) => void;
 }
 
@@ -211,6 +213,12 @@ interface TurnEvidence {
   relation: Extract<LinkRelation, "runtime_transcript" | "task_output">;
   originalPath: string | null;
   content: Exclude<RuntimeFileRead, { status: "absent" }>;
+}
+
+/** A tool output a tool result declared, and what reading it produced. */
+interface CapturedOutput {
+  declared: DeclaredArtifact;
+  capture: Capture;
 }
 
 /** A tool output a completed call declared, and the tool_result event that declared it. */
@@ -1015,7 +1023,50 @@ export class Engine {
 
   // ---------------------------------------------------------------- runtime events
 
-  private onRuntimeEvent(task: TaskState, event: RuntimeEvent): void {
+  /**
+   * Handles one runtime event; it never rejects. A tool result that declares an output file is captured first,
+   * outside the transaction, because the read can take long; every other event is recorded before this returns.
+   * A failed result never completes its call, so the file it declares is not read.
+   * The adapter hands over the next stdout event only once this settles, so events still commit in the order the
+   * runtime wrote them. The turn ends before the capture only when the adapter stops reading a runtime whose
+   * interruption did not end it; the result is then dropped with a log line, because the turn has already been
+   * recorded without it.
+   */
+  private async onRuntimeEvent(task: TaskState, event: RuntimeEvent): Promise<void> {
+    const declared =
+      event.type === "tool_result" && !event.isError
+        ? extractDeclaredArtifact(event.content)
+        : null;
+    if (!declared) {
+      this.recordRuntimeEvent(task, event, null);
+      return;
+    }
+    const capture = await this.deps
+      .collectArtifact(declared, this.deps.profile.runtime.outputDirectories)
+      .catch((error: unknown): Capture => ({
+        status: "failed",
+        reason: `declared file unreadable: ${errorMessage(error)}`,
+      }));
+    this.recordRuntimeEvent(task, event, { declared, capture });
+  }
+
+  /**
+   * Records one runtime event, with the tool output its result declared already captured. An event handled after
+   * the task's runtime ended is dropped: the runtime hands over its exit before the turn ends, so only an event
+   * left pending when a stuck runtime was abandoned gets here, and the turn was recorded without it.
+   */
+  private recordRuntimeEvent(
+    task: TaskState,
+    event: RuntimeEvent,
+    output: CapturedOutput | null,
+  ): void {
+    if (task.runtimeEnded || this.task !== task) {
+      const captured = output ? ` (output ${output.declared.path} captured)` : "";
+      this.deps.log(
+        `${event.type}${captured} for task ${task.id} handled after its runtime ended; not recorded`,
+      );
+      return;
+    }
     const conversation = this.conversation;
     if (!conversation) return;
     const opts = this.taskOpts(task);
@@ -1115,11 +1166,11 @@ export class Engine {
             const { call } = binding;
             const status = statusAfterResult(call.status, toolResult.isError);
             this.deps.writer.updateToolCall(call.id, { status, resultEventId: result.id });
-            if (status === "completed")
-              this.collectArtifacts(task, call, {
-                content: toolResult.content,
-                eventId: result.id,
-              });
+            if (status === "completed" && output)
+              this.retainToolOutput(
+                { task, call, declared: output.declared, eventId: result.id },
+                output.capture,
+              );
             this.onCommit(() => {
               call.status = status;
             });
@@ -1674,16 +1725,8 @@ export class Engine {
    * Records a declared tool output whatever its capture status, best-effort, so a failed write cannot undo
    * the tool result and call update recorded with it.
    */
-  private collectArtifacts(
-    task: TaskState,
-    call: ToolCallState,
-    result: { content: unknown; eventId: string },
-  ): void {
-    const declared = extractDeclaredArtifact(result.content);
-    if (!declared) return;
-    const capture = collectArtifact(declared, this.deps.profile.runtime.outputDirectories);
-    const output: DeclaredOutput = { task, call, declared, eventId: result.eventId };
-    this.retainBestEffort(`tool output ${declared.path}`, capture, (attempt) =>
+  private retainToolOutput(output: DeclaredOutput, capture: Capture): void {
+    this.retainBestEffort(`tool output ${output.declared.path}`, capture, (attempt) =>
       this.registerToolOutput(output, attempt),
     );
   }

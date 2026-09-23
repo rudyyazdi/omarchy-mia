@@ -18,7 +18,7 @@ const start = (file: string) => {
   const read = retainStdout({
     stdout,
     file,
-    handleLine: (line) => {
+    handleLine: async (line) => {
       handled.push(line);
       return line;
     },
@@ -35,7 +35,7 @@ const retain = async (file: string, chunks: (string | Buffer)[]) => {
   const read = retainStdout({
     stdout,
     file,
-    handleLine: (line) => {
+    handleLine: async (line) => {
       handled.push(line);
       return line === "skip" ? null : line.toUpperCase();
     },
@@ -83,18 +83,51 @@ describe("retainStdout", () => {
     expect(failures).toEqual([expect.objectContaining({ code: "EISDIR" })]);
   });
 
+  it("hands over the next line only once the previous one's handling has settled", async () => {
+    const stdout = new PassThrough();
+    const handled: string[] = [];
+    const firstStarted = Promise.withResolvers<undefined>();
+    const firstRelease = Promise.withResolvers<undefined>();
+    let released = false;
+    const read = retainStdout({
+      stdout,
+      file: join(dir, "turn.stream.jsonl"),
+      handleLine: async (line) => {
+        handled.push(`${line} (first released: ${released})`);
+        if (line === "one") {
+          firstStarted.resolve(undefined);
+          await firstRelease.promise;
+        }
+        return line;
+      },
+      reportFailure: () => undefined,
+    });
+    stdout.write("one\n");
+    stdout.write("two\nthree\n");
+    stdout.end();
+    await firstStarted.promise;
+    released = true;
+    firstRelease.resolve(undefined);
+    await read;
+    expect(handled).toEqual([
+      "one (first released: false)",
+      "two (first released: true)",
+      "three (first released: true)",
+    ]);
+  });
+
   it("reports a failed write once and still hands over every line", async () => {
     const { handled, failures } = await retain("/dev/full", ["one\n", "two\n", "three\n"]);
     expect(handled).toEqual(["one", "two", "three"]);
     expect(failures).toEqual([expect.objectContaining({ code: "ENOSPC" })]);
   });
 
-  it("rejects when handling a line throws, instead of throwing from the stream", async () => {
+  it("rejects when handling a line rejects, instead of throwing from the stream", async () => {
     const stdout = new PassThrough();
     const read = retainStdout({
       stdout,
       file: join(dir, "turn.stream.jsonl"),
-      handleLine: () => {
+      handleLine: async () => {
         throw new Error("handler failed");
       },
       reportFailure: () => undefined,
@@ -113,14 +146,14 @@ describe("retainStdout", () => {
     expect(handled).toEqual(["one"]);
   });
 
-  it("stops reading once its signal aborts", async () => {
+  it("stops reading, and hands over no line it already read, once its signal aborts", async () => {
     const controller = new AbortController();
     const stdout = new PassThrough();
     const handled: string[] = [];
     const read = retainStdout({
       stdout,
       file: join(dir, "turn.stream.jsonl"),
-      handleLine: (line) => {
+      handleLine: async (line) => {
         handled.push(line);
         controller.abort();
         return line;
@@ -128,7 +161,7 @@ describe("retainStdout", () => {
       reportFailure: () => undefined,
       signal: controller.signal,
     });
-    stdout.write("one\n");
+    stdout.write("one\ntwo\nthree\n");
     await expect(read).rejects.toMatchObject({ name: "AbortError" });
     expect(handled).toEqual(["one"]);
     expect(stdout.destroyed).toBe(true);

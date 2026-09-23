@@ -64,7 +64,7 @@ const richConversation = async (): Promise<{ conversationId: string; artifactFil
   );
   await client.decide({ taskId: taskId, approvalId: r1.payload.approval_id, decision: "approve" });
   await p1;
-  turn.toolResult("toolu_1", JSON.stringify({ counter: 1 }));
+  await turn.toolResult("toolu_1", JSON.stringify({ counter: 1 }));
   const p2 = turn.request("mcp__d1__change", { delta: 1 }, "toolu_2");
   const r2 = await client.waitFor(
     "approval_requested",
@@ -72,7 +72,7 @@ const richConversation = async (): Promise<{ conversationId: string; artifactFil
   );
   await client.decide({ taskId: taskId, approvalId: r2.payload.approval_id, decision: "reject" });
   await p2;
-  turn.toolResult("toolu_2", "denied", true);
+  await turn.toolResult("toolu_2", "denied", true);
   const p3 = turn.request("mcp__d1__artifact", { name: "result.txt", text: "D1" }, "toolu_3");
   const r3 = await client.waitFor(
     "approval_requested",
@@ -80,7 +80,7 @@ const richConversation = async (): Promise<{ conversationId: string; artifactFil
   );
   await client.decide({ taskId: taskId, approvalId: r3.payload.approval_id, decision: "approve" });
   await p3;
-  turn.toolResult(
+  await turn.toolResult(
     "toolu_3",
     JSON.stringify({
       artifact: { path: artifactFile, name: "result.txt", mime_type: "text/plain" },

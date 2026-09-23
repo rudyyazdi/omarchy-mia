@@ -66,18 +66,20 @@ const transcriptSink = (file: string, reportFailure: (error: unknown) => void): 
  * (the redacted transcript line) to `file`. Resolves once stdout has ended and every retained line is written, so
  * a reader of `file` after it resolves sees the whole transcript.
  *
- * Reading and writing share one pipeline, so a slow disk pauses stdout (and so the runtime) instead of queueing
- * lines in memory. The tradeoff is ordering: a line's events are handled before its text is written, so a crash
- * mid-turn can leave the records with events whose transcript lines (up to the streams' buffers) were never written.
+ * Reading and writing share one pipeline, so a slow disk or a slow `handleLine` pauses stdout (and so the runtime)
+ * instead of queueing lines in memory: the next line is handed over only once the previous one's handling has
+ * settled. The tradeoff is ordering: a line's events are handled before its text is written, so a crash mid-turn
+ * can leave the records with events whose transcript lines (up to the streams' buffers) were never written.
  *
- * Rejects if stdout fails, `handleLine` throws, or `signal` aborts, and then stops reading; a transcript failure
- * is reported instead. When `handleLine` throws, the text of the lines before it in the same chunk is dropped.
+ * Rejects if stdout fails, `handleLine` rejects, or `signal` aborts, and then stops reading and hands over no further
+ * line, not even one already read; a transcript failure
+ * is reported instead. When `handleLine` rejects, the text of the lines before it in the same chunk is dropped.
  */
 export const retainStdout = async (input: {
   stdout: Readable;
   file: string;
-  /** Handles one line of stdout; returns the text to retain for it, or null to retain nothing. */
-  handleLine: (line: string) => string | null;
+  /** Handles one line of stdout; resolves to the text to retain for it, or null to retain nothing. */
+  handleLine: (line: string) => Promise<string | null>;
   /** Called at most once, with the first failure to open, write or close `file`. */
   reportFailure: (error: unknown) => void;
   signal?: AbortSignal;
@@ -85,25 +87,23 @@ export const retainStdout = async (input: {
   const { stdout, handleLine } = input;
   const splitter = new LineSplitter();
   /** The transcript text for these lines, or undefined (push nothing) when none is retained. */
-  const retain = (lines: string[]): string | undefined => {
-    const text = lines
-      .flatMap((line) => {
-        const retained = handleLine(line);
-        return retained === null ? [] : [`${retained}\n`];
-      })
-      .join("");
+  const retain = async (lines: string[]): Promise<string | undefined> => {
+    let text = "";
+    for (const line of lines) {
+      // Lines already read but not yet handed over are dropped once reading stops, so none arrives after it.
+      input.signal?.throwIfAborted();
+      const retained = await handleLine(line);
+      if (retained !== null) text += `${retained}\n`;
+    }
     return text === "" ? undefined : text;
   };
-  // A throw from `handleLine` fails the pipeline instead of escaping into stdout's event listener.
+  // The transform is not called again until `callback` runs, so lines are handled one at a time, in order. A
+  // failure of `handleLine` fails the pipeline instead of escaping into stdout's event listener.
   const pushRetained = (lines: () => string[], callback: TransformCallback): void => {
-    let text: string | undefined;
-    try {
-      text = retain(lines());
-    } catch (error) {
-      callback(error instanceof Error ? error : new Error(String(error)));
-      return;
-    }
-    callback(null, text);
+    Promise.try(() => retain(lines())).then(
+      (text) => callback(null, text),
+      (error: unknown) => callback(error instanceof Error ? error : new Error(String(error))),
+    );
   };
   // Decoded before splitting, so a character split across chunks reaches `handleLine` whole.
   stdout.setEncoding("utf8");

@@ -25,6 +25,7 @@ import {
   testProfile,
   tick,
   useScriptedSession,
+  type HeldRead,
   type TestServer,
 } from "./harness.ts";
 
@@ -135,6 +136,25 @@ const writeOutputFile = (name: string, text: string): string => {
   writeFileSync(file, text);
   return file;
 };
+
+/** Submit one artifact call and approve it, with `result.txt` written where its output may be retained from. */
+const approvedArtifactCall = async (): Promise<{
+  file: string;
+  turn: ScriptedTurn;
+  taskId: string;
+}> => {
+  const file = writeOutputFile("result.txt", "D1");
+  const { turn, taskId, held, requested } = await submitHeldCall("artifact", "mcp__d1__artifact", {
+    name: "result.txt",
+  });
+  await decide(taskId, requested.payload.approval_id, "approve");
+  await held;
+  return { file, turn, taskId };
+};
+
+/** Hand over the approved call's result, declaring `file` as its output. */
+const declareOutput = (turn: ScriptedTurn, file: string): Promise<void> =>
+  turn.toolResult("toolu_1", JSON.stringify({ artifact: { path: file, name: "result.txt" } }));
 
 const countRows = (table: string): number => rows(`SELECT 1 FROM ${table}`).length;
 
@@ -588,7 +608,7 @@ describe("approval path", () => {
     const reuse = await decide(taskId, requested.payload.approval_id, "approve");
     expect(reuse.disposition).toBe("rejected");
     expect(ackError(reuse).code).toBe("invalid_state");
-    turn.toolResult("toolu_1", JSON.stringify({ counter: 1 }));
+    await turn.toolResult("toolu_1", JSON.stringify({ counter: 1 }));
     // second identical call needs a fresh approval, and rejection never dispatches
     turn.propose("toolu_2", "mcp__d1__change", { delta: 1 });
     const second = turn.request("mcp__d1__change", { delta: 1 }, "toolu_2");
@@ -600,7 +620,7 @@ describe("approval path", () => {
     await decide(taskId, requested2.payload.approval_id, "reject");
     const d2 = await second;
     expect(d2.behavior).toBe("deny");
-    turn.toolResult("toolu_2", "denied", true);
+    await turn.toolResult("toolu_2", "denied", true);
     turn.end();
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("completed");
@@ -716,7 +736,7 @@ describe("approval path", () => {
     turn.init();
     expect((await turn.request("mcp__d1__read", { q: 1 }, "toolu_1")).behavior).toBe("allow");
     turn.propose("toolu_1", "mcp__d1__change", { q: 1 });
-    turn.toolResult("toolu_1", "read");
+    await turn.toolResult("toolu_1", "read");
     turn.end();
     await client.waitFor("task_finished");
     expect(
@@ -733,7 +753,7 @@ describe("approval path", () => {
     const { turn } = await submit("change");
     turn.init();
     turn.propose("toolu_1", "mcp__d1__change", { delta: 1 });
-    turn.toolResult("toolu_1", "ran anyway");
+    await turn.toolResult("toolu_1", "ran anyway");
     turn.end();
     await client.waitFor("task_finished");
     expect(
@@ -967,7 +987,7 @@ describe("approval path", () => {
       expect(again.payload.binding_revision).toBe(2);
       await decide(taskId, again.payload.approval_id, "approve");
       expect((await retry).behavior).toBe("allow");
-      turn.toolResult("toolu_1", "changed");
+      await turn.toolResult("toolu_1", "changed");
       turn.end();
       expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
       const calls = rows<{ status: ToolCallStatus }>(
@@ -993,7 +1013,7 @@ describe("approval path", () => {
     expect((await turn.request("mcp__d1__read", { delta: 1 }, "toolu_1")).behavior).toBe("allow");
     expect((await held).behavior).toBe("deny");
     await expectResumed(taskId);
-    turn.toolResult("toolu_1", "read");
+    await turn.toolResult("toolu_1", "read");
     turn.end();
     expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
   });
@@ -1159,7 +1179,7 @@ describe("interruption path", () => {
     turn.init();
     expect((await turn.request("mcp__d1__read", {}, "toolu_1")).behavior).toBe("allow");
     failNextCommit();
-    turn.toolResult("toolu_1", "ok");
+    await turn.toolResult("toolu_1", "ok");
     turn.end();
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("outcome_unknown");
@@ -1216,7 +1236,7 @@ describe("runtime session", () => {
 
   it("creates the session again on the turn after one whose runtime exited before its init", async () => {
     const first = await submit("first");
-    first.turn.emit({
+    await first.turn.emit({
       type: "runtime_started",
       pid: 4242,
       launch: first.turn.launch,
@@ -1302,11 +1322,11 @@ describe("configuration and provenance", () => {
       decision: "approve",
     });
     await decision;
-    turn.toolResult(
+    await turn.toolResult(
       "toolu_1",
       JSON.stringify({ artifact: { path: file, name: "result.txt", mime_type: "text/plain" } }),
     );
-    turn.toolResult(
+    await turn.toolResult(
       "toolu_x",
       JSON.stringify({ artifact: { path: "/etc/hostname", name: "hostname" } }),
     );
@@ -1336,6 +1356,63 @@ describe("configuration and provenance", () => {
     expect(artifacts.find((artifact) => artifact.logical_name === "hostname")).toBeUndefined();
   });
 
+  /** Approve one artifact call, then hand over its result declaring `result.txt` while the capture is held. */
+  const resultWithHeldCapture = async () => {
+    const { file, turn, taskId } = await approvedArtifactCall();
+    const capture = ts.holdArtifactCapture(file);
+    const handled = declareOutput(turn, file);
+    await capture.started;
+    return { file, turn, taskId, capture, handled };
+  };
+
+  /** Release the held capture; the call then completes with its output retained. */
+  const releaseIntoRetainedOutput = async (capture: HeldRead, handled: Promise<void>) => {
+    capture.release();
+    await handled;
+    expect(rows("SELECT status FROM tool_calls")).toEqual([{ status: "completed" }]);
+    expect(rows("SELECT capture_status FROM artifacts WHERE kind = 'tool_output'")).toEqual([
+      { capture_status: "retained" },
+    ]);
+  };
+
+  it("answers commands while a declared tool output is captured, then records the result with it", async () => {
+    const { turn, capture, handled } = await resultWithHeldCapture();
+    expect((await client.heartbeat()).disposition).toBe("accepted");
+    expect(rows("SELECT 1 FROM events WHERE type = 'tool_result'")).toHaveLength(0);
+    await releaseIntoRetainedOutput(capture, handled);
+    turn.end();
+    expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
+  });
+
+  it("records a result whose output is captured while its task is interrupted as completed", async () => {
+    const { turn, taskId, capture, handled } = await resultWithHeldCapture();
+    turn.survivesInterrupt = true;
+    expect((await client.interrupt(taskId)).disposition).toBe("accepted");
+    await releaseIntoRetainedOutput(capture, handled);
+    turn.end();
+    await client.waitFor("task_finished");
+    expect(rows("SELECT status FROM tool_calls")).toEqual([{ status: "completed" }]);
+  });
+
+  // The adapter ends a turn before its pending event settles only when it stops reading a runtime whose
+  // interruption did not end it: here the runtime survives the interrupt, and ending the turn stands for that.
+  it("does not record a tool result whose output capture finishes after a stuck runtime was abandoned", async () => {
+    const { file, turn, taskId, capture, handled } = await resultWithHeldCapture();
+    turn.survivesInterrupt = true;
+    expect((await client.interrupt(taskId)).disposition).toBe("accepted");
+    turn.end();
+    await client.waitFor("task_finished");
+    const recorded = countRows("events");
+    capture.release();
+    await handled;
+    expect(countRows("events")).toBe(recorded);
+    expect(rows("SELECT 1 FROM events WHERE type = 'tool_result'")).toHaveLength(0);
+    expect(rows("SELECT 1 FROM artifacts WHERE kind = 'tool_output'")).toHaveLength(0);
+    expect(ts.logs).toContainEqual(
+      expect.stringContaining(`tool_result (output ${file} captured) for task ${taskId}`),
+    );
+  });
+
   it("records a non-retained capture with its reason, linked only to its tool call", async () => {
     const outDir = must(ts.profile.runtime.outputDirectories[0], "output directory");
     mkdirSync(join(outDir, "folder"), { recursive: true });
@@ -1355,7 +1432,7 @@ describe("configuration and provenance", () => {
       );
       await decide(taskId, requested.payload.approval_id, "approve");
       await pending;
-      turn.toolResult(callId, JSON.stringify({ artifact }));
+      await turn.toolResult(callId, JSON.stringify({ artifact }));
     }
     turn.end();
     await client.waitFor("task_finished");
@@ -1394,16 +1471,9 @@ describe("configuration and provenance", () => {
    * up its retention to fail. The call and task still complete; returns the file's digest and its artifacts.
    */
   const completeLosingToolOutput = async (prepare: () => void) => {
-    const file = writeOutputFile("result.txt", "D1");
-    const { turn, taskId, held, requested } = await submitHeldCall(
-      "artifact",
-      "mcp__d1__artifact",
-      { name: "result.txt" },
-    );
-    await decide(taskId, requested.payload.approval_id, "approve");
-    await held;
+    const { file, turn } = await approvedArtifactCall();
     prepare();
-    turn.toolResult("toolu_1", JSON.stringify({ artifact: { path: file, name: "result.txt" } }));
+    await declareOutput(turn, file);
     turn.end();
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("completed");

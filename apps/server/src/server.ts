@@ -11,6 +11,7 @@ import {
 } from "@mia/agent-adapter";
 import { errorMessage } from "@mia/protocol";
 import { Catalog, RecordWriter } from "@mia/records";
+import { collectArtifact, type ArtifactCollector } from "./artifact-collector.ts";
 import { collectBuildInfo } from "./build-info.ts";
 import { Engine, type TurnRunner } from "./engine.ts";
 import { startGateway, type GatewayHandle } from "./gateway.ts";
@@ -68,6 +69,8 @@ export const startServer = async (input: {
   evidenceReadDeadline: () => AbortSignal;
   /** Reads a finished turn's evidence; defaults to `readRuntimeFile`. A test injects one that holds a read. */
   readEvidence?: RuntimeFileReader;
+  /** Captures a declared tool output; defaults to `collectArtifact`. A test injects one that holds a capture. */
+  collectArtifact?: ArtifactCollector;
   /**
    * The server process's environment: fills a profile's `${ENV}` placeholders, is what the runtime
    * inherits and is probed with at startup, and names the bridge's request log (`MIA_MCP_HTTP_LOG`).
@@ -100,6 +103,7 @@ export const startServer = async (input: {
         identity,
         evidenceReadDeadline: input.evidenceReadDeadline,
         readEvidence: input.readEvidence ?? readRuntimeFile,
+        collectArtifact: input.collectArtifact ?? collectArtifact,
         log,
       });
       const gateway = await startGateway({
