@@ -67,7 +67,7 @@ export class Catalog {
           /* best effort */
         }
       }
-      // eslint-disable-next-line no-restricted-syntax -- runs before serving
+      // eslint-disable-next-line no-restricted-syntax -- a readonly open: only the debug CLI and tests open one
     } else if (!existsSync(this.paths.database)) {
       throw new Error(`no catalog at ${this.paths.database}`);
     }

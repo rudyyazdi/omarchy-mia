@@ -152,19 +152,22 @@ const SOURCE_RESTRICTED_SYNTAX = [
 // Enforces AGENTS.md, Node: synchronous I/O stalls every connection, so it runs only before a process starts
 // serving. Lint cannot tell when a call runs, so each one that runs before serving says so in a bypass. The
 // SQLite catalog (`new DatabaseSync`, statement calls) is the documented exception and matches no selector.
+// Lint sees a call by its name: a renamed or passed-along `*Sync` function, and a caller of a function that
+// blocks without the suffix, are left to review.
 const NO_SYNC_IO = {
   selector: "CallExpression[callee.name=/Sync$/], CallExpression[callee.property.name=/Sync$/]",
   message: `Synchronous I/O stalls every connection; use node:fs/promises or an async child process. A call that runs before serving takes a bypass that says so (\`-- runs before serving\`). ${BYPASS_NOTE}`,
 };
 
-// The workspaces that serve: the server, the libraries it runs, and the text client. Left out is code that never
-// runs while anything serves: the one-shot debug CLI, probe and exports, the live-call budget only the probe and
-// the live lane take, and tests with their fixtures.
-const SERVING_FILES = ["packages/**/*.ts", "apps/server/**/*.ts", "apps/text-client/**/*.ts"];
+// The workspaces that serve: the server, the libraries it runs, and the text client. Left out are one-shot
+// processes (the debug CLI, exports, the runtime's hook script) and code whose only client is a runtime it
+// spawned itself (the probe, tests and their fixtures), where a stall holds up nobody else.
+const SERVING_WORKSPACES = ["packages", "apps/server", "apps/text-client"];
+const SERVING_FILES = SERVING_WORKSPACES.map((workspace) => `${workspace}/**/*.{ts,js,mjs}`);
 const NOT_SERVING_FILES = [
   "**/*.test.ts",
   "packages/records/src/export*.ts",
-  "packages/agent-adapter/src/budget.ts",
+  "packages/agent-adapter/src/hook-capture.mjs",
 ];
 
 // Enforces AGENTS.md, Node: only the file a process starts from reads the environment, installs
@@ -291,6 +294,13 @@ export default tseslint.config(
       "tools/*/src/index.ts",
     ],
     rules: { "no-restricted-syntax": ["error", ...SOURCE_RESTRICTED_SYNTAX, NO_EXPORT_ALL] },
+  },
+  {
+    // The serving entry points, which also keep NO_SYNC_IO.
+    files: ["packages/*/src/index.ts", "apps/server/src/index.ts", "apps/text-client/src/index.ts"],
+    rules: {
+      "no-restricted-syntax": ["error", ...SOURCE_RESTRICTED_SYNTAX, NO_SYNC_IO, NO_EXPORT_ALL],
+    },
   },
   {
     files: ["tests/*/src/index.ts"],

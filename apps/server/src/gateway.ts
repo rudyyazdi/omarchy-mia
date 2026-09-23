@@ -38,7 +38,7 @@ export interface GatewayHandle {
 
 /** Load or create the local client secret (0600, outside Git). Never logged. */
 export const loadOrCreateSecret = (path: string): string => {
-  // eslint-disable-next-line no-restricted-syntax -- runs before serving: startGateway loads the secret before it listens
+  // eslint-disable-next-line no-restricted-syntax -- runs before serving: startGateway loads the secret before it listens, and no runtime can reach the bridge yet
   if (existsSync(path)) {
     // eslint-disable-next-line no-restricted-syntax -- runs before serving
     const secret = readFileSync(path, "utf8").trim();
