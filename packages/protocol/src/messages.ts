@@ -158,15 +158,28 @@ export const ToolCallStatusSchema = z.enum([
 ]);
 export type ToolCallStatus = z.infer<typeof ToolCallStatusSchema>;
 
+/** Set when this message_id was already recorded for the client: the ack repeats the stored reply. */
+const ackDuplicate = z.literal(true).optional();
+
 const eventPayloads = {
-  ack: z.object({
-    command_id: id,
-    disposition: AckDispositionSchema,
-    error: z.object({ code: ErrorCodeSchema, message: z.string() }).optional(),
-    result: z.record(z.string(), z.unknown()).optional(),
-    /** Set when this message_id was already recorded for the client: the ack repeats the stored reply. */
-    duplicate: z.literal(true).optional(),
-  }),
+  /**
+   * An `accepted` ack may carry a result and never an error; any other disposition always carries its error.
+   * Both variants are strict so a field from the other variant fails validation instead of being stripped.
+   */
+  ack: z.discriminatedUnion("disposition", [
+    z.strictObject({
+      command_id: id,
+      disposition: z.literal("accepted"),
+      result: z.record(z.string(), z.unknown()).optional(),
+      duplicate: ackDuplicate,
+    }),
+    z.strictObject({
+      command_id: id,
+      disposition: ErrorDispositionSchema,
+      error: z.object({ code: ErrorCodeSchema, message: z.string() }),
+      duplicate: ackDuplicate,
+    }),
+  ]),
   conversation_started: z.object({
     conversation_id: id,
     started_at: isoTime,

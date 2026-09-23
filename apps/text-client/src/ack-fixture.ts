@@ -1,10 +1,10 @@
 import { PROTOCOL_VERSION, type ServerEventOf } from "@mia/protocol";
-import type { AckPayload } from "./client.ts";
+import type { AcceptedAck } from "./client.ts";
 
 /** An accepted ack for `commandId`, as a server sends it; tests use it to stand in for the server. */
 export const ackEvent = (
   commandId: string,
-  result?: AckPayload["result"],
+  result?: AcceptedAck["result"],
 ): ServerEventOf<"ack"> => ({
   protocol_version: PROTOCOL_VERSION,
   message_id: `event_${commandId}`,

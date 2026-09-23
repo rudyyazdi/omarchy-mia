@@ -22,6 +22,10 @@ export interface MiaClientOptions {
 }
 
 export type AckPayload = ServerEventOf<"ack">["payload"];
+/** An ack for a command that was accepted: it may carry a result. */
+export type AcceptedAck = Extract<AckPayload, { disposition: "accepted" }>;
+/** An ack for a command that was rejected or failed: it always carries the error. */
+export type RefusedAck = Exclude<AckPayload, AcceptedAck>;
 
 /** A command's options; a resend passes the original command's `messageId`. */
 export interface SendOptions extends Cancellable {
@@ -218,7 +222,7 @@ export class MiaClient extends EventEmitter {
     const ack = await this.send("start_conversation", {}, { signal });
     if (ack.disposition !== "accepted")
       throw new Error(
-        `start_conversation ${ack.disposition}: ${ack.error?.code}: ${ack.error?.message}`,
+        `start_conversation ${ack.disposition}: ${ack.error.code}: ${ack.error.message}`,
       );
     const fromResult = ack.result?.conversation_id;
     const id = typeof fromResult === "string" ? fromResult : this.conversationId;

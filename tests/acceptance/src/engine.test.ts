@@ -6,6 +6,8 @@ import { ObjectStore } from "@mia/records";
 import type { AckPayload, MiaClient } from "@mia/text-client";
 import { ScriptedRuntime, type ScriptedTurn } from "./scripted-runtime.ts";
 import {
+  ackError,
+  ackResult,
   must,
   mustString,
   testProfile,
@@ -29,7 +31,7 @@ const submit = async (
   const ack = await client.submitText(text, { messageId });
   expect(ack.disposition).toBe("accepted");
   const turn = await next;
-  return { turn, taskId: mustString(ack.result?.task_id, "ack task_id") };
+  return { turn, taskId: mustString(ackResult(ack).task_id, "ack task_id") };
 };
 
 const rows = <T = Record<string, unknown>>(sql: string, ...params: (string | number)[]): T[] => {
@@ -62,7 +64,7 @@ const taskStatus = (taskId: string): string =>
 const expectResumed = async (taskId: string): Promise<void> => {
   expect(taskStatus(taskId)).toBe("running");
   const busy = await client.submitText("another");
-  expect(busy.error).toMatchObject({
+  expect(ackError(busy)).toMatchObject({
     code: "busy",
     message: expect.stringContaining("is running; wait for it to finish or interrupt it"),
   });
@@ -169,17 +171,17 @@ describe("streaming and commands", () => {
     // same id, different payload: conflict, nothing executed
     const conflict = await client.submitText("different", { messageId: "cmd-1" });
     expect(conflict.disposition).toBe("rejected");
-    expect(conflict.error?.code).toBe("duplicate_command_conflict");
+    expect(ackError(conflict).code).toBe("duplicate_command_conflict");
     expect(rows("SELECT id FROM tasks")).toHaveLength(1);
     expect(taskStatus(taskId)).toBe("completed");
   });
 
   it("answers a resend on a new connection of the same client with the original reply", async () => {
     const started = await client.send("start_conversation", {}, { messageId: "cmd-start" });
-    client.conversationId = mustString(started.result?.conversation_id, "conversation id");
+    client.conversationId = mustString(ackResult(started).conversation_id, "conversation id");
     const { turn, taskId } = await submit("hello", "cmd-1");
     const busy = await client.submitText("second", { messageId: "cmd-2" });
-    expect(busy.error?.code).toBe("busy");
+    expect(ackError(busy).code).toBe("busy");
     // Finished first, so a resend of cmd-2 that runs again would be accepted, not `busy`.
     turn.end();
     await client.waitFor("task_finished");
@@ -236,7 +238,7 @@ describe("streaming and commands", () => {
       throw new Error("simulated failure after dispatch");
     };
     const { failed, turn } = await submitThatFails();
-    expect(failed.error?.message).not.toContain("nothing executed");
+    expect(ackError(failed).message).not.toContain("nothing executed");
     expect(failed.duplicate).toBeUndefined();
     await expectResendRepeats(failed, turn);
   });
@@ -263,24 +265,24 @@ describe("streaming and commands", () => {
       }),
     );
     const ack = await rejected;
-    expect(ack.payload.error?.code).toBe("unsupported_protocol_version");
-    expect(ack.payload.error?.message).toContain("protocol_version 1");
+    expect(ackError(ack.payload).code).toBe("unsupported_protocol_version");
+    expect(ackError(ack.payload).message).toContain("protocol_version 1");
     const bad = client.waitFor("ack", (event) => event.payload.command_id === "unknown");
     client.sendRaw("{not json");
-    expect((await bad).payload.error?.code).toBe("invalid_message");
+    expect(ackError((await bad).payload).code).toBe("invalid_message");
     const big = await client.submitText("x".repeat(40_000));
     expect(big.disposition).toBe("rejected");
-    expect(big.error?.code).toBe("invalid_message");
+    expect(ackError(big).code).toBe("invalid_message");
     const { turn } = await submit("first");
     const busy = await client.submitText("second");
     expect(busy.disposition).toBe("rejected");
-    expect(busy.error?.code).toBe("busy");
+    expect(ackError(busy).code).toBe("busy");
     const other = await ts.connect("client-B");
     const otherBusy = await other.send("submit_text", {
       conversation_id: must(client.conversationId, "conversation id"),
       text: "hi",
     });
-    expect(otherBusy.error?.code).toBe("busy");
+    expect(ackError(otherBusy).code).toBe("busy");
     turn.end();
     await client.waitFor("task_finished");
   });
@@ -407,7 +409,7 @@ describe("approval path", () => {
     expect(approvalStatuses()).toEqual(["pending"]);
     const ack = await decide(taskId, requested.payload.approval_id, "approve");
     expect(ack.disposition).toBe("accepted");
-    expect(ack.result?.released).toBe(true);
+    expect(ackResult(ack).released).toBe(true);
     expect((await decision).behavior).toBe("allow");
     // decision persisted before release: approval_resolved precedes tool_dispatched in the event log
     const types = rows<{ type: string }>("SELECT type FROM events ORDER BY sequence").map(
@@ -417,7 +419,7 @@ describe("approval path", () => {
     // a second decision on the same approval cannot reuse it
     const reuse = await decide(taskId, requested.payload.approval_id, "approve");
     expect(reuse.disposition).toBe("rejected");
-    expect(reuse.error?.code).toBe("invalid_state");
+    expect(ackError(reuse).code).toBe("invalid_state");
     turn.toolResult("toolu_1", JSON.stringify({ counter: 1 }));
     // second identical call needs a fresh approval, and rejection never dispatches
     turn.propose("toolu_2", "mcp__d1__change", { delta: 1 });
@@ -466,12 +468,12 @@ describe("approval path", () => {
     // Superseding resumed the task, and the new revision's ask, later in the same transaction, set it back,
     // in the records and in memory alike.
     expect(taskStatus(taskId)).toBe("awaiting_approval");
-    expect((await client.submitText("meanwhile")).error?.message).toContain(
+    expect(ackError(await client.submitText("meanwhile")).message).toContain(
       `is awaiting_approval; approve or reject ${requested2.payload.approval_id}`,
     );
     // the old approval id cannot authorise the new binding
     const stale = await decide(taskId, requested1.payload.approval_id, "approve");
-    expect(stale.error?.code).toBe("invalid_state");
+    expect(ackError(stale).code).toBe("invalid_state");
     await decide(taskId, requested2.payload.approval_id, "approve");
     expect((await second).behavior).toBe("allow");
     turn.end();
@@ -502,7 +504,7 @@ describe("approval path", () => {
     expect(invalidated.payload).toMatchObject({ status: "invalidated", reason: "tool changed" });
     expect((await held).behavior).toBe("deny");
     const stale = await decide(taskId, requested.payload.approval_id, "approve");
-    expect(stale.error?.code).toBe("invalid_state");
+    expect(ackError(stale).code).toBe("invalid_state");
     turn.end();
     await client.waitFor("task_finished");
   });
@@ -535,7 +537,7 @@ describe("approval path", () => {
     expect(approvalStatuses()).toEqual(["invalidated", "pending"]);
     expect(taskStatus(taskId)).toBe("awaiting_approval");
     const ack = await decide(taskId, requested2.payload.approval_id, "approve");
-    expect(ack.result?.released).toBe(true);
+    expect(ackResult(ack).released).toBe(true);
     expect((await second).behavior).toBe("allow");
     turn.end();
     await client.waitFor("task_finished");
@@ -594,7 +596,7 @@ describe("approval path", () => {
     await tick();
     expect(approvalStatuses()).toEqual(["pending"]);
     const ack = await decide(taskId, requested.payload.approval_id, "approve");
-    expect(ack.result?.released).toBe(true);
+    expect(ackResult(ack).released).toBe(true);
     expect((await held).behavior).toBe("allow");
     expect(turn.decisions.map(({ decision }) => decision.behavior)).toEqual(["deny", "allow"]);
     expect(approvalStatuses()).toEqual(["approved"]);
@@ -607,10 +609,10 @@ describe("approval path", () => {
 
   it("rejects decisions with wrong task, wrong client, or foreign ids", async () => {
     const { turn, taskId, held, requested } = await submitHeldCall("change");
-    expect((await decide("task_wrong", requested.payload.approval_id, "approve")).error?.code).toBe(
-      "not_found",
-    );
-    expect((await decide(taskId, "appr_foreign", "approve")).error?.code).toBe("not_found");
+    expect(
+      ackError(await decide("task_wrong", requested.payload.approval_id, "approve")).code,
+    ).toBe("not_found");
+    expect(ackError(await decide(taskId, "appr_foreign", "approve")).code).toBe("not_found");
     const other = await ts.connect("client-B");
     const foreign = await other.send("approval_decision", {
       conversation_id: must(client.conversationId, "conversation id"),
@@ -618,7 +620,7 @@ describe("approval path", () => {
       approval_id: requested.payload.approval_id,
       decision: "approve",
     });
-    expect(foreign.error?.code).toBe("busy");
+    expect(ackError(foreign).code).toBe("busy");
     await tick();
     expect(turn.decisions).toHaveLength(0);
     await decide(taskId, requested.payload.approval_id, "reject");
@@ -698,7 +700,7 @@ describe("approval path", () => {
     failNextCommit();
     const ack = await decide(taskId, requested.payload.approval_id, "approve");
     expect(ack.disposition).toBe("rejected");
-    expect(ack.error?.code).toBe("record_failure");
+    expect(ackError(ack).code).toBe("record_failure");
     await tick();
     expect(turn.decisions).toHaveLength(0);
     expect(approvalStatuses()).toEqual(["pending"]);
@@ -775,7 +777,7 @@ describe("approval path", () => {
     it("refuses a later decision, resumes the task, and ends the call invalidated", async () => {
       const { turn, taskId, requested } = await abandonUnrecorded();
       const late = await decide(taskId, requested.payload.approval_id, "approve");
-      expect(late.error).toMatchObject({
+      expect(ackError(late)).toMatchObject({
         code: "invalid_state",
         message: expect.stringContaining("can no longer be decided; its call was not released"),
       });
@@ -783,7 +785,7 @@ describe("approval path", () => {
       expect(turn.decisions.map(({ decision }) => decision.behavior)).toEqual(["deny"]);
       expect(rows("SELECT id FROM events WHERE type = 'tool_dispatched'")).toHaveLength(0);
       const busy = await client.submitText("another");
-      expect(busy.error?.message).toContain("is running; wait for it to finish or interrupt it");
+      expect(ackError(busy).message).toContain("is running; wait for it to finish or interrupt it");
       await expectAbandonedAtTurnEnd(turn);
     });
 
@@ -866,7 +868,7 @@ describe("interruption path", () => {
     const { turn, taskId, held, requested } = await submitHeldCall("change");
     failNextCommit();
     const ack = await client.interrupt(taskId);
-    expect(ack.error?.code).toBe("record_failure");
+    expect(ackError(ack).code).toBe("record_failure");
     await tick();
     expect(turn.interrupted).toBe(false);
     expect(turn.decisions).toHaveLength(0);
@@ -884,7 +886,7 @@ describe("interruption path", () => {
     const decision = await held;
     expect(decision.behavior).toBe("deny");
     const late = await decide(taskId, requested.payload.approval_id, "approve");
-    expect(late.error?.code).toBe("invalid_state");
+    expect(ackError(late).code).toBe("invalid_state");
     const outcome = await client.waitFor("interruption_outcome");
     expect(outcome.payload.task_status).toBe("interrupted");
     expect(outcome.payload.actions[0]?.status).toBe("invalidated");
