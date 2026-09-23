@@ -1,4 +1,4 @@
-import { constants, type Stats } from "node:fs";
+import { constants } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import { errorMessage } from "@mia/protocol";
 import {
@@ -12,7 +12,35 @@ import {
   type PathFacts,
 } from "./artifact-capture.ts";
 
-const factsOf = (resolvedPath: string, stats: Stats): PathFacts => ({
+/** The part of a stat result the policy reads. */
+export interface CaptureStats {
+  isFile: () => boolean;
+  size: number;
+}
+
+/** The part of an open file the collector uses. */
+export interface CaptureHandle {
+  stat: () => Promise<CaptureStats>;
+  read: (
+    buffer: Buffer,
+    options: { offset: number; length: number; position: null },
+  ) => Promise<{ bytesRead: number }>;
+  close: () => Promise<void>;
+}
+
+/**
+ * The filesystem calls the collector makes: `node:fs/promises` in production. A test wraps the real
+ * calls to observe which paths were touched, or to report a stat the file no longer matches.
+ */
+export interface CaptureFs {
+  realpath: (path: string) => Promise<string>;
+  stat: (path: string) => Promise<CaptureStats>;
+  open: (path: string, flags: number) => Promise<CaptureHandle>;
+}
+
+const nodeFs: CaptureFs = { realpath, stat, open };
+
+const factsOf = (resolvedPath: string, stats: CaptureStats): PathFacts => ({
   exists: true,
   resolvedPath,
   regularFile: stats.isFile(),
@@ -20,18 +48,23 @@ const factsOf = (resolvedPath: string, stats: Stats): PathFacts => ({
 });
 
 /** A path that cannot be resolved (absent, dangling symlink, unreachable) counts as absent. */
-const inspectPath = async (path: string): Promise<PathFacts> => {
+const inspectPath = async (fs: CaptureFs, path: string): Promise<PathFacts> => {
   try {
-    const resolvedPath = await realpath(path);
-    return factsOf(resolvedPath, await stat(resolvedPath));
+    const resolvedPath = await fs.realpath(path);
+    return factsOf(resolvedPath, await fs.stat(resolvedPath));
   } catch {
     return { exists: false };
   }
 };
 
 /** An output directory that does not exist yet can contain nothing, so it drops out of the policy. */
-const resolvePolicy = async (outputDirectories: readonly string[]): Promise<CapturePolicy> => {
-  const directories = await Promise.all(outputDirectories.map(inspectPath));
+const resolvePolicy = async (
+  fs: CaptureFs,
+  outputDirectories: readonly string[],
+): Promise<CapturePolicy> => {
+  const directories = await Promise.all(
+    outputDirectories.map(async (directory) => inspectPath(fs, directory)),
+  );
   return {
     resolvedOutputDirectories: directories.flatMap((facts) =>
       facts.exists ? [facts.resolvedPath] : [],
@@ -46,11 +79,11 @@ const resolvePolicy = async (outputDirectories: readonly string[]): Promise<Capt
  * slip past the policy nor exceed the limit. Non-blocking open keeps a swapped-in FIFO from hanging.
  */
 const readAdmitted = async (
+  { fs, policy }: { fs: CaptureFs; policy: CapturePolicy },
   resolvedPath: string,
-  policy: CapturePolicy,
   declared: DeclaredArtifact,
 ): Promise<Capture> => {
-  const handle = await open(
+  const handle = await fs.open(
     resolvedPath,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
   );
@@ -60,7 +93,11 @@ const readAdmitted = async (
     const buffer = Buffer.alloc(eligibility.byteSize + 1);
     let length = 0;
     while (length < buffer.length) {
-      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, null);
+      const { bytesRead } = await handle.read(buffer, {
+        offset: length,
+        length: buffer.length - length,
+        position: null,
+      });
       if (bytesRead === 0) break;
       length += bytesRead;
     }
@@ -84,15 +121,19 @@ export type ArtifactCollector = (
  * that still cannot be read is a failed capture, never a rejection. The I/O is asynchronous, so reading
  * a file of up to the size limit stalls only the runtime whose output declared it.
  */
-export const collectArtifact: ArtifactCollector = async (declared, outputDirectories) => {
-  const refused = checkDeclaredPath(declared);
-  if (refused) return refused;
-  const policy = await resolvePolicy(outputDirectories);
-  const eligibility = decideEligibility(await inspectPath(declared.path), policy);
-  if (eligibility.status !== "eligible") return eligibility;
-  try {
-    return await readAdmitted(eligibility.resolvedPath, policy, declared);
-  } catch (error) {
-    return { status: "failed", reason: `declared file unreadable: ${errorMessage(error)}` };
-  }
-};
+export const createArtifactCollector =
+  (fs: CaptureFs = nodeFs): ArtifactCollector =>
+  async (declared, outputDirectories) => {
+    const refused = checkDeclaredPath(declared);
+    if (refused) return refused;
+    const policy = await resolvePolicy(fs, outputDirectories);
+    const eligibility = decideEligibility(await inspectPath(fs, declared.path), policy);
+    if (eligibility.status !== "eligible") return eligibility;
+    try {
+      return await readAdmitted({ fs, policy }, eligibility.resolvedPath, declared);
+    } catch (error) {
+      return { status: "failed", reason: `declared file unreadable: ${errorMessage(error)}` };
+    }
+  };
+
+export const collectArtifact: ArtifactCollector = createArtifactCollector();
