@@ -15,11 +15,36 @@ export interface ScenarioContext {
   budget: (label: string) => void;
 }
 
+/** Every live scenario, declared once; `SCENARIOS` defines each, the provider runs it, the assertion judges it. */
+export const ScenarioNameSchema = z.enum([
+  "stream-context",
+  "allowed",
+  "approve-reject",
+  "every-call",
+  "denied",
+  "silence-disconnect",
+  "cancellable",
+  "uncancellable",
+  "allow-policy-no-prompt",
+  "artifact-export",
+]);
+export type ScenarioName = z.infer<typeof ScenarioNameSchema>;
+
+/** Reads a promptfoo `vars.scenario` value; an unknown name comes back as an error that names it. */
+export const readScenarioName = (
+  value: unknown,
+): { ok: true; name: ScenarioName } | { ok: false; error: string } => {
+  const parsed = ScenarioNameSchema.safeParse(value);
+  return parsed.success
+    ? { ok: true, name: parsed.data }
+    : { ok: false, error: `unknown scenario ${JSON.stringify(value)}` };
+};
+
 const LedgerRefSchema = z.object({ tool: z.string(), call_id: z.string() });
 
 /** Evidence one scenario produces; also what the promptfoo assertion parses back from the provider's JSON output. */
 export const ScenarioEvidenceSchema = z.object({
-  scenario: z.string(),
+  scenario: ScenarioNameSchema,
   profile: z.string(),
   conversation_id: z.string(),
   task_ids: z.array(z.string()),
@@ -54,7 +79,7 @@ export const ScenarioEvidenceSchema = z.object({
 export type ScenarioEvidence = z.infer<typeof ScenarioEvidenceSchema>;
 
 export interface Scenario {
-  name: string;
+  name: ScenarioName;
   profile: "fixture-test" | "fixture-test-interrupt";
   run(
     ctx: ScenarioContext,
@@ -184,7 +209,7 @@ const evidenceOf = (
  * to it, and keeps every scenario's evidence assembled identically.
  */
 const taskScenario = (spec: {
-  name: string;
+  name: ScenarioName;
   profile: Scenario["profile"];
   tasks: TaskSpec[];
   notes?: string[];
@@ -378,12 +403,18 @@ export const SCENARIOS: Scenario[] = [
   }),
 ];
 
+/** The definition of a declared scenario; a unit test keeps every declared name defined exactly once. */
+export const scenarioFor = (name: ScenarioName): Scenario => {
+  const scenario = SCENARIOS.find((candidate) => candidate.name === name);
+  if (!scenario) throw new Error(`scenario ${name} has no definition`);
+  return scenario;
+};
+
 export const runScenario = async (
-  name: string,
+  scenario: Scenario,
   ctx: ScenarioContext,
 ): Promise<ScenarioEvidence> => {
-  const scenario = SCENARIOS.find((candidate) => candidate.name === name);
-  if (!scenario) throw new Error(`unknown scenario ${name}`);
+  const name = scenario.name;
   await ctx.harness.reset();
   const ledgerBefore = await ctx.harness.state();
   const partial = await scenario.run(ctx);

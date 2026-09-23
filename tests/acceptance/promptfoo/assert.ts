@@ -2,7 +2,7 @@
 import { match } from "ts-pattern";
 import { z } from "zod";
 import { isRecord } from "@mia/protocol";
-import { ScenarioEvidenceSchema, type ScenarioEvidence } from "./scenarios.ts";
+import { readScenarioName, ScenarioEvidenceSchema, type ScenarioEvidence } from "./scenarios.ts";
 
 type Result = { pass: boolean; score: number; reason: string };
 
@@ -17,6 +17,9 @@ const InterruptionOutcomeSchema = z.looseObject({
 type PayloadPredicate = (payload: Record<string, unknown>) => boolean;
 
 const assertScenario = (output: string, context: { vars: Record<string, unknown> }): Result => {
+  const read = readScenarioName(context.vars.scenario);
+  if (!read.ok) return fail(read.error);
+  const scenarioName = read.name;
   let parsed: unknown;
   try {
     parsed = JSON.parse(output);
@@ -32,6 +35,8 @@ const assertScenario = (output: string, context: { vars: Record<string, unknown>
       `provider output does not match the evidence shape: ${parsedEvidence.error.message.slice(0, 200)}`,
     );
   const evidence: ScenarioEvidence = parsedEvidence.data;
+  if (evidence.scenario !== scenarioName)
+    return fail(`evidence is for scenario ${evidence.scenario}, not ${scenarioName}`);
   const problems: string[] = [];
   const commits = evidence.ledger_after.commits;
   const commitsOf = (tool: string) => commits.filter((commit) => commit.tool === tool).length;
@@ -49,7 +54,6 @@ const assertScenario = (output: string, context: { vars: Record<string, unknown>
   const slowEntered = () =>
     evidence.ledger_after.entered.filter((entry) => entry.tool === "slow").length;
 
-  const scenarioName = String(context.vars.scenario);
   match(scenarioName)
     .with("stream-context", () => {
       if (idx("text_delta") < 0 || idx("text_delta") > idx("task_finished"))
@@ -163,9 +167,7 @@ const assertScenario = (output: string, context: { vars: Record<string, unknown>
       )
         problems.push("artifact call did not complete");
     })
-    .otherwise(() => {
-      problems.push(`no assertion for scenario ${scenarioName}`);
-    });
+    .exhaustive();
   return {
     pass: problems.length === 0,
     score: problems.length === 0 ? 1 : 0,

@@ -156,7 +156,18 @@ const detailFor = (status: ToolCallStatus): string | undefined =>
     .with("unknown", () => "released; no result observed; effect unknown")
     .with("blocked_gate", () => "not released: action gate closed")
     .with("invalidated", () => "never released: proposal or pending approval invalidated")
-    .otherwise(() => undefined);
+    .with(
+      "proposed",
+      "awaiting_approval",
+      "permitted",
+      "denied",
+      "dispatched",
+      "completed",
+      "failed",
+      "cancelled",
+      () => undefined,
+    )
+    .exhaustive();
 
 /** Final status of every call in the task: released-without-result is unknown; anything still held can never run. */
 const classifyActions = (task: TaskState): EventPayload<"interruption_outcome">["actions"] =>
