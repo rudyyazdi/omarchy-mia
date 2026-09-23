@@ -38,6 +38,7 @@ const step = (overrides: Partial<StepRecord>): StepRecord => ({
   turn: null,
   ledger_after: null,
   hook_evidence: null,
+  hook_evidence_malformed_lines: null,
   notes: [],
   checks: {},
   ...overrides,

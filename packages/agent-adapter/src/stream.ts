@@ -22,9 +22,15 @@ export const InitMessageSchema = base.extend({
   apiKeySource: z.string().optional(),
 });
 
+/**
+ * Any system message but init: an init that fails InitMessageSchema must not fall through to here, or
+ * it parses as a bland system message and the runtime's startup report is silently lost.
+ */
 export const OtherSystemMessageSchema = base.extend({
   type: z.literal("system"),
-  subtype: z.string(),
+  subtype: z.string().refine((subtype) => subtype !== "init", {
+    message: "an init message must satisfy InitMessageSchema",
+  }),
 });
 
 const contentBlock = z

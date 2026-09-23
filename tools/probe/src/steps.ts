@@ -189,8 +189,13 @@ export const effortControl = async (context: ProbeContext): Promise<void> => {
       return { stdout: output, exit: await exited };
     },
   );
-  const efforts = effortsOf(readHookEvidence(plan.files.hookEvidence));
-  const control = { exit, efforts, stdout_lines: stdout.split("\n").filter(Boolean).length };
+  const hooks = readHookEvidence(plan.files.hookEvidence);
+  const control = {
+    exit,
+    efforts: effortsOf(hooks.records),
+    hook_evidence_malformed_lines: hooks.malformedLines,
+    stdout_lines: stdout.split("\n").filter(Boolean).length,
+  };
   writeFileSync(join(runtimeDir, "control.stream.jsonl"), stdout, { mode: 0o600 });
   context.save("step-6-effort-control", control);
   log("effort-control", control);

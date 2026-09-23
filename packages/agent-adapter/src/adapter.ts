@@ -334,10 +334,33 @@ export class ClaudeCodeAdapter {
 /** One line of the hook evidence file written by hook-capture.mjs: a JSON object of runtime-reported fields. */
 const HookEvidenceRecordSchema = z.record(z.string(), z.unknown());
 
-export const readHookEvidence = (path: string): Record<string, unknown>[] => {
-  if (!existsSync(path)) return [];
-  return readFileSync(path, "utf8")
-    .split("\n")
-    .filter((line) => line.trim())
-    .map((line) => HookEvidenceRecordSchema.parse(JSON.parse(line)));
+export interface HookEvidence {
+  records: Record<string, unknown>[];
+  /** Lines that were not a JSON object, such as the truncated last line of a turn killed mid-write. */
+  malformedLines: number;
+}
+
+const parseHookLine = (line: string): Record<string, unknown> | null => {
+  try {
+    const parsed = HookEvidenceRecordSchema.safeParse(JSON.parse(line));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Evidence is best-effort: a malformed line is counted and skipped rather than thrown, because a throw
+ * here would keep the turn that wrote it from being recorded as finished.
+ */
+export const readHookEvidence = (path: string): HookEvidence => {
+  const evidence: HookEvidence = { records: [], malformedLines: 0 };
+  if (!existsSync(path)) return evidence;
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    const record = parseHookLine(line);
+    if (record) evidence.records.push(record);
+    else evidence.malformedLines += 1;
+  }
+  return evidence;
 };

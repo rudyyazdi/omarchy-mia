@@ -31,6 +31,8 @@ export interface StepRecord {
   turn: TurnResult | null;
   ledger_after: FixtureState | null;
   hook_evidence: Record<string, unknown>[] | null;
+  /** Hook evidence lines that did not parse and are missing from `hook_evidence`. */
+  hook_evidence_malformed_lines: number | null;
   notes: string[];
   checks: Record<string, boolean | string>;
 }

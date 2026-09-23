@@ -74,15 +74,32 @@ export class Catalog {
       } catch {
         /* best effort */
       }
+    } else {
+      // A reader cannot migrate, but it must still refuse a catalog whose rows it would misread.
+      try {
+        this.checkVersion(this.storedVersion() ?? "none");
+      } catch (error) {
+        this.db.close();
+        throw error;
+      }
     }
+  }
+
+  private storedVersion(): number | undefined {
+    return this.get<{ version: number }>("SELECT version FROM schema_version LIMIT 1")?.version;
+  }
+
+  private checkVersion(version: number | "none"): void {
+    if (version !== SCHEMA_VERSION)
+      throw new Error(`catalog schema version ${version} does not match ${SCHEMA_VERSION}`);
   }
 
   private migrate(): void {
     this.db.exec(SCHEMA_SQL);
-    const row = this.get<{ version: number }>("SELECT version FROM schema_version LIMIT 1");
-    if (!row) this.db.prepare("INSERT INTO schema_version(version) VALUES (?)").run(SCHEMA_VERSION);
-    else if (row.version !== SCHEMA_VERSION)
-      throw new Error(`catalog schema version ${row.version} does not match ${SCHEMA_VERSION}`);
+    const version = this.storedVersion();
+    if (version === undefined)
+      this.db.prepare("INSERT INTO schema_version(version) VALUES (?)").run(SCHEMA_VERSION);
+    else this.checkVersion(version);
   }
 
   /** Run fn inside one write transaction (no nesting). */
