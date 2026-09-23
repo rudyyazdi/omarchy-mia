@@ -139,6 +139,9 @@ export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
  */
 export const AckDispositionSchema = z.enum(["accepted", "rejected", "failed"]);
 export type AckDisposition = z.infer<typeof AckDispositionSchema>;
+/** The dispositions whose ack carries an error. */
+export const ErrorDispositionSchema = AckDispositionSchema.exclude(["accepted"]);
+export type ErrorDisposition = z.infer<typeof ErrorDispositionSchema>;
 
 export const ToolCallStatusSchema = z.enum([
   "proposed",

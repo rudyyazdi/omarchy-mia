@@ -83,9 +83,12 @@ const FAILED_AFTER_RECORD: CommandReply = {
   },
 };
 
-/** How far handling a command got before it threw, which decides what its reply may claim. */
+/**
+ * How far handling a command got before it threw, which decides what its reply may claim. `answered` means
+ * its reply is stored or was read from the record, so only sending that reply can have thrown.
+ */
 type Progress =
-  { stage: "unrecorded" } | { stage: "recorded"; commandId: string } | { stage: "finished" };
+  { stage: "unrecorded" } | { stage: "recorded"; commandId: string } | { stage: "answered" };
 
 const replyFor = (result: CommandResult): CommandReply =>
   result.ok
@@ -98,7 +101,7 @@ const ackFields = (reply: CommandReply): Omit<AckReply, "commandId"> =>
       disposition: "accepted",
       ...(result === null ? {} : { result }),
     }))
-    .with({ disposition: P.union("rejected", "failed") }, ({ disposition, error }) => ({
+    .with({ disposition: P.not("accepted") }, ({ disposition, error }) => ({
       disposition,
       error,
     }))
@@ -243,7 +246,10 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
         payload: command.payload,
         conversationId,
       });
-      if (recorded.kind !== "new") return answerRecorded(conn, commandId, recorded);
+      if (recorded.kind !== "new") {
+        progress = { stage: "answered" };
+        return answerRecorded(conn, commandId, recorded);
+      }
       progress = { stage: "recorded", commandId: recorded.commandId };
       const reply = replyFor(
         dispatch(
@@ -258,7 +264,7 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
         ),
       );
       options.writer.finishCommand(recorded.commandId, reply);
-      progress = { stage: "finished" };
+      progress = { stage: "answered" };
       ack(conn, { commandId, ...ackFields(reply) });
     } catch (error) {
       options.log(
@@ -275,8 +281,8 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
           settleFailed(recorded.commandId);
           ack(conn, { commandId, ...ackFields(FAILED_AFTER_RECORD) });
         })
-        // Only the ack itself can throw here; its reply is stored, so a resend receives it.
-        .with({ stage: "finished" }, () => undefined)
+        // A second ack would contradict the first; a resend is answered from the record.
+        .with({ stage: "answered" }, () => undefined)
         .exhaustive();
     }
   };

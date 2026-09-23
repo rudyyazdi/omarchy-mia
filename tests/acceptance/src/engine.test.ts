@@ -180,6 +180,9 @@ describe("streaming and commands", () => {
     const { turn, taskId } = await submit("hello", "cmd-1");
     const busy = await client.submitText("second", { messageId: "cmd-2" });
     expect(busy.error?.code).toBe("busy");
+    // Finished first, so a resend of cmd-2 that runs again would be accepted, not `busy`.
+    turn.end();
+    await client.waitFor("task_finished");
     client.close();
     const again = await ts.connect("client-A");
     again.conversationId = client.conversationId;
@@ -199,8 +202,6 @@ describe("streaming and commands", () => {
       ...started,
       duplicate: true,
     });
-    turn.end();
-    await again.waitFor("task_finished");
   });
 
   /** Submit "hello" as cmd-1 under an injected fault: its turn starts, but the ack reports it failed. */
@@ -241,18 +242,12 @@ describe("streaming and commands", () => {
   });
 
   it("settles a command whose outcome could not be stored as failed when it is resent", async () => {
-    const catalog = ts.server.catalog;
-    const update = catalog.update.bind(catalog);
-    let failures = 2; // the accepted outcome, then the failed one
-    catalog.update = (table, id, row) => {
-      if (table === "commands" && failures > 0) {
-        failures -= 1;
-        throw new Error("simulated write failure");
-      }
-      update(table, id, row);
-    };
+    const { db } = ts.server.catalog;
+    db.exec(`CREATE TRIGGER fail_command_finish BEFORE UPDATE ON commands
+      BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`);
     const { failed, turn } = await submitThatFails();
     expect(cmd1Rows()).toEqual([{ disposition: "received", error_code: null }]);
+    db.exec("DROP TRIGGER fail_command_finish");
     await expectResendRepeats(failed, turn);
   });
 

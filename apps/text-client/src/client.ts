@@ -36,9 +36,10 @@ const isEventOf =
 /**
  * Programmatic Mia client used by the terminal UI, the acceptance harness and the promptfoo provider.
  * Every command gets a unique message_id; a resend reuses it, and the server answers it with the original
- * reply marked `duplicate` instead of running it again. The server keys that on `clientId`, so it covers a
- * resend on a new connection with the same `clientId`, but a client constructed without one gets a fresh ID.
- * An abort while an operation is still waiting rejects it with the signal's reason.
+ * reply marked `duplicate` instead of running it again. The server keys that on `clientId`, which an instance
+ * keeps across `connect()` calls; a new instance (after a restart, say) without an explicit `clientId` gets
+ * a fresh one, so dedupe does not survive it. An abort while an operation is still waiting rejects it with
+ * the signal's reason.
  */
 export class MiaClient extends EventEmitter {
   readonly clientId: string;

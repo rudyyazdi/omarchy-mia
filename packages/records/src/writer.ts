@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   canonicalDigest,
   ErrorCodeSchema,
+  ErrorDispositionSchema,
   redactString,
   redactValue,
   type ApprovalStatus,
@@ -32,37 +33,53 @@ export type RecordedCommand =
   | { kind: "new"; commandId: string }
   /** The message_id was used before with a different payload. */
   | { kind: "conflict" }
-  /** The message_id was recorded but never finished, so its outcome is unknown. */
+  /**
+   * The message_id was recorded but no reply can be read back for it: it never finished, or its stored reply
+   * is unreadable. Either way its outcome is unknown.
+   */
   | { kind: "unfinished"; commandId: string }
   | { kind: "duplicate"; reply: CommandReply };
 
-/** A stored command row, validated at the SQLite boundary; the table's CHECKs make any other shape corrupt. */
+/** A stored `result`: JSON text of an object, or a reply that cannot be read back. */
+const StoredResultSchema = z.string().transform((text, ctx) => {
+  try {
+    return z.record(z.string(), z.unknown()).parse(JSON.parse(text));
+  } catch {
+    ctx.addIssue({ code: "custom", message: "stored result is not a JSON object" });
+    return z.NEVER;
+  }
+});
+
+/** A stored command row, validated at the SQLite boundary. */
 const StoredCommandSchema = z.discriminatedUnion("disposition", [
   z.object({ disposition: z.literal("received") }),
-  z.object({ disposition: z.literal("accepted"), result: z.string().nullable() }),
+  z.object({ disposition: z.literal("accepted"), result: StoredResultSchema.nullable() }),
   z.object({
-    disposition: z.enum(["rejected", "failed"]),
+    disposition: ErrorDispositionSchema,
     error_code: ErrorCodeSchema,
     error_message: z.string(),
   }),
 ]);
 
-const storedReply = (
-  stored: Exclude<z.infer<typeof StoredCommandSchema>, { disposition: "received" }>,
-): CommandReply =>
-  match(stored)
+/** The reply stored for a command, or null when it has none that can be read back. */
+const storedReply = (row: unknown): CommandReply | null => {
+  const parsed = StoredCommandSchema.safeParse(row);
+  if (!parsed.success) return null;
+  return match(parsed.data)
+    .with({ disposition: "received" }, () => null)
     .with({ disposition: "accepted" }, ({ result }): CommandReply => ({
       disposition: "accepted",
-      result: result === null ? null : z.record(z.string(), z.unknown()).parse(JSON.parse(result)),
+      result,
     }))
     .with(
-      { disposition: P.union("rejected", "failed") },
-      ({ disposition, error_code, error_message }) => ({
+      { disposition: P.not("accepted") },
+      ({ disposition, error_code, error_message }): CommandReply => ({
         disposition,
         error: { code: error_code, message: error_message },
       }),
     )
     .exhaustive();
+};
 
 export interface EventInput {
   conversationId: string;
@@ -182,18 +199,20 @@ export class RecordWriter {
     const existing = this.catalog.get<
       Pick<
         CommandRow,
-        "id" | "payload_digest" | "disposition" | "error_code" | "error_message" | "result"
+        "id" | "type" | "payload_digest" | "disposition" | "error_code" | "error_message" | "result"
       >
     >(
-      "SELECT id, payload_digest, disposition, error_code, error_message, result FROM commands WHERE client_id = ? AND client_command_id = ?",
+      "SELECT id, type, payload_digest, disposition, error_code, error_message, result FROM commands WHERE client_id = ? AND client_command_id = ?",
       input.clientId,
       input.clientCommandId,
     );
     if (existing) {
-      if (existing.payload_digest !== digest) return { kind: "conflict" };
-      const stored = StoredCommandSchema.parse(existing);
-      if (stored.disposition === "received") return { kind: "unfinished", commandId: existing.id };
-      return { kind: "duplicate", reply: storedReply(stored) };
+      if (existing.payload_digest !== digest || existing.type !== input.type)
+        return { kind: "conflict" };
+      const reply = storedReply(existing);
+      return reply === null
+        ? { kind: "unfinished", commandId: existing.id }
+        : { kind: "duplicate", reply };
     }
     const id = newId("cmd");
     this.catalog.insert("commands", {
@@ -210,7 +229,10 @@ export class RecordWriter {
     return { kind: "new", commandId: id };
   }
 
-  /** Store the reply a recorded command's ack carries, so a duplicate of it gets the same one. */
+  /**
+   * Store the reply a recorded command's ack carries, so a duplicate of it gets the same one. Like every other
+   * write it is redacted first, so a duplicate never echoes a secret the original reply held.
+   */
   finishCommand(commandId: string, reply: CommandReply): void {
     this.catalog.update(
       "commands",
@@ -218,12 +240,12 @@ export class RecordWriter {
       match(reply)
         .with({ disposition: "accepted" }, ({ result }) => ({
           disposition: "accepted",
-          result: result === null ? null : JSON.stringify(result),
+          result: result === null ? null : JSON.stringify(redactValue(result)),
         }))
-        .with({ disposition: P.union("rejected", "failed") }, ({ disposition, error }) => ({
+        .with({ disposition: P.not("accepted") }, ({ disposition, error }) => ({
           disposition,
           error_code: error.code,
-          error_message: error.message,
+          error_message: redactString(error.message),
         }))
         .exhaustive(),
     );

@@ -3,6 +3,7 @@ import type {
   AckDisposition,
   ApprovalStatus,
   ErrorCode,
+  ErrorDisposition,
   TaskStatus,
   ToolCallPolicy,
   ToolCallStatus,
@@ -148,7 +149,7 @@ CREATE INDEX IF NOT EXISTS events_caused_by ON events(caused_by_event_id);
 CREATE TABLE IF NOT EXISTS commands (
   id TEXT PRIMARY KEY,
   conversation_id TEXT,
-  client_id TEXT NOT NULL,
+  client_id TEXT NOT NULL REFERENCES clients(id),
   client_connection_id TEXT NOT NULL REFERENCES client_connections(id),
   client_command_id TEXT NOT NULL,
   type TEXT NOT NULL,
@@ -159,8 +160,9 @@ CREATE TABLE IF NOT EXISTS commands (
   result TEXT,
   result_event_id TEXT REFERENCES events(id),
   received_at TEXT NOT NULL,
-  CHECK ((disposition IN ('rejected','failed')) = (error_code IS NOT NULL AND error_message IS NOT NULL)),
-  CHECK (result IS NULL OR disposition = 'accepted'),
+  CHECK ((error_code IS NULL) = (error_message IS NULL)),
+  CHECK ((disposition IN ('rejected','failed')) = (error_code IS NOT NULL)),
+  CHECK (result IS NULL OR (disposition = 'accepted' AND json_valid(result))),
   UNIQUE(client_id, client_command_id)
 );
 
@@ -284,7 +286,7 @@ export type CommandDisposition = "received" | AckDisposition;
 /** The reply a finished command's ack carried: what a duplicate of it is answered with. */
 export type CommandReply =
   | { disposition: "accepted"; result: Record<string, unknown> | null }
-  | { disposition: "rejected" | "failed"; error: { code: ErrorCode; message: string } };
+  | { disposition: ErrorDisposition; error: { code: ErrorCode; message: string } };
 export type ArtifactKind = "snapshot" | "tool_output" | "runtime_transcript" | "effort_evidence";
 export type ProvenanceRole =
   | "agent_prompt"

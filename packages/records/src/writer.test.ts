@@ -170,6 +170,52 @@ describe("record writer", () => {
       });
     });
 
+    it("treats a reused message_id with another command type as a conflict", () => {
+      recordNew("cmd-1");
+      expect(writer.recordCommand({ ...command("cmd-1"), type: "heartbeat" })).toEqual({
+        kind: "conflict",
+      });
+    });
+
+    it("reports a command whose stored reply cannot be read back as unfinished", () => {
+      const commandId = recordNew("cmd-1");
+      catalog.db
+        .prepare("UPDATE commands SET disposition = 'accepted', result = '[1]' WHERE id = ?")
+        .run(commandId);
+      expect(writer.recordCommand(command("cmd-1"))).toEqual({ kind: "unfinished", commandId });
+    });
+
+    it("redacts the stored reply", () => {
+      const secret = "sk-ant-abcdefghijklmnop";
+      writer.finishCommand(recordNew("cmd-1"), {
+        disposition: "rejected",
+        error: { code: "invalid_state", message: `bad key ${secret}` },
+      });
+      writer.finishCommand(recordNew("cmd-2"), {
+        disposition: "accepted",
+        result: { api_key: secret },
+      });
+      expect(
+        JSON.stringify(catalog.all("SELECT error_message, result FROM commands")),
+      ).not.toContain(secret);
+    });
+
+    it("refuses a row whose outcome and error disagree", () => {
+      const commandId = recordNew("cmd-1");
+      const update = (sql: string) => () => catalog.db.prepare(sql).run(commandId);
+      expect(update("UPDATE commands SET disposition = 'failed' WHERE id = ?")).toThrow(/CHECK/);
+      expect(
+        update(
+          "UPDATE commands SET disposition = 'accepted', error_code = 'busy', error_message = 'x' WHERE id = ?",
+        ),
+      ).toThrow(/CHECK/);
+      expect(
+        update(
+          "UPDATE commands SET disposition = 'rejected', result = '{}', error_code = 'busy', error_message = 'x' WHERE id = ?",
+        ),
+      ).toThrow(/CHECK/);
+    });
+
     it("keeps message_ids of different clients apart", () => {
       recordNew("cmd-1");
       writer.ensureClient("client-2", "text-client");
