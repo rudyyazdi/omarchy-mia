@@ -1,6 +1,6 @@
-import { LIMITS, PROTOCOL_VERSION } from "@mia/protocol";
+import { LIMITS, PROTOCOL_VERSION, ServerEventSchema } from "@mia/protocol";
 import { describe, expect, it } from "vitest";
-import { decodeEnvelope, type Decoded } from "./decode.ts";
+import { decodeEnvelope, type Decoded, type EnvelopeInput } from "./decode.ts";
 
 const envelope = (overrides: Record<string, unknown> = {}): string =>
   JSON.stringify({
@@ -90,6 +90,81 @@ describe("decodeEnvelope rejections", () => {
     expect(decoded.ok).toBe(false);
     if (decoded.ok) return;
     expect(decoded.commandId).toBe("unknown");
+  });
+});
+
+describe("decodeEnvelope command id", () => {
+  it.each([
+    ["an empty", ""],
+    ["an over-long", "x".repeat(LIMITS.maxIdChars + 1)],
+  ])("does not echo %s message_id, which no ack could carry", (_, messageId) => {
+    const decoded = decodeText(envelope({ message_id: messageId }));
+    expect(decoded).toMatchObject({ ok: false, commandId: "unknown", code: "invalid_message" });
+  });
+
+  it("echoes a message_id of exactly the maximum length", () => {
+    const messageId = "x".repeat(LIMITS.maxIdChars);
+    const decoded = decodeText(envelope({ message_id: messageId, protocol_version: 99 }));
+    expect(decoded).toMatchObject({ ok: false, commandId: messageId });
+  });
+
+  const frames: [string, EnvelopeInput][] = [
+    ["binary", { text: envelope(), isBinary: true, boundClientId: null }],
+    [
+      "oversized",
+      { text: "x".repeat(LIMITS.maxEnvelopeBytes + 1), isBinary: false, boundClientId: null },
+    ],
+    ["not JSON", { text: "{not json", isBinary: false, boundClientId: null }],
+    ["not a head", { text: "[]", isBinary: false, boundClientId: null }],
+    [
+      "wrong version",
+      { text: envelope({ protocol_version: 99 }), isBinary: false, boundClientId: null },
+    ],
+    [
+      "wrong version, empty id",
+      {
+        text: envelope({ protocol_version: 99, message_id: "" }),
+        isBinary: false,
+        boundClientId: null,
+      },
+    ],
+    [
+      "bad payload",
+      { text: envelope({ type: "submit_text" }), isBinary: false, boundClientId: null },
+    ],
+    ["rebound client", { text: envelope(), isBinary: false, boundClientId: "client-B" }],
+    ["numeric id", { text: envelope({ message_id: 7 }), isBinary: false, boundClientId: null }],
+    ["empty id", { text: envelope({ message_id: "" }), isBinary: false, boundClientId: null }],
+    [
+      "over-long id",
+      {
+        text: envelope({ message_id: "x".repeat(LIMITS.maxIdChars + 1) }),
+        isBinary: false,
+        boundClientId: null,
+      },
+    ],
+    ["valid", { text: envelope(), isBinary: false, boundClientId: null }],
+  ];
+
+  it.each(frames)("yields an ack the client's schema accepts (%s frame)", (_, input) => {
+    const decoded = decodeEnvelope(input);
+    const payload = decoded.ok
+      ? { command_id: decoded.commandId, disposition: "accepted" }
+      : {
+          command_id: decoded.commandId,
+          disposition: "rejected",
+          error: { code: decoded.code, message: decoded.message },
+        };
+    const ack = {
+      protocol_version: PROTOCOL_VERSION,
+      message_id: "ack-1",
+      type: "ack",
+      conversation_id: null,
+      sequence: null,
+      server_time: "2026-01-01T00:00:00.000Z",
+      payload,
+    };
+    expect(ServerEventSchema.safeParse(ack).error).toBeUndefined();
   });
 });
 
