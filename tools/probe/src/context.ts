@@ -13,7 +13,7 @@ import {
 } from "@mia/agent-adapter";
 import { FixtureHarness, startFixture } from "@mia/controlled-mcp";
 import { redactValue } from "@mia/protocol";
-import type { ProbeOptions, StepRecord, StepSpec } from "./record.ts";
+import type { ProbeDeadlines, ProbeOptions, StepRecord, StepSpec } from "./record.ts";
 
 export const log = (...args: unknown[]) => console.log(`[probe]`, ...args);
 
@@ -41,10 +41,15 @@ export class ProbeContext {
       fixture: Awaited<ReturnType<typeof startFixture>>;
       harness: FixtureHarness;
       bridge: ApprovalBridge;
+      deadlines: ProbeDeadlines;
     },
   ) {}
 
-  static async start(options: ProbeOptions, env: NodeJS.ProcessEnv): Promise<ProbeContext> {
+  static async start(
+    options: ProbeOptions,
+    env: NodeJS.ProcessEnv,
+    deadlines: ProbeDeadlines,
+  ): Promise<ProbeContext> {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const out = resolve(options.out, stamp);
     mkdirSync(out, { recursive: true, mode: 0o700 });
@@ -59,12 +64,16 @@ export class ProbeContext {
     return new ProbeContext(
       options,
       { out, examples, fixture: fixtureDir },
-      { budget, fixture, harness, bridge },
+      { budget, fixture, harness, bridge, deadlines },
     );
   }
 
   get harness(): FixtureHarness {
     return this.services.harness;
+  }
+
+  get deadlines(): ProbeDeadlines {
+    return this.services.deadlines;
   }
 
   runtimeDir(sessionId: string): string {

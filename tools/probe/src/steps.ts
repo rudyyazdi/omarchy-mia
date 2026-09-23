@@ -38,7 +38,9 @@ const runInterruptStep = (
     prompt: `Call d1.slow with mode ${args.mode} exactly once. After it returns, call d1.change with delta 1 exactly once. Report the results.`,
     decide: () => ({ behavior: "allow" }),
     during: async (handle, step) => {
-      const entered = await context.harness.waitEntered(120_000);
+      const entered = await context.harness.waitEntered({
+        signal: context.deadlines.slowEntered(),
+      });
       step.notes.push(`slow entered ${entered.call_id} at ${new Date().toISOString()}`);
       const killRequested = Date.now();
       const outcome = await handle.interrupt();
@@ -107,6 +109,7 @@ export const interruptCancellable = async (
       await context.harness.waitForState(
         (state) =>
           state.ledger.some((entry) => entry.kind === "cancelled") || !state.pending.length,
+        { signal: context.deadlines.ledgerSettled() },
       );
     },
   });
@@ -145,7 +148,9 @@ export const interruptUncancellable = async (context: ProbeContext): Promise<voi
         `after kill, before release: counter=${before.counter} pending=${before.pending.length}`,
       );
       await context.harness.release(entered.call_id);
-      await context.harness.waitForState((state) => state.counter >= 1);
+      await context.harness.waitForState((state) => state.counter >= 1, {
+        signal: context.deadlines.ledgerSettled(),
+      });
     },
   });
   Object.assign(step.checks, interruptUncancellableChecks(step));

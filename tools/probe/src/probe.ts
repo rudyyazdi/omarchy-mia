@@ -5,7 +5,7 @@ import { probeStaticCapabilities, type StaticCapabilities } from "@mia/agent-ada
 import { redactValue } from "@mia/protocol";
 import { firstEvent } from "./checks.ts";
 import { log, ProbeContext } from "./context.ts";
-import type { ProbeOptions } from "./record.ts";
+import type { ProbeDeadlines, ProbeOptions } from "./record.ts";
 import {
   effortControl,
   followupEveryCallDeny,
@@ -56,10 +56,14 @@ const freezeExamples = (context: ProbeContext, staticReport: StaticCapabilities)
  * D1 capability probe: proves, against the real installed runtime, the behaviours the adapter relies on.
  * Every live turn is counted against the shared live-call budget. Evidence lands in an out directory;
  * redacted protocol examples are frozen under the examples directory. `env` supplies the live-call
- * budget's overrides.
+ * budget's overrides, and `deadlines` bound each wait on the fixture.
  */
-export const runProbe = async (options: ProbeOptions, env: NodeJS.ProcessEnv): Promise<never> => {
-  const context = await ProbeContext.start(options, env);
+export const runProbe = async (
+  options: ProbeOptions,
+  env: NodeJS.ProcessEnv,
+  deadlines: ProbeDeadlines,
+): Promise<never> => {
+  const context = await ProbeContext.start(options, env, deadlines);
   const staticReport = probeStaticCapabilities(context.baseConfig());
   context.save("static-capabilities", staticReport);
   log("static:", JSON.stringify(staticReport, null, 1));
@@ -96,4 +100,4 @@ export const runProbe = async (options: ProbeOptions, env: NodeJS.ProcessEnv): P
   return context.shutdown(0);
 };
 
-export type { ProbeOptions };
+export type { ProbeDeadlines, ProbeOptions };
