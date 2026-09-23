@@ -375,8 +375,8 @@ export class RecordWriter {
   // ---- conversations, tasks, executions ----
 
   /**
-   * Records a conversation and names its private directory without creating it, so recording one does no file I/O:
-   * the first turn's launch creates the directory, owner-only, before the runtime writes into it.
+   * Records a conversation and names its directory without creating it, so recording one does no file I/O; whoever
+   * first writes into the directory creates it.
    */
   createConversation(input: { provenanceSetId: string; runtimeConversationId: string }): {
     id: string;

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { ADAPTER_VERSION, type Profile, type StaticCapabilities } from "@mia/agent-adapter";
-import { PROTOCOL_VERSION, redactValue, sha256Hex } from "@mia/protocol";
+import { isNotFound, PROTOCOL_VERSION, redactValue, sha256Hex } from "@mia/protocol";
 import type { ProvenanceEntryRow, ProvenanceRole, RecordWriter } from "@mia/records";
 import type { BuildInfo } from "./build-info.ts";
 
@@ -44,16 +44,16 @@ const readConversationFileSync = (path: string): ConversationFile => {
   try {
     return { path, bytes: readFileSync(path) };
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT")
-      return { path, bytes: null };
+    if (isNotFound(error)) return { path, bytes: null };
     throw error;
   }
 };
 
 /**
  * Reads the profile's agent prompt and architecture document before the transaction that records a conversation
- * opens, so `createConversationProvenance` reads no file. A missing file is recorded as unavailable; any other read
- * failure throws, and no conversation starts.
+ * opens, so `createConversationProvenance` reads no file. Only a file that does not exist (`ENOENT`) is recorded as
+ * unavailable; any other read failure, a path through a non-directory or an unreadable parent included, throws, and
+ * no conversation starts, because a misconfigured path should not silently drop provenance.
  */
 export const readConversationFilesSync = (profile: Profile): ConversationFiles => ({
   agentPrompt: readConversationFileSync(profile.runtime.agentPromptFile),

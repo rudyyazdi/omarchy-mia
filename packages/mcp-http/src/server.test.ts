@@ -299,6 +299,9 @@ describe("MCP HTTP server", () => {
     const oversized = await post(handle.url, initializeRequestOfSize(bodyLimitBytes + 1));
     expect(oversized.status).toBe(413);
     await oversized.body?.cancel();
+    // The log is an append stream: it is complete only once close has flushed it.
+    await handle.close();
+    handle = undefined;
 
     const entries: unknown[] = await readLogEntries(logFile);
     expect(entries).toContainEqual(

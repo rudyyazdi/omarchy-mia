@@ -1,5 +1,6 @@
 import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { isAbsolute, join, win32 } from "node:path";
+import { isNotFound } from "@mia/protocol";
 
 export type ExportReadResult =
   | { status: "read"; bytes: Buffer }
@@ -49,8 +50,7 @@ export class ExportFiles {
       }
       return { status: "read", bytes: readFileSync(path) };
     } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "ENOENT")
-        return { status: "missing" };
+      if (isNotFound(error)) return { status: "missing" };
       return { status: "invalid", problem: `file unreadable: ${name}` };
     }
   }

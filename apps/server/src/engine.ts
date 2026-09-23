@@ -608,6 +608,7 @@ export class Engine {
       text: runtimePrompt,
       runtimeConversationId: conversation.runtimeConversationId,
       firstTurn: !conversation.sessionStarted,
+      // The launch creates this directory and the conversation directory above it, owner-only, on the first turn.
       runtimeDir: resolve(conversation.directory, "runtime"),
       turnIndex,
       agentPromptFile: conversation.promptFile,
