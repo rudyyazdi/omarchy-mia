@@ -1,6 +1,6 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ApprovalBridge,
@@ -11,11 +11,8 @@ import {
 } from "@mia/agent-adapter";
 import { REDACTED } from "@mia/protocol";
 import { FixtureHarness, startFixture, type FixtureHandle } from "@mia/controlled-mcp";
-import { REPO_ROOT, testProfile } from "./harness.ts";
+import { FAKE_RUNTIME, FAKE_RUNTIME_ENV, testProfile } from "./harness.ts";
 
-const FAKE = resolve(REPO_ROOT, "tests/fake-claude/bin.sh");
-/** What the fake's shell wrapper needs to find `node`; the test process's env is not read. */
-const RUNTIME_ENV = { PATH: dirname(process.execPath) };
 /** How long the fake runtime may take to reach the fixture's slow tool. */
 const SLOW_ENTERED_TIMEOUT_MS = 20_000;
 /** How long the fixture's ledger may take to settle after the event that caused it. */
@@ -40,10 +37,10 @@ afterAll(async () => {
 
 const adapter = () => {
   const profile = testProfile(dir, {
-    executable: FAKE,
+    executable: FAKE_RUNTIME,
     mcpServers: { d1: { type: "http", url: fixture.mcpUrl } },
   });
-  return new ClaudeCodeAdapter(profile.runtime, bridge, RUNTIME_ENV);
+  return new ClaudeCodeAdapter(profile.runtime, bridge, FAKE_RUNTIME_ENV);
 };
 
 const run = async (

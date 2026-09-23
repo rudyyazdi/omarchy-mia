@@ -11,7 +11,7 @@ import { startFixture } from "@mia/controlled-mcp";
 import { errorMessage, isRecord } from "@mia/protocol";
 import { Catalog, exportConversation, snapshotConversation, verifyExport } from "@mia/records";
 import { loadProfile } from "@mia/agent-adapter";
-import { startServer, type MiaServer } from "@mia/server";
+import { SHUTDOWN_TURN_WAIT_MS, startServer, type MiaServer } from "@mia/server";
 import { readScenarioName, ScenarioNameSchema, type ScenarioName } from "./scenarios.ts";
 
 /** What `npm run live` was asked to run; `main.ts` reads it from the command line. */
@@ -157,7 +157,7 @@ const startProfile = async (name: string, index: number, run: ProfileRun): Promi
     env: run.runtimeEnv,
     log: (message) => logs.push(`${new Date().toISOString()} ${message}`),
   });
-  run.cleanup.defer(() => server.close());
+  run.cleanup.defer(() => server.close(AbortSignal.timeout(SHUTDOWN_TURN_WAIT_MS)));
   log(`server ${name} at ${server.gateway.url}`);
   return server;
 };

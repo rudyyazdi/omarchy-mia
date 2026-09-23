@@ -6,7 +6,16 @@ import { describe, expect, it } from "vitest";
 import { startServer } from "@mia/server";
 import { Catalog } from "@mia/records";
 import { ScriptedRuntime } from "./scripted-runtime.ts";
-import { startTestServer, testProfile } from "./harness.ts";
+import {
+  ackError,
+  ackResult,
+  FAKE_RUNTIME,
+  FAKE_RUNTIME_ENV,
+  must,
+  mustString,
+  startTestServer,
+  testProfile,
+} from "./harness.ts";
 
 /** Listening TCP servers this process owns: a socket nobody closed is still counted here. */
 const listeningServers = (): number =>
@@ -26,6 +35,20 @@ const listenOnFreePort = async (): Promise<{ server: Server; port: number }> => 
 
 const closeServer = (server: Server): Promise<void> =>
   new Promise<void>((resolveClosed) => server.close(() => resolveClosed()));
+
+/** A turn wait that never aborts: the test itself decides when the turn ends. */
+const unbounded = (): AbortSignal => new AbortController().signal;
+
+/** Whether any process in the group led by `pid` is still alive (signal 0 only checks). */
+const processGroupExists = (pid: number): boolean => {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ESRCH") return false;
+    throw error;
+  }
+};
 
 describe("server lifecycle", () => {
   it("releases the catalog and the approval bridge when the gateway cannot bind", async () => {
@@ -88,7 +111,7 @@ describe("server lifecycle", () => {
           .map((line) => JSON.parse(line));
         expect(entries).toEqual([expect.objectContaining({ ev: "request", http: "GET" })]);
       } finally {
-        await server.close();
+        await server.close(unbounded());
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -98,8 +121,119 @@ describe("server lifecycle", () => {
   it("resolves close() on every call, not only the first", async () => {
     const testServer = await startTestServer(new ScriptedRuntime());
     try {
-      await expect(testServer.server.close()).resolves.toBeUndefined();
-      await expect(testServer.server.close()).resolves.toBeUndefined();
+      await expect(testServer.server.close(unbounded())).resolves.toBeUndefined();
+      await expect(testServer.server.close(unbounded())).resolves.toBeUndefined();
+    } finally {
+      await testServer.close();
+    }
+  });
+
+  it("closes the bridge and the catalog when closing the gateway fails, and every caller sees that failure", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mia-lifecycle-"));
+    try {
+      const server = await startServer({
+        profile: testProfile(dir),
+        adapter: new ScriptedRuntime(),
+        log: () => undefined,
+        env: {},
+      });
+      const bridgeUrl = server.bridge.url;
+      const closeGateway = server.gateway.close;
+      let gatewayCloses = 0;
+      const gatewayFailure = new Error("simulated gateway close failure");
+      server.gateway.close = async () => {
+        gatewayCloses += 1;
+        await closeGateway(); // release the port for real, so the failure is all this test adds
+        throw gatewayFailure;
+      };
+
+      // SIGINT, then SIGTERM before the first shutdown has finished.
+      const first = server.close(unbounded());
+      const second = server.close(unbounded());
+
+      const failure: unknown = await first.catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect(failure).toMatchObject({ errors: [gatewayFailure] });
+      await expect(second).rejects.toBe(failure);
+      expect(gatewayCloses).toBe(1);
+      expect(server.catalog.db.isOpen).toBe(false);
+      await expect(fetch(bridgeUrl, { signal: AbortSignal.timeout(5_000) })).rejects.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("shutdown mid-turn", () => {
+  it("refuses commands while it waits for the interrupted turn, and closes only once the turn has finished", async () => {
+    const runtime = new ScriptedRuntime();
+    const testServer = await startTestServer(runtime);
+    try {
+      const client = await testServer.connect("client-A");
+      await client.startConversation();
+      const next = runtime.nextTurn();
+      const taskId = mustString(ackResult(await client.submitText("hello")).task_id, "task_id");
+      const turn = await next;
+      turn.survivesInterrupt = true; // the turn ends only when the test ends it
+
+      let closed = false;
+      const closing = testServer.server.close(unbounded()).then(() => {
+        closed = true;
+      });
+      const requested = await client.waitFor("interruption_requested");
+      expect(requested.payload.task_id).toBe(taskId);
+      expect(turn.interrupted).toBe(true);
+      expect(ackError(await client.submitText("another"))).toMatchObject({
+        code: "invalid_state",
+        message: "the server is shutting down",
+      });
+      expect(closed).toBe(false);
+
+      turn.end();
+      await closing;
+      const catalog = testServer.catalog();
+      try {
+        expect(
+          catalog.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId),
+        ).toEqual({ status: "interrupted" });
+      } finally {
+        catalog.close();
+      }
+    } finally {
+      await testServer.close();
+    }
+  });
+
+  it("kills the runtime's process group and records the task interrupted before the catalog closes", async () => {
+    const testServer = await startTestServer(
+      undefined,
+      { executable: FAKE_RUNTIME },
+      FAKE_RUNTIME_ENV,
+    );
+    try {
+      const client = await testServer.connect("client-A");
+      await client.startConversation();
+      const taskId = mustString(ackResult(await client.submitText("CHANGE")).task_id, "task_id");
+      // The runtime is now blocked on the approval bridge, mid-turn.
+      await client.waitFor("approval_requested");
+      const pid = must(testServer.server.engine.task?.handle?.pid, "runtime pid");
+      expect(processGroupExists(pid)).toBe(true);
+
+      await testServer.server.close(unbounded());
+
+      expect(processGroupExists(pid)).toBe(false);
+      expect(process.getActiveResourcesInfo()).not.toContain("Timeout");
+      const catalog = testServer.catalog();
+      try {
+        expect(
+          catalog.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId),
+        ).toEqual({ status: "interrupted" });
+        expect(catalog.all<{ status: string }>("SELECT status FROM approvals")).toEqual([
+          { status: "invalidated" },
+        ]);
+      } finally {
+        catalog.close();
+      }
     } finally {
       await testServer.close();
     }

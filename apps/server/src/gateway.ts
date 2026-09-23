@@ -17,7 +17,7 @@ import {
 } from "@mia/protocol";
 import { nowIso, type CommandReply, type RecordedCommand, type RecordWriter } from "@mia/records";
 import { decodeEnvelope } from "./decode.ts";
-import type { CommandContext, CommandResult, Engine } from "./engine.ts";
+import type { CommandResult, Delivery, Engine } from "./engine.ts";
 
 export interface GatewayOptions {
   host: "127.0.0.1";
@@ -31,8 +31,8 @@ export interface GatewayOptions {
 export interface GatewayHandle {
   url: string;
   port: number;
-  /** Deliver an event to one connection; the server wires this into the engine. */
-  send: (connectionId: string, event: ServerEvent) => void;
+  /** Deliver an event to one connection; attached to the engine while the gateway is open. */
+  send: Delivery;
   close(): Promise<void>;
 }
 
@@ -99,16 +99,6 @@ const ackPayload = (commandId: string, reply: CommandReply): AckPayload =>
       disposition,
       error,
     }))
-    .exhaustive();
-
-const dispatch = (engine: Engine, ctx: CommandContext, command: ClientCommand): CommandResult =>
-  match(command)
-    .with({ type: "start_conversation" }, () => engine.startConversation(ctx))
-    .with({ type: "submit_text" }, (cmd) => engine.submitText(ctx, cmd.payload))
-    .with({ type: "approval_decision" }, (cmd) => engine.approvalDecision(ctx, cmd.payload))
-    .with({ type: "interrupt_task" }, (cmd) => engine.interruptTask(ctx, cmd.payload))
-    .with({ type: "diagnostic_snapshot" }, (cmd) => engine.diagnosticSnapshot(ctx, cmd.payload))
-    .with({ type: "heartbeat" }, (cmd) => engine.heartbeat(ctx, cmd.payload))
     .exhaustive();
 
 /**
@@ -241,8 +231,7 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
       }
       progress = { stage: "recorded", commandId: recorded.commandId };
       const reply = replyFor(
-        dispatch(
-          options.engine,
+        options.engine.handle(
           {
             connectionId: conn.id,
             clientId: command.client_id,
@@ -321,11 +310,13 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
   const address = httpServer.address();
   if (address === null || typeof address === "string")
     throw new Error("gateway is not listening on a TCP port");
+  const detachDelivery = options.engine.attachDelivery(send);
   return {
     url: `ws://${options.host}:${address.port}`,
     port: address.port,
     send,
     close: async () => {
+      detachDelivery();
       for (const conn of connections.values()) conn.socket.close(1001, "server shutting down");
       const socketsClosed = once(wss, "close");
       wss.close();

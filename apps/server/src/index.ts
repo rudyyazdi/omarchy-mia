@@ -1,3 +1,3 @@
 export type { TurnRunner } from "./engine.ts";
-export { startServer } from "./server.ts";
+export { SHUTDOWN_TURN_WAIT_MS, startServer } from "./server.ts";
 export type { MiaServer } from "./server.ts";

@@ -60,6 +60,26 @@ const EXIT_WAIT_MS = 5_000;
 /** How long the turn result waits for a pending interrupt() to settle after the process exit is observed. */
 const INTERRUPT_SETTLE_MS = 6_000;
 
+/**
+ * `promise`'s value, or `fallback` once `ms` pass. The deadline is cancelled as soon as the race settles and
+ * never holds the process open, so a server shutting down after a kill is not kept alive by it.
+ */
+const withinDeadline = async <T, F>(
+  promise: Promise<T>,
+  ms: number,
+  fallback: F,
+): Promise<T | F> => {
+  const settled = new AbortController();
+  try {
+    return await Promise.race([
+      promise,
+      sleep(ms, fallback, { signal: settled.signal, ref: false }),
+    ]);
+  } finally {
+    settled.abort();
+  }
+};
+
 /** Printed verbatim as a JSON report by the probe tool, hence snake_case. */
 export interface StaticCapabilities {
   executable_resolved: string | null;
@@ -278,7 +298,8 @@ export class ClaudeCodeAdapter {
     /** Settles (with no value) once a pending interrupt() has recorded its outcome. */
     const interruptSettled = Promise.withResolvers<undefined>();
     const done: Promise<TurnResult> = exited.then(async (exit) => {
-      if (interrupted) await Promise.race([interruptSettled.promise, sleep(INTERRUPT_SETTLE_MS)]);
+      if (interrupted)
+        await withinDeadline(interruptSettled.promise, INTERRUPT_SETTLE_MS, undefined);
       this.bridge.setHandler(null);
       emit({ type: "runtime_exit", code: exit.code, signal: exit.signal, at: now() });
       let status: TurnResult["status"];
@@ -325,10 +346,11 @@ export class ClaudeCodeAdapter {
       } catch {
         child.kill("SIGKILL");
       }
-      const outcome = await Promise.race([
+      const outcome = await withinDeadline(
         exited.then(() => "exited" as const),
-        sleep(EXIT_WAIT_MS, "timeout" as const),
-      ]);
+        EXIT_WAIT_MS,
+        "timeout" as const,
+      );
       runtimeCancellation = outcome === "exited" ? "forced_kill" : "unknown";
       if (outcome === "timeout") {
         // Do not let a stuck process hold the task in "interrupting" forever: finish the turn and report uncertainty.

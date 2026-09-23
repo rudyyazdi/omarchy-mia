@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { aborted } from "node:util";
 import { match } from "ts-pattern";
 import {
   policyFor,
@@ -22,6 +23,7 @@ import {
   errorMessage,
   redactValue,
   type ApprovalStatus,
+  type ClientCommand,
   type ClientDiagnostics,
   type Decision,
   type ErrorCode,
@@ -61,6 +63,9 @@ import {
   type InterruptionOutcome,
   type PermissionRule,
 } from "./transitions.ts";
+
+/** Sends one event to one connection. */
+export type Delivery = (connectionId: string, event: ServerEvent) => void;
 
 /** What the engine needs from an adapter; the real ClaudeCodeAdapter and scripted test substitutes both satisfy it. */
 export interface TurnRunner {
@@ -240,8 +245,10 @@ export class Engine {
   task: TaskState | null = null;
   activeConnectionId: string | null = null;
   activeClientId: string | null = null;
-  /** Delivers events to a connection; set by the gateway once it is listening. */
-  send: (connectionId: string, event: ServerEvent) => void = () => undefined;
+  /** Delivers events to a connection while one is attached (attachDelivery); until then nothing is sent. */
+  private delivery: Delivery | null = null;
+  /** Set once by shutdown: from then on every command is refused and no new task can start. */
+  private shuttingDown = false;
   /** What the transaction in progress will apply and perform once it commits. */
   private queued: CommitQueue = emptyQueue();
 
@@ -297,8 +304,8 @@ export class Engine {
 
   private deliver(event: OutgoingEvent, envelope: { id: string; sequence: number | null }): void {
     const connectionId = this.activeConnectionId;
-    if (!connectionId) return;
-    this.send(connectionId, {
+    if (!connectionId || !this.delivery) return;
+    this.delivery(connectionId, {
       protocol_version: PROTOCOL_VERSION,
       message_id: envelope.id,
       conversation_id: this.conversation?.id ?? null,
@@ -354,7 +361,32 @@ export class Engine {
     );
   }
 
+  /**
+   * Attach the function that delivers events to connections; the gateway attaches its own once it is
+   * listening and calls the returned detach when it closes. Attaching replaces any earlier delivery, and a
+   * detach removes only the delivery it attached, so a stale detach cannot silence its replacement.
+   */
+  attachDelivery(delivery: Delivery): () => void {
+    this.delivery = delivery;
+    return () => {
+      if (this.delivery === delivery) this.delivery = null;
+    };
+  }
+
   // ---------------------------------------------------------------- commands
+
+  /** Run one validated client command; once shutdown has begun, every command is refused unrun. */
+  handle(ctx: CommandContext, command: ClientCommand): CommandResult {
+    if (this.shuttingDown) return fail("invalid_state", "the server is shutting down");
+    return match(command)
+      .with({ type: "start_conversation" }, () => this.startConversation(ctx))
+      .with({ type: "submit_text" }, (cmd) => this.submitText(ctx, cmd.payload))
+      .with({ type: "approval_decision" }, (cmd) => this.approvalDecision(ctx, cmd.payload))
+      .with({ type: "interrupt_task" }, (cmd) => this.interruptTask(ctx, cmd.payload))
+      .with({ type: "diagnostic_snapshot" }, (cmd) => this.diagnosticSnapshot(ctx, cmd.payload))
+      .with({ type: "heartbeat" }, (cmd) => this.heartbeat(ctx, cmd.payload))
+      .exhaustive();
+  }
 
   startConversation(ctx: CommandContext): CommandResult {
     if (this.task)
@@ -662,7 +694,11 @@ export class Engine {
   ): CommandResult {
     const addressed = this.addressTask(ctx, payload);
     if (addressed.kind !== "active") return addressed.result;
-    const { task } = addressed;
+    return this.interrupt(addressed.task);
+  }
+
+  /** Interrupt the active task through the recorded path, whoever asked: a client or shutdown. */
+  private interrupt(task: TaskState): CommandResult {
     const outcome = decideInterruption({
       taskStatus: task.status,
       conversationEpoch: this.activeConversation.epoch,
@@ -1648,7 +1684,29 @@ export class Engine {
     }
   }
 
-  async waitForIdle(): Promise<void> {
-    await this.task?.finished;
+  /**
+   * Stop for good: refuse every later command, interrupt the active task exactly as interrupt_task does (the
+   * gate closes, pending approvals are invalidated, the outcome is recorded), then wait for the task to
+   * finish or for `turnWait` to abort. It never rejects. When the interruption cannot be recorded the
+   * runtime is killed anyway, because a runtime left running outlives the server and can keep calling tools.
+   * A task still running when `turnWait` aborts finishes, if ever, into a closed catalog and stays unrecorded.
+   */
+  async shutdown(turnWait: AbortSignal): Promise<void> {
+    this.shuttingDown = true;
+    const task = this.task;
+    if (!task) return;
+    const interruption = this.interrupt(task);
+    if (!interruption.ok) {
+      this.deps.log(`shutdown: ${interruption.message}; killing the runtime anyway`);
+      task.handle
+        ?.interrupt()
+        .catch((error: unknown) => this.deps.log(`interrupt failed: ${errorMessage(error)}`));
+    }
+    const outcome = await Promise.race([
+      task.finished.then(() => "finished" as const),
+      aborted(turnWait, task).then(() => "timed_out" as const),
+    ]);
+    if (outcome === "timed_out")
+      this.deps.log(`shutdown: task ${task.id} did not finish in time; its outcome is unrecorded`);
   }
 }
