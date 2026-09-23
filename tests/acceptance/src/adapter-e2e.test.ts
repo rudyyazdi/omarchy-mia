@@ -140,9 +140,8 @@ describe("real adapter against a fake runtime process", () => {
     const { result, events } = await run("MALFORMED", () => ({ behavior: "allow" }));
     expect(result.status).toBe("completed");
     const malformed = events.find((event) => event.type === "malformed_event");
-    expect(malformed && malformed.type === "malformed_event" && JSON.parse(malformed.raw)).toEqual(
-      expect.objectContaining({ type: "assistant", api_key: REDACTED }),
-    );
+    if (malformed?.type !== "malformed_event") throw new Error("no malformed_event emitted");
+    expect(JSON.parse(malformed.raw)).toMatchObject({ type: "assistant", api_key: REDACTED });
     const transcript = readFileSync(result.streamLogPath, "utf8");
     expect(transcript).toContain(`"api_key":"${REDACTED}"`);
     expect(transcript).not.toContain("fake-short-credential");

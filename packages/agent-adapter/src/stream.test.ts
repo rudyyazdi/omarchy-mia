@@ -50,6 +50,7 @@ describe("runtime stream framing", () => {
   ])("rejects malformed runtime messages: %s", (raw) => {
     expect(parseStreamLine(raw)).toEqual({
       ok: false,
+      reason: "invalid_schema",
       json: JSON.parse(raw),
       raw,
       error: expect.stringContaining("malformed runtime message:"),
@@ -59,6 +60,7 @@ describe("runtime stream framing", () => {
     expect(parseStreamLine(" \r\n")).toBeNull();
     expect(parseStreamLine(" { ")).toEqual({
       ok: false,
+      reason: "invalid_json",
       raw: "{",
       error: expect.stringContaining("invalid JSON:"),
     });
@@ -83,9 +85,30 @@ describe("redactLine", () => {
     });
   });
 
-  it("redacts a well-formed line by key", () => {
-    const line = '{"type":"future_event","password":"short"}';
-    expect(JSON.parse(redacted(line))).toEqual({ type: "future_event", password: REDACTED });
+  it.each([
+    ['{"type":"future_event","password":"short"}', { type: "future_event", password: REDACTED }],
+    [
+      '{"type":"result","subtype":"success","is_error":false,"session_id":"s","secret":"short"}',
+      { type: "result", subtype: "success", is_error: false, session_id: "s", secret: REDACTED },
+    ],
+  ])("redacts a well-formed line by key: %s", (line, expected) => {
+    expect(parseStreamLine(line)?.ok).toBe(true);
+    expect(JSON.parse(redacted(line))).toEqual(expected);
+  });
+
+  it("redacts secret-shaped keys of a schema-invalid line", () => {
+    expect(redacted('{"type":"assistant","headers":{"sk-ant-abcdefghijklmnop":1}}')).toBe(
+      `{"type":"assistant","headers":{"${REDACTED}":1}}`,
+    );
+  });
+
+  it.each([
+    ["null", "null"],
+    ["42", "42"],
+    ['"sk-ant-abcdefghijklmnop"', `"${REDACTED}"`],
+    ['[{"api_key":"short"}]', `[{"api_key":"${REDACTED}"}]`],
+  ])("redacts a schema-invalid JSON value that is not an object: %s", (line, expected) => {
+    expect(redacted(line)).toBe(expected);
   });
 
   it("redacts a line that is not JSON by value", () => {

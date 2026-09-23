@@ -38,18 +38,21 @@ const walk = (value: unknown, key: string | undefined): unknown => {
   if (key !== undefined && isSensitiveKey(key) && !isTokenCount(key, value)) return REDACTED;
   if (typeof value === "string") return redactString(value);
   if (Array.isArray(value)) return value.map((item) => walk(item, undefined));
-  if (isRecord(value)) {
-    const out: Record<string, unknown> = {};
-    for (const [entryKey, entryValue] of Object.entries(value))
-      out[entryKey] = walk(entryValue, entryKey);
-    return out;
-  }
+  // Keys are scanned too: a secret can arrive as a key (a header map, a per-token cache). fromEntries
+  // defines own properties, so a "__proto__" key stays evidence instead of replacing the prototype.
+  if (isRecord(value))
+    return Object.fromEntries(
+      Object.entries(value).map(([entryKey, entryValue]) => [
+        redactString(entryKey),
+        walk(entryValue, entryKey),
+      ]),
+    );
   return value;
 };
 
 /**
  * Recursively redact a JSON-like value. Keys that look sensitive are replaced whole, except a number
- * under a `…tokens` key, which is a count; strings are scanned for secret-shaped values. Returns a new value; input is not mutated. The shape is
- * not preserved (a sensitive key replaces its whole subtree), so the result is unknown.
+ * under a `…tokens` key, which is a count; strings and keys are scanned for secret-shaped values. Returns a new value; input is not mutated. The shape is
+ * not preserved (a sensitive key replaces its whole subtree, and keys that redact alike collapse into one), so the result is unknown.
  */
 export const redactValue = (value: unknown): unknown => walk(value, undefined);

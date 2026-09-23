@@ -54,4 +54,13 @@ describe("redactValue", () => {
       secret: REDACTED,
     });
   });
+
+  it("redacts secret-shaped keys and keeps a __proto__ key as data", () => {
+    const redacted = redactValue(
+      JSON.parse('{"headers":{"sk-ant-abcdefghijklmnop":1},"__proto__":{"text":"kept"}}'),
+    );
+    expect(JSON.stringify(redacted)).toBe(
+      `{"headers":{"${REDACTED}":1},"__proto__":{"text":"kept"}}`,
+    );
+  });
 });

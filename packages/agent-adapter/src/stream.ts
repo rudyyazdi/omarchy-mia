@@ -121,13 +121,13 @@ export type InitMessage = z.infer<typeof InitMessageSchema>;
 export type ResultMessage = z.infer<typeof ResultMessageSchema>;
 
 /**
- * `json` is present exactly when the line was valid JSON, including a line that failed its schema, so
+ * Every line that was valid JSON carries its parsed `json`, including one that failed its schema, so
  * that line can still be redacted by key rather than only by value.
  */
 export type ParsedLine =
   | { ok: true; message: RuntimeMessage; json: unknown; raw: string }
-  | { ok: false; json: unknown; raw: string; error: string }
-  | { ok: false; raw: string; error: string };
+  | { ok: false; reason: "invalid_schema"; json: unknown; raw: string; error: string }
+  | { ok: false; reason: "invalid_json"; raw: string; error: string };
 
 export const parseStreamLine = (line: string): ParsedLine | null => {
   const trimmed = line.trim();
@@ -138,6 +138,7 @@ export const parseStreamLine = (line: string): ParsedLine | null => {
   } catch (error) {
     return {
       ok: false,
+      reason: "invalid_json",
       raw: trimmed,
       error: `invalid JSON: ${errorMessage(error)}`,
     };
@@ -155,6 +156,7 @@ export const parseStreamLine = (line: string): ParsedLine | null => {
     };
   return {
     ok: false,
+    reason: "invalid_schema",
     json,
     raw: trimmed,
     error: `malformed runtime message: ${parsed.error.message.slice(0, 300)}`,
@@ -164,10 +166,13 @@ export const parseStreamLine = (line: string): ParsedLine | null => {
 /**
  * The line as it may be retained or shown: a line that parsed as JSON is redacted by key and by value,
  * even when it failed its schema, because a credential under a sensitive key need not look like a secret.
- * Only a line that is not JSON falls back to value redaction.
+ * Only a line that is not JSON falls back to value redaction. The redacted form of a JSON line is
+ * re-serialised, not verbatim: duplicate keys collapse and numbers beyond double precision round.
  */
 export const redactLine = (parsed: ParsedLine): string =>
-  "json" in parsed ? JSON.stringify(redactValue(parsed.json)) : redactString(parsed.raw);
+  !parsed.ok && parsed.reason === "invalid_json"
+    ? redactString(parsed.raw)
+    : JSON.stringify(redactValue(parsed.json));
 
 /** Incremental newline-delimited JSON splitter. */
 export class LineSplitter {
