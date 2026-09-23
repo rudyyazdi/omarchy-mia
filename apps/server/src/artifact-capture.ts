@@ -40,7 +40,8 @@ export type NotRetained = {
   reason: string;
 };
 
-export type Eligibility = { status: "eligible"; resolvedPath: string } | NotRetained;
+export type Eligibility =
+  { status: "eligible"; resolvedPath: string; byteSize: number } | NotRetained;
 
 export type Capture = { status: Extract<CaptureStatus, "retained">; bytes: Buffer } | NotRetained;
 
@@ -95,8 +96,11 @@ export const decideEligibility = (facts: PathFacts, policy: CapturePolicy): Elig
   if (!facts.regularFile)
     return { status: "failed", reason: "declared path is not a regular file" };
   if (facts.byteSize > policy.maxBytes)
-    return { status: "failed", reason: `declared file exceeds ${policy.maxBytes} bytes` };
-  return { status: "eligible", resolvedPath: facts.resolvedPath };
+    return {
+      status: "failed",
+      reason: `declared file is ${facts.byteSize} bytes, over the ${policy.maxBytes}-byte limit`,
+    };
+  return { status: "eligible", resolvedPath: facts.resolvedPath, byteSize: facts.byteSize };
 };
 
 /** Retains the bytes unless the declaration carries a digest they do not match; an empty digest declares none. */

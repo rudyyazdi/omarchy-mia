@@ -1,9 +1,11 @@
 import { execFileSync } from "node:child_process";
 import {
   mkdirSync,
+  fstatSync,
   mkdtempDisposableSync,
-  readFileSync,
+  openSync,
   realpathSync,
+  statSync,
   symlinkSync,
   truncateSync,
   writeFileSync,
@@ -18,7 +20,8 @@ vi.mock("node:fs", async (importOriginal) => {
   const filesystem = await importOriginal<typeof import("node:fs")>();
   return {
     ...filesystem,
-    readFileSync: vi.fn(filesystem.readFileSync),
+    fstatSync: vi.fn(filesystem.fstatSync),
+    openSync: vi.fn(filesystem.openSync),
     realpathSync: vi.fn(filesystem.realpathSync),
   };
 });
@@ -51,21 +54,21 @@ describe("collectArtifact", () => {
     expect(collectArtifact({ path: join(dirs.out, "a.txt") }, [alias]).status).toBe("retained");
   });
 
-  it("never reads a file outside the output directory, directly or through a symlink", () => {
+  it("never opens a file outside the output directory, directly or through a symlink", () => {
     using dirs = workspace();
     const secret = join(dirs.root, "secret.txt");
     writeFileSync(secret, "private");
     symlinkSync(secret, join(dirs.out, "escape.txt"));
     for (const path of [secret, join(dirs.out, "escape.txt")])
       expect(collectArtifact({ path }, [dirs.out]).status).toBe("external_only");
-    expect(readFileSync).not.toHaveBeenCalled();
+    expect(openSync).not.toHaveBeenCalled();
   });
 
   it("refuses a relative path without touching the filesystem", () => {
     using dirs = workspace();
     expect(collectArtifact({ path: "out/a.txt" }, [dirs.out]).status).toBe("failed");
     expect(realpathSync).not.toHaveBeenCalled();
-    expect(readFileSync).not.toHaveBeenCalled();
+    expect(openSync).not.toHaveBeenCalled();
   });
 
   it("reports a dangling symlink as missing without reading", () => {
@@ -74,7 +77,7 @@ describe("collectArtifact", () => {
     expect(collectArtifact({ path: join(dirs.out, "dangling.txt") }, [dirs.out]).status).toBe(
       "missing",
     );
-    expect(readFileSync).not.toHaveBeenCalled();
+    expect(openSync).not.toHaveBeenCalled();
   });
 
   it("treats an output directory that does not exist as containing nothing", () => {
@@ -89,8 +92,26 @@ describe("collectArtifact", () => {
     const large = join(dirs.out, "large.bin");
     writeFileSync(large, "");
     truncateSync(large, MAX_ARTIFACT_BYTES + 1); // sparse: no bytes written to disk
-    expect(collectArtifact({ path: large }, [dirs.out]).status).toBe("failed");
-    expect(readFileSync).not.toHaveBeenCalled();
+    expect(collectArtifact({ path: large }, [dirs.out])).toEqual({
+      status: "failed",
+      reason: `declared file is ${MAX_ARTIFACT_BYTES + 1} bytes, over the ${MAX_ARTIFACT_BYTES}-byte limit`,
+    });
+    expect(openSync).not.toHaveBeenCalled();
+  });
+
+  it("fails a file that grew after it was admitted instead of reading past its size", () => {
+    using dirs = workspace();
+    const file = join(dirs.out, "growing.txt");
+    writeFileSync(file, "grown");
+    vi.mocked(fstatSync).mockImplementationOnce(() => {
+      const stats = statSync(file);
+      stats.size = 2; // as admitted, before the tool appended to it
+      return stats;
+    });
+    expect(collectArtifact({ path: file }, [dirs.out])).toEqual({
+      status: "failed",
+      reason: "declared file changed during collection",
+    });
   });
 
   // Opening a FIFO blocks until a writer appears, so reading one would hang the server.
@@ -103,6 +124,6 @@ describe("collectArtifact", () => {
         status: "failed",
         reason: "declared path is not a regular file",
       });
-    expect(readFileSync).not.toHaveBeenCalled();
+    expect(openSync).not.toHaveBeenCalled();
   });
 });
