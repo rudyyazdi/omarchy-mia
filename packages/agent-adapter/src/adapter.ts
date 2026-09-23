@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, constants } from "node:fs";
-import { open } from "node:fs/promises";
+import { mkdir, open, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { match } from "ts-pattern";
 import { z } from "zod";
@@ -9,7 +9,7 @@ import type { ExecutionStatus } from "@mia/records";
 import type { ApprovalBridge, PermissionHandler } from "./bridge.ts";
 import type { RuntimeConfig } from "./config.ts";
 import { untilAborted, withinDeadline } from "./deadline.ts";
-import { prepareLaunch, runtimeEnvironment, type LaunchPlan } from "./launch.ts";
+import { prepareLaunch, runtimeEnvironment, type LaunchPlan, type LaunchSetup } from "./launch.ts";
 import { resolveExecutable } from "./resolve-executable.ts";
 import { ClaudeTranslator } from "./claude-translate.ts";
 import type { RuntimeEvent, RuntimeInit, TurnSummary } from "./runtime-events.ts";
@@ -48,11 +48,13 @@ export interface TurnResult {
 }
 
 export interface TurnHandle {
+  /** The runtime's process id; undefined until the launch files are written and the process has spawned. */
   readonly pid: number | undefined;
   readonly result: Promise<TurnResult>;
   /**
    * Kill the runtime process group (SIGKILL; see the note on interrupt below). Resolves once exit is observed, or
-   * with "unknown" after EXIT_WAIT_MS; in that case the turn is finished anyway so the task cannot hang.
+   * with "unknown" after EXIT_WAIT_MS; in that case the turn is finished anyway so the task cannot hang. Before the
+   * runtime has spawned it resolves "not_needed" at once, and the runtime is never started.
    */
   interrupt(): Promise<RuntimeCancellation>;
 }
@@ -162,6 +164,11 @@ export class ClaudeCodeAdapter {
     private readonly env: NodeJS.ProcessEnv,
   ) {}
 
+  /**
+   * The handle exists from the start, while the launch files are still being written, so an interruption during
+   * that write reaches the turn: the runtime is then never spawned, and the turn ends killed. A write that fails
+   * ends the turn failed without spawning.
+   */
   submitTurn(options: TurnOptions): TurnHandle {
     const launch = prepareLaunch({
       config: this.config,
@@ -177,6 +184,49 @@ export class ClaudeCodeAdapter {
       options.runtimeDir,
       `turn-${String(options.turnIndex).padStart(3, "0")}.stream.jsonl`,
     );
+    let started: TurnHandle | null = null;
+    let cancelled = false;
+    const notStarted = (error: string | null): TurnResult => ({
+      status: cancelled ? "killed" : "failed",
+      summary: null,
+      exit: null,
+      error,
+      streamLogPath,
+      hookEvidencePath: launch.files.hookEvidence,
+      launch: launch.description,
+      init: null,
+      interrupted: cancelled,
+      runtimeCancellation: "not_needed",
+    });
+    const result = writeLaunchFiles(launch.setup).then(
+      () => {
+        if (cancelled) return notStarted(null);
+        started = this.startRuntime({ options, launch, streamLogPath });
+        return started.result;
+      },
+      (error: unknown) => notStarted(`could not write the launch files: ${errorMessage(error)}`),
+    );
+    return {
+      // eslint-disable-next-line no-restricted-syntax -- a getter, so pid reads the runtime spawned after this returns
+      get pid() {
+        return started?.pid;
+      },
+      result,
+      interrupt: async () => {
+        if (started) return started.interrupt();
+        cancelled = true;
+        return "not_needed";
+      },
+    };
+  }
+
+  /** Spawns the runtime for a launch whose files are written, and follows it to the end of the turn. */
+  private startRuntime(input: {
+    options: TurnOptions;
+    launch: LaunchPlan;
+    streamLogPath: string;
+  }): TurnHandle {
+    const { options, launch, streamLogPath } = input;
     const now = () => new Date().toISOString();
     const emit = options.onEvent;
 
@@ -375,6 +425,13 @@ export class ClaudeCodeAdapter {
     return { pid: child.pid, result: done, interrupt };
   }
 }
+
+/** Creates the directories and files a launch plan's invocation refers to (see `prepareLaunch`), owner-only. */
+export const writeLaunchFiles = async (setup: LaunchSetup): Promise<void> => {
+  for (const directory of setup.directories)
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+  await Promise.all(setup.files.map((file) => writeFile(file.path, file.content, { mode: 0o600 })));
+};
 
 /** One line of the hook evidence file written by hook-capture.mjs: a JSON object of runtime-reported fields. */
 const HookEvidenceRecordSchema = z.record(z.string(), z.unknown());

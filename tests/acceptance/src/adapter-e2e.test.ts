@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -188,6 +188,50 @@ describe("real adapter against a fake runtime process", () => {
         text: expect.stringContaining("[mia] stopped reading runtime output"),
       }),
     );
+  });
+
+  it("never starts the runtime when interrupted before the launch files are written", async () => {
+    await harness.reset();
+    const { result, events, requests } = await run(
+      "CHANGE",
+      () => ({ behavior: "allow" }),
+      // Runs as soon as submitTurn returns, while the launch files are still being written.
+      async (handle) => {
+        expect(handle.pid).toBeUndefined();
+        expect(await handle.interrupt()).toBe("not_needed");
+      },
+    );
+    expect(result).toMatchObject({
+      status: "killed",
+      interrupted: true,
+      runtimeCancellation: "not_needed",
+      exit: null,
+      error: null,
+    });
+    expect(events).toEqual([]);
+    expect(requests).toEqual([]);
+    expect((await harness.state()).ledger).toEqual([]);
+  });
+
+  it("ends the turn failed, without starting the runtime, when the launch files cannot be written", async () => {
+    const notADirectory = join(dir, "launch-blocker");
+    writeFileSync(notADirectory, "");
+    const events: RuntimeEvent[] = [];
+    const handle = adapter().submitTurn({
+      ...turnOptions("READ", {
+        permissionHandler: async () => ({ behavior: "allow" }),
+        onEvent: (event) => events.push(event),
+      }),
+      runtimeDir: join(notADirectory, "runtime"),
+    });
+    expect(await handle.result).toMatchObject({
+      status: "failed",
+      interrupted: false,
+      runtimeCancellation: "not_needed",
+      exit: null,
+      error: expect.stringContaining("could not write the launch files"),
+    });
+    expect(events).toEqual([]);
   });
 
   it("reports a runtime crash as a failed turn with no result message", async () => {
