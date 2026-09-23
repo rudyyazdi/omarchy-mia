@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { match, P } from "ts-pattern";
 import WebSocket from "ws";
 import {
+  IdSchema,
   PROTOCOL_VERSION,
   ServerEventSchema,
   type AckPayload,
@@ -38,6 +39,19 @@ export interface SendOptions extends Cancellable {
   messageId?: string;
 }
 
+/**
+ * Why `value` cannot travel as the envelope's `field`, or null when it can. The server acknowledges a command whose
+ * id it cannot carry as `unknown`, which no waiter is keyed on, so such an id is refused here before it is sent.
+ */
+const invalidId = (field: "message_id" | "client_id", value: string): Error | null => {
+  const parsed = IdSchema.safeParse(value);
+  return parsed.success
+    ? null
+    : new Error(
+        `invalid ${field}: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
+      );
+};
+
 const isEventOf =
   <T extends ServerEventType>(type: T) =>
   (event: ServerEvent): event is ServerEventOf<T> =>
@@ -49,7 +63,8 @@ const isEventOf =
  * reply marked `duplicate` instead of running it again. The server keys that on `clientId`, which an instance
  * keeps across `connect()` calls; a new instance (after a restart, say) without an explicit `clientId` gets
  * a fresh one, so dedupe does not survive it. An abort while an operation is still waiting rejects it with
- * the signal's reason.
+ * the signal's reason. An id the protocol cannot carry is the caller's mistake: the constructor throws on such a
+ * `clientId`, and `send` rejects such a `messageId` before it checks the connection or the signal.
  */
 export class MiaClient extends EventEmitter {
   readonly clientId: string;
@@ -70,6 +85,8 @@ export class MiaClient extends EventEmitter {
   constructor(readonly options: MiaClientOptions) {
     super();
     this.clientId = options.clientId ?? `client_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    const invalid = invalidId("client_id", this.clientId);
+    if (invalid) throw invalid;
   }
 
   static readSecret(path: string): string {
@@ -170,6 +187,8 @@ export class MiaClient extends EventEmitter {
     payload: Extract<ClientCommand, { type: T }>["payload"],
     { messageId = `cmd_${randomUUID()}`, signal }: SendOptions = {},
   ): Promise<AckPayload> {
+    const invalid = invalidId("message_id", messageId);
+    if (invalid) return Promise.reject(invalid);
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN)
       return Promise.reject(new Error("not connected"));
