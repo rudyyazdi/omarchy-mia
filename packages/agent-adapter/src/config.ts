@@ -71,18 +71,22 @@ export class ConfigurationError extends Error {
   override readonly name = "ConfigurationError";
 }
 
-/** Validate policy against wiring: every policy entry must name a configured MCP server. */
+/**
+ * Validate policy against wiring: every policy entry must name a configured MCP server.
+ * Server lookups check own keys only: `in` would also find Object.prototype names such as
+ * `constructor` and accept a policy for a server nobody configured.
+ */
 export const validateRuntimeConfig = (config: RuntimeConfig): void => {
   for (const identity of Object.keys(config.toolPolicy)) {
     const match = /^mcp__([A-Za-z0-9_-]+)__/.exec(identity);
     const server = match?.[1];
-    if (!server || !(server in config.mcpServers)) {
+    if (!server || !Object.hasOwn(config.mcpServers, server)) {
       throw new ConfigurationError(
         `toolPolicy names ${identity} but no MCP server "${server}" is configured`,
       );
     }
   }
-  if ("mia_approval" in config.mcpServers) {
+  if (Object.hasOwn(config.mcpServers, "mia_approval")) {
     throw new ConfigurationError(
       `mcpServers may not define "mia_approval"; that name is reserved for the approval bridge`,
     );
