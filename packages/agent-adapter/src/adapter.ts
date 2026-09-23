@@ -447,24 +447,33 @@ export const boundedRuntimeFileReader = ({
   read: RuntimeFileReadStart;
   maxStuckReads: number;
 }): RuntimeFileReader => {
-  const stuckReads = new Set<Promise<RuntimeFileRead>>();
-  const abandon = (started: Promise<RuntimeFileRead>): void => {
-    stuckReads.add(started);
-    const release = (): void => {
-      stuckReads.delete(started);
-    };
-    // `release` cannot throw, so this settles without rejecting.
-    void started.then(release, release);
+  let stuckReads = 0;
+  const release = (): void => {
+    stuckReads -= 1;
   };
   return async (path, { signal } = {}) => {
-    if (stuckReads.size >= maxStuckReads)
+    // A signal that has already aborted reports its own reason, which `untilAborted` gives without starting.
+    if (!signal?.aborted && stuckReads >= maxStuckReads)
       return { status: "unreadable", reason: "an earlier abandoned read is still blocked" };
     let started: Promise<RuntimeFileRead> | null = null;
+    let settled = false;
+    const markSettled = (): void => {
+      settled = true;
+    };
     return untilAborted(
-      () => (started = read(path, signal)),
+      () => {
+        started = read(path, signal);
+        // Neither handler can throw, so these chains never reject.
+        void started.then(markSettled, markSettled);
+        return started;
+      },
       signal,
       (reason) => {
-        if (started) abandon(started);
+        // An abort landing after the read settled, before the race observed it, leaves nothing blocked to count.
+        if (started && !settled) {
+          stuckReads += 1;
+          void started.then(release, release);
+        }
         return { status: "unreadable", reason: abortReason(reason) };
       },
     );

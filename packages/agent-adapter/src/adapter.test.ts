@@ -85,12 +85,39 @@ describe("boundedRuntimeFileReader", () => {
     await abandonRead(reader, "stuck");
     expect(await reader("refused")).toEqual(blocked);
     const [stuck] = reads.pending;
-    stuck?.resolve({ status: "absent" });
-    await stuck?.promise;
+    if (!stuck) throw new Error("the stuck read never started");
+    stuck.resolve({ status: "absent" });
+    await stuck.promise;
     const next = reader("next");
-    reads.pending[1]?.resolve({ status: "read", bytes: Buffer.from("{}\n") });
+    const [, pendingNext] = reads.pending;
+    if (!pendingNext) throw new Error("the next read never started");
+    pendingNext.resolve({ status: "read", bytes: Buffer.from("{}\n") });
     expect(await next).toEqual({ status: "read", bytes: Buffer.from("{}\n") });
     expect(reads.started).toEqual(["stuck", "next"]);
+  });
+
+  it("frees an abandoned read's slot when it finally rejects", async () => {
+    const reads = heldReads();
+    const reader = boundedRuntimeFileReader({ read: reads.read, maxStuckReads: 1 });
+    await abandonRead(reader, "stuck");
+    const [stuck] = reads.pending;
+    if (!stuck) throw new Error("the stuck read never started");
+    stuck.reject(new Error("EIO"));
+    await expect(stuck.promise).rejects.toThrow("EIO");
+    await abandonRead(reader, "next");
+    expect(reads.started).toEqual(["stuck", "next"]);
+  });
+
+  it("reports an already-aborted signal's own reason even at the cap", async () => {
+    const reads = heldReads();
+    const reader = boundedRuntimeFileReader({ read: reads.read, maxStuckReads: 1 });
+    await abandonRead(reader, "stuck");
+    const signal = AbortSignal.abort(new Error("abandoned at shutdown"));
+    expect(await reader("late", { signal })).toEqual({
+      status: "unreadable",
+      reason: "abandoned at shutdown",
+    });
+    expect(reads.started).toEqual(["stuck"]);
   });
 
   it("counts only abandoned reads, not reads that return in time", async () => {
