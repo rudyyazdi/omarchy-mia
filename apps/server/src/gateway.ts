@@ -10,9 +10,9 @@ import {
   LIMITS,
   PROTOCOL_VERSION,
   registerSecret,
+  type AckError,
+  type AckPayload,
   type ClientCommand,
-  type ErrorCode,
-  type EventPayload,
   type ServerEvent,
 } from "@mia/protocol";
 import { nowIso, type CommandReply, type RecordedCommand, type RecordWriter } from "@mia/records";
@@ -61,14 +61,6 @@ interface ConnectionState {
   opened: boolean;
 }
 
-interface AckReply {
-  commandId: string;
-  disposition: EventPayload<"ack">["disposition"];
-  error?: { code: ErrorCode; message: string };
-  result?: Record<string, unknown>;
-  duplicate?: true;
-}
-
 /**
  * The reply to a command that was recorded but did not finish: handling threw after the record committed, or a
  * duplicate found it still `received` (dispatch is synchronous, so that means the original never finished).
@@ -95,13 +87,15 @@ const replyFor = (result: CommandResult): CommandReply =>
     ? { disposition: "accepted", result: result.result ?? null }
     : { disposition: "rejected", error: { code: result.code, message: result.message } };
 
-const ackFields = (reply: CommandReply): Omit<AckReply, "commandId"> =>
+const ackPayload = (commandId: string, reply: CommandReply): AckPayload =>
   match(reply)
-    .with({ disposition: "accepted" }, ({ result }): Omit<AckReply, "commandId"> => ({
+    .with({ disposition: "accepted" }, ({ result }): AckPayload => ({
+      command_id: commandId,
       disposition: "accepted",
       ...(result === null ? {} : { result }),
     }))
-    .with({ disposition: P.not("accepted") }, ({ disposition, error }) => ({
+    .with({ disposition: P.not("accepted") }, ({ disposition, error }): AckPayload => ({
+      command_id: commandId,
       disposition,
       error,
     }))
@@ -158,8 +152,7 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
     conn.socket.send(JSON.stringify(event));
   };
 
-  const ack = (conn: ConnectionState, reply: AckReply) => {
-    const { commandId, ...rest } = reply;
+  const ack = (conn: ConnectionState, payload: AckPayload) => {
     const event: ServerEvent = {
       protocol_version: PROTOCOL_VERSION,
       message_id: randomUUID(),
@@ -167,17 +160,13 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
       conversation_id: options.engine.conversation?.id ?? null,
       sequence: null,
       server_time: nowIso(),
-      payload: { command_id: commandId, ...rest },
+      payload,
     };
     if (conn.socket.readyState === conn.socket.OPEN) conn.socket.send(JSON.stringify(event));
   };
 
-  const rejectRaw = (
-    conn: ConnectionState,
-    commandId: string,
-    error: { code: ErrorCode; message: string },
-  ) => {
-    ack(conn, { commandId, disposition: "rejected", error });
+  const rejectRaw = (conn: ConnectionState, commandId: string, error: AckError) => {
+    ack(conn, { command_id: commandId, disposition: "rejected", error });
   };
 
   /** Store a recorded command as failed; a failure to store it is logged, since the reply says the same. */
@@ -203,11 +192,11 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
         }),
       )
       .with({ kind: "duplicate" }, ({ reply }) =>
-        ack(conn, { commandId, ...ackFields(reply), duplicate: true }),
+        ack(conn, { ...ackPayload(commandId, reply), duplicate: true }),
       )
       .with({ kind: "unfinished" }, (unfinished) => {
         settleFailed(unfinished.commandId);
-        ack(conn, { commandId, ...ackFields(FAILED_AFTER_RECORD), duplicate: true });
+        ack(conn, { ...ackPayload(commandId, FAILED_AFTER_RECORD), duplicate: true });
       })
       .exhaustive();
 
@@ -265,7 +254,7 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
       );
       options.writer.finishCommand(recorded.commandId, reply);
       progress = { stage: "answered" };
-      ack(conn, { commandId, ...ackFields(reply) });
+      ack(conn, ackPayload(commandId, reply));
     } catch (error) {
       options.log(
         `command handling failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
@@ -279,7 +268,7 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
         )
         .with({ stage: "recorded" }, (recorded) => {
           settleFailed(recorded.commandId);
-          ack(conn, { commandId, ...ackFields(FAILED_AFTER_RECORD) });
+          ack(conn, ackPayload(commandId, FAILED_AFTER_RECORD));
         })
         // A second ack would contradict the first; a resend is answered from the record.
         .with({ stage: "answered" }, () => undefined)

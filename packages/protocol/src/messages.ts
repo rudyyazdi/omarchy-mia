@@ -158,15 +158,33 @@ export const ToolCallStatusSchema = z.enum([
 ]);
 export type ToolCallStatus = z.infer<typeof ToolCallStatusSchema>;
 
+/** Set when this message_id was already recorded for the client: the ack repeats the stored reply. */
+const ackDuplicate = z.literal(true).optional();
+const AckErrorSchema = z.object({ code: ErrorCodeSchema, message: z.string() });
+export type AckError = z.infer<typeof AckErrorSchema>;
+
 const eventPayloads = {
-  ack: z.object({
-    command_id: id,
-    disposition: AckDispositionSchema,
-    error: z.object({ code: ErrorCodeSchema, message: z.string() }).optional(),
-    result: z.record(z.string(), z.unknown()).optional(),
-    /** Set when this message_id was already recorded for the client: the ack repeats the stored reply. */
-    duplicate: z.literal(true).optional(),
-  }),
+  /**
+   * An `accepted` ack may carry a result and never an error; any other disposition always carries its error and
+   * never a result. The other variant's field is refused by name rather than by making the objects strict, so the
+   * ack, like every other payload, still tolerates a field added later.
+   */
+  ack: z.discriminatedUnion("disposition", [
+    z.object({
+      command_id: id,
+      disposition: z.literal("accepted"),
+      result: z.record(z.string(), z.unknown()).optional(),
+      error: z.never().optional(),
+      duplicate: ackDuplicate,
+    }),
+    z.object({
+      command_id: id,
+      disposition: ErrorDispositionSchema,
+      error: AckErrorSchema,
+      result: z.never().optional(),
+      duplicate: ackDuplicate,
+    }),
+  ]),
   conversation_started: z.object({
     conversation_id: id,
     started_at: isoTime,
@@ -276,3 +294,7 @@ export const ServerEventSchema = z.discriminatedUnion("type", [
 export type ServerEvent = z.infer<typeof ServerEventSchema>;
 export type ServerEventOf<T extends ServerEventType> = Extract<ServerEvent, { type: T }>;
 export type EventPayload<T extends ServerEventType> = z.infer<(typeof eventPayloads)[T]>;
+export type AckPayload = EventPayload<"ack">;
+export type AcceptedAck = Extract<AckPayload, { disposition: "accepted" }>;
+/** An ack for a command that was rejected or failed: it always carries the error. */
+export type RefusedAck = Exclude<AckPayload, AcceptedAck>;

@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
+import { match, P } from "ts-pattern";
 import WebSocket from "ws";
 import {
   PROTOCOL_VERSION,
   ServerEventSchema,
+  type AckPayload,
   type Cancellable,
   type ClientCommand,
   type ClientDiagnostics,
@@ -21,7 +23,15 @@ export interface MiaClientOptions {
   build: ClientDiagnostics["build"];
 }
 
-export type AckPayload = ServerEventOf<"ack">["payload"];
+/** An ack as a person reads it: the disposition, and the error when the command was refused. */
+export const describeAck = (ack: AckPayload): string =>
+  match(ack)
+    .with({ disposition: "accepted" }, () => "accepted")
+    .with(
+      { disposition: P.not("accepted") },
+      ({ disposition, error }) => `${disposition}: ${error.code}: ${error.message}`,
+    )
+    .exhaustive();
 
 /** A command's options; a resend passes the original command's `messageId`. */
 export interface SendOptions extends Cancellable {
@@ -216,10 +226,7 @@ export class MiaClient extends EventEmitter {
 
   async startConversation({ signal }: Cancellable = {}): Promise<string> {
     const ack = await this.send("start_conversation", {}, { signal });
-    if (ack.disposition !== "accepted")
-      throw new Error(
-        `start_conversation ${ack.disposition}: ${ack.error?.code}: ${ack.error?.message}`,
-      );
+    if (ack.disposition !== "accepted") throw new Error(`start_conversation ${describeAck(ack)}`);
     const fromResult = ack.result?.conversation_id;
     const id = typeof fromResult === "string" ? fromResult : this.conversationId;
     if (!id) throw new Error("server did not return a conversation id");

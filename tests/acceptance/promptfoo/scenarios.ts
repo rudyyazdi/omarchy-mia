@@ -5,7 +5,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
 import { FixtureHarness, type FixtureState } from "@mia/controlled-mcp";
-import { MiaClient, type AckPayload } from "@mia/text-client";
+import { describeAck, MiaClient, type AckPayload } from "@mia/text-client";
 import type { ServerEvent } from "@mia/protocol";
 
 export interface ScenarioContext {
@@ -130,6 +130,7 @@ const commitCount = (state: FixtureState): number =>
   state.ledger.filter((entry) => entry.kind === "committed").length;
 
 const taskIdOf = (ack: AckPayload): string => {
+  if (ack.disposition !== "accepted") throw new Error(`submit ${describeAck(ack)}`);
   const taskId = ack.result?.task_id;
   if (typeof taskId !== "string") throw new Error("accepted submission carried no task id");
   return taskId;
@@ -152,8 +153,6 @@ const runTask = async (
   const { client } = ctx;
   ctx.budget(task.text.slice(0, 40));
   const ack = await client.submitText(task.text, acknowledgedWithin(ctx));
-  if (ack.disposition !== "accepted")
-    throw new Error(`submit rejected: ${ack.error?.code} ${ack.error?.message}`);
   const taskId = taskIdOf(ack);
   const decisions: ScenarioEvidence["decisions"] = [];
   let index = 0;
@@ -182,7 +181,7 @@ const runTask = async (
       decisions.push({
         approval_id: event.payload.approval_id,
         tool: event.payload.tool_identity,
-        decision: `ack:${decided.disposition}:${decided.error?.code ?? ""}`,
+        decision: `ack:${decided.disposition}:${decided.error.code}`,
         ledger_commits_at_request: -1,
       });
   };
@@ -355,7 +354,7 @@ export const SCENARIOS: Scenario[] = [
         decision: "reject",
         ...acknowledgedWithin(ctx),
       });
-      notes.push(`decision after reconnect: ${decided.disposition} ${decided.error?.code ?? ""}`);
+      notes.push(`decision after reconnect: ${describeAck(decided)}`);
       const finished = await again.waitFor(
         "task_finished",
         (event) => event.payload.task_id === taskId,

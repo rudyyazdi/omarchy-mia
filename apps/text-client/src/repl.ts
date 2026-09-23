@@ -4,7 +4,7 @@ import { clearLine, createInterface, cursorTo, type Interface } from "node:readl
 import { match, P } from "ts-pattern";
 import { loadProfile } from "@mia/agent-adapter";
 import { errorMessage, type EventPayload, type ServerEventOf } from "@mia/protocol";
-import { MiaClient } from "./client.ts";
+import { describeAck, MiaClient } from "./client.ts";
 
 /** Where to connect: read from a server profile (loaded by `loadProfile`, whose placeholders `env` fills), or given directly. */
 export type ConnectionOptions =
@@ -188,17 +188,12 @@ const handleLine = async (session: Session, text: string, quit: () => void): Pro
       decision: decision,
       ...acknowledged(),
     });
-    out(
-      `decision ${ack.disposition}${ack.error ? `: ${ack.error.code}: ${ack.error.message}` : ""}`,
-    );
+    out(`decision ${describeAck(ack)}`);
   };
   await match(cmd)
     .with("", async () => {
       const ack = await client.submitText(text, acknowledged());
-      if (ack.disposition !== "accepted")
-        out(
-          `submit ${ack.disposition}${ack.error ? `: ${ack.error.code}: ${ack.error.message}` : ""}`,
-        );
+      if (ack.disposition !== "accepted") out(`submit ${describeAck(ack)}`);
     })
     .with("/quit", () => quit())
     .with("/interrupt", async () => {
@@ -208,7 +203,7 @@ const handleLine = async (session: Session, text: string, quit: () => void): Pro
         return;
       }
       const ack = await client.interrupt(session.currentTask, acknowledged());
-      out(`interrupt ${ack.disposition}${ack.error ? `: ${ack.error.message}` : ""}`);
+      out(`interrupt ${describeAck(ack)}`);
     })
     .with("/approve", () => decideApproval("approve"))
     .with("/reject", () => decideApproval("reject"))

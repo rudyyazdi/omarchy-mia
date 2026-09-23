@@ -14,7 +14,14 @@ import {
 } from "@mia/records";
 import type { MiaClient } from "@mia/text-client";
 import type { ScriptedRuntime } from "./scripted-runtime.ts";
-import { must, mustString, tick, useScriptedSession, type TestServer } from "./harness.ts";
+import {
+  ackResult,
+  must,
+  mustString,
+  tick,
+  useScriptedSession,
+  type TestServer,
+} from "./harness.ts";
 
 let runtime: ScriptedRuntime;
 let ts: TestServer;
@@ -40,7 +47,7 @@ const richConversation = async (): Promise<{ conversationId: string; artifactFil
   // task 1: stream + approve + reject + artifact
   let next = runtime.nextTurn();
   let ack = await client.submitText("do things");
-  const taskId = mustString(ack.result?.task_id, "ack task_id");
+  const taskId = mustString(ackResult(ack).task_id, "ack task_id");
   const turn = await next;
   turn.init("scripted-model");
   turn.text(
@@ -86,7 +93,7 @@ const richConversation = async (): Promise<{ conversationId: string; artifactFil
   // task 2: interruption with an in-flight action
   next = runtime.nextTurn();
   ack = await client.submitText("slow");
-  const task2 = mustString(ack.result?.task_id, "ack task_id");
+  const task2 = mustString(ackResult(ack).task_id, "ack task_id");
   const turn2 = await next;
   turn2.init();
   const slow = turn2.request("mcp__d1__slow", { mode: "uncancellable" }, "toolu_5");
@@ -210,7 +217,7 @@ describe("records, report and export", () => {
     expect(Math.max(...events.map((event) => event.sequence))).toBe(
       result.manifest.cutoff_sequence,
     );
-    expect(result.manifest.ongoing_tasks).toEqual([must(ack.result, "ack result").task_id]);
+    expect(result.manifest.ongoing_tasks).toEqual([ackResult(ack).task_id]);
     const report = readFileSync(join(exportDir, "report.html"), "utf8");
     expect(report).toContain("ongoing tasks at cutoff");
     turn.end();

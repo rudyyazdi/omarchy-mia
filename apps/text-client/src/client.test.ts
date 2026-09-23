@@ -3,8 +3,8 @@ import { createServer, type Socket } from "node:net";
 import { describe, expect, it } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
 import { ackEvent } from "./ack-fixture.ts";
-import { ClientCommandSchema } from "@mia/protocol";
-import { MiaClient, type AckPayload } from "./client.ts";
+import { ClientCommandSchema, type AcceptedAck, type RefusedAck } from "@mia/protocol";
+import { MiaClient } from "./client.ts";
 
 const makeClient = (url = "ws://127.0.0.1:1") =>
   new MiaClient({
@@ -131,7 +131,9 @@ describe("client cancellation", () => {
   it("starts a conversation from an accepted ack, including a duplicate one, and refuses a failed one", () =>
     withConnectedClient(async (client, socket) => {
       /** Answer the next command with an ack carrying `payload`. */
-      const answerNext = (payload: Omit<AckPayload, "command_id">) =>
+      const answerNext = (
+        payload: Omit<AcceptedAck, "command_id"> | Omit<RefusedAck, "command_id">,
+      ) =>
         socket.once("message", (data) => {
           const command = ClientCommandSchema.parse(JSON.parse(data.toString("utf8")));
           const ack = ackEvent(command.message_id);
