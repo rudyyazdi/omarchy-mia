@@ -101,8 +101,17 @@ describe("redactSensitivePairs", () => {
     ],
     ['{"api_key":', '{"api_key":'],
     ['{"api_ke', '{"api_ke'],
-    ['error: "token": abc123 then more', `error: "token": "${REDACTED}" then more`],
+    ['error: "token": 123 then more', `error: "token": "${REDACTED}" then more`],
+    ['{"password": correct horse battery', `{"password": "${REDACTED}`],
   ])("%s", (text, expected) => {
     expect(redactSensitivePairs(text)).toBe(expected);
+  });
+
+  it("scans deeply nested text in linear time", () => {
+    const depth = 40_000;
+    const nested = '{"a":'.repeat(depth);
+    const started = performance.now();
+    expect(redactSensitivePairs(`${nested}"secret":"x`)).toBe(`${nested}"secret":"${REDACTED}`);
+    expect(performance.now() - started).toBeLessThan(1000);
   });
 });

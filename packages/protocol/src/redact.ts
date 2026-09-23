@@ -103,20 +103,6 @@ const containerSpan = (text: string, start: number): Span => {
   return { end: text.length, complete: false };
 };
 
-/**
- * The span of the JSON value opening at `start`. A string, object or array cut short runs to the end of the
- * text; any other value runs to the next delimiter, so a number or literal cut short cannot be told from a
- * whole one.
- */
-const valueSpan = (text: string, start: number): Span => {
-  const opening = text.charAt(start);
-  if (opening === '"') return stringSpan(text, start);
-  if (opening === "{" || opening === "[") return containerSpan(text, start);
-  let index = start;
-  while (index < text.length && !/[\s,\]}]/.test(text.charAt(index))) index += 1;
-  return { end: index, complete: true };
-};
-
 /** The decoded value of a JSON literal, or undefined when it is cut short or not JSON. */
 const parseLiteral = (literal: string): unknown => {
   try {
@@ -125,6 +111,22 @@ const parseLiteral = (literal: string): unknown => {
   } catch {
     return undefined;
   }
+};
+
+/**
+ * The span of the JSON value opening at `start`. A string, object or array cut short runs to the end of the
+ * text. A number or literal runs to the next delimiter, so one cut short cannot be told from a whole one;
+ * an unquoted token that is no JSON value (`correct horse battery`) runs to the end of the text.
+ */
+const valueSpan = (text: string, start: number): Span => {
+  const opening = text.charAt(start);
+  if (opening === '"') return stringSpan(text, start);
+  if (opening === "{" || opening === "[") return containerSpan(text, start);
+  let index = start;
+  while (index < text.length && !/[\s,\]}]/.test(text.charAt(index))) index += 1;
+  if (index > start && parseLiteral(text.slice(start, index)) === undefined)
+    return { end: text.length, complete: false };
+  return { end: index, complete: true };
 };
 
 const decodeKey = (literal: string): string => {
@@ -155,10 +157,15 @@ export const redactSensitivePairs = (text: string): string => {
       continue;
     }
     const key = decodeKey(text.slice(index, keySpan.end));
+    // Only a sensitive key's value is spanned, and it is then skipped whole, so the scan stays linear;
+    // spanning every value would rescan each container once per level of nesting.
+    if (!isSensitiveKey(key)) {
+      index = colon + 1;
+      continue;
+    }
     const valueStart = skipSpace(text, colon + 1);
     const value = valueSpan(text, valueStart);
     if (
-      !isSensitiveKey(key) ||
       value.end === valueStart ||
       isTokenCount(key, parseLiteral(text.slice(valueStart, value.end)))
     ) {

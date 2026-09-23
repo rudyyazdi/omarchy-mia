@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { errorMessage, redactSensitivePairs, redactString, redactValue } from "@mia/protocol";
+import { redactSensitivePairs, redactString, redactValue } from "@mia/protocol";
 
 /**
  * Loose schemas for the Claude Code stream-json output. Only the fields Mia relies on are typed;
@@ -135,13 +135,10 @@ export const parseStreamLine = (line: string): ParsedLine | null => {
   let json: unknown;
   try {
     json = JSON.parse(trimmed);
-  } catch (error) {
-    return {
-      ok: false,
-      reason: "invalid_json",
-      raw: trimmed,
-      error: `invalid JSON: ${errorMessage(error)}`,
-    };
+  } catch {
+    // Not V8's message: it quotes a slice of the input ("password":hunter2), which no redaction can
+    // reliably key, and it travels beside the redacted raw line. The raw line carries the evidence.
+    return { ok: false, reason: "invalid_json", raw: trimmed, error: "invalid JSON" };
   }
   const parsed = KnownMessageSchema.safeParse(json);
   if (parsed.success) return { ok: true, message: parsed.data, json, raw: trimmed };
