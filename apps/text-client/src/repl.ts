@@ -161,7 +161,6 @@ const renderEvents = (session: Session): void => {
     out(`✗ error ${event.payload.code}: ${event.payload.message}`),
   );
   client.on("client_error", (message: string) => out(`✗ client: ${message}`));
-  client.on("disconnected", () => out("connection closed"));
 };
 
 /** Runs one typed line: plain text becomes a task, a slash command acts on the session. */
@@ -234,7 +233,8 @@ const startSession = async (client: MiaClient): Promise<string> => {
 /**
  * Connects to the server, starts a conversation and handles typed lines, one at a time and in order, until the
  * person quits, the input ends or the connection closes. It resolves once the last line has been handled and the
- * connection is closed, and rejects if the session cannot start; the exit code is main.ts's to choose.
+ * connection is closed, and rejects if the session cannot start or the input fails; either way the connection is
+ * closed, and the exit code is main.ts's to choose.
  */
 export const runTextClient = async (
   options: ConnectionOptions,
@@ -270,14 +270,22 @@ export const runTextClient = async (
   const rl = createInterface({ input: io.input, output: io.output, prompt: "mia> " });
   session.terminal.attach(rl);
   const heartbeat = setInterval(() => void client.heartbeat().catch(() => undefined), 15_000);
-  // Ends the session from any side (/quit, the input ending, the connection closing); safe to repeat.
+  heartbeat.unref();
+  // Ends the session at once, dropping lines read but not yet handled; safe to repeat. /quit and the connection
+  // closing call it. The input ending does not: the lines it already delivered are handled first.
+  const ending = new AbortController();
   const quit = () => {
+    ending.abort();
     clearInterval(heartbeat);
     rl.close();
     client.close();
   };
-  rl.once("close", quit);
-  closed.promise.then(quit).catch((error: unknown) => out(`✗ ${errorMessage(error)}`));
+  closed.promise
+    .then(() => {
+      quit();
+      out("connection closed");
+    })
+    .catch((error: unknown) => console.error(`✗ ${errorMessage(error)}`));
 
   const onLine = async (line: string): Promise<void> => {
     const text = line.trim();
@@ -291,7 +299,14 @@ export const runTextClient = async (
     }
   };
   session.terminal.prompt();
-  // The loop ends when the interface closes, after the lines it had already read.
-  for await (const line of rl) await onLine(line);
+  try {
+    // Ends when the interface closes, after the lines it had already read, unless the session ended first.
+    for await (const line of rl) {
+      if (ending.signal.aborted) break;
+      await onLine(line);
+    }
+  } finally {
+    quit();
+  }
   await closed.promise;
 };
