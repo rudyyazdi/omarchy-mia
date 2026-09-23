@@ -212,6 +212,7 @@ export class ClaudeCodeAdapter {
     child.stdin?.end(options.text);
 
     const translator = new ClaudeTranslator();
+    /** The last init and summary the runtime reported become the TurnResult's; every event is forwarded. */
     const handleEvent = (event: RuntimeEvent): void => {
       if (event.type === "runtime_init") init = event.init;
       if (event.type === "turn_result") summary = event.summary;
@@ -237,7 +238,7 @@ export class ClaudeCodeAdapter {
           });
         }
         if (parsed.ok)
-          for (const event of translator.translate(parsed.message, now())) handleEvent(event);
+          for (const event of translator.translate(parsed.message, now)) handleEvent(event);
         else
           emit({
             type: "malformed_event",

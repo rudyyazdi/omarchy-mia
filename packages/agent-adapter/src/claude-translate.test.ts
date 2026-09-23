@@ -1,8 +1,10 @@
+import { REDACTED } from "@mia/protocol";
 import { describe, expect, it } from "vitest";
 import { ClaudeTranslator } from "./claude-translate.ts";
 import { parseStreamLine, type RuntimeMessage } from "./stream.ts";
 
 const at = "2026-01-01T00:00:00.000Z";
+const now = () => at;
 
 /** Messages go through the real stream parser, so the translator sees exactly what the adapter feeds it. */
 const message = (json: unknown): RuntimeMessage => {
@@ -25,15 +27,15 @@ const toolUse = { type: "tool_use", id: "toolu_1", name: "mcp__d1__read", input:
 
 describe("ClaudeTranslator", () => {
   it("reports the init model and keeps the whole init message as evidence", () => {
-    expect(new ClaudeTranslator().translate(message(init), at)).toEqual([
+    expect(new ClaudeTranslator().translate(message(init), now)).toEqual([
       { type: "runtime_init", init: { model: "claude-test", evidence: init }, at },
     ]);
   });
 
   it("ignores system messages other than init and messages it does not know", () => {
     const translator = new ClaudeTranslator();
-    expect(translator.translate(message({ type: "system", subtype: "compact" }), at)).toEqual([]);
-    expect(translator.translate(message({ type: "rate_limit_event" }), at)).toEqual([]);
+    expect(translator.translate(message({ type: "system", subtype: "compact" }), now)).toEqual([]);
+    expect(translator.translate(message({ type: "rate_limit_event" }), now)).toEqual([]);
   });
 
   it("streams text deltas and announces a tool call as soon as its block starts", () => {
@@ -46,10 +48,10 @@ describe("ClaudeTranslator", () => {
       type: "stream_event",
       event: { type: "content_block_start", content_block: { ...toolUse, input: {} } },
     };
-    expect(translator.translate(message(delta), at)).toEqual([
+    expect(translator.translate(message(delta), now)).toEqual([
       { type: "text_delta", text: "hi", at },
     ]);
-    expect(translator.translate(message(start), at)).toEqual([
+    expect(translator.translate(message(start), now)).toEqual([
       {
         type: "tool_proposed",
         runtimeCallId: "toolu_1",
@@ -67,7 +69,7 @@ describe("ClaudeTranslator", () => {
       type: "assistant",
       message: { role: "assistant", content: [{ type: "text", text: "ok" }, toolUse] },
     });
-    const first = translator.translate(assistant, at);
+    const first = translator.translate(assistant, now);
     expect(first.map((event) => event.type)).toEqual(["assistant_message", "tool_proposed"]);
     expect(first[1]).toEqual({
       type: "tool_proposed",
@@ -77,7 +79,7 @@ describe("ClaudeTranslator", () => {
       complete: true,
       at,
     });
-    expect(translator.translate(assistant, at).map((event) => event.type)).toEqual([
+    expect(translator.translate(assistant, now).map((event) => event.type)).toEqual([
       "assistant_message",
     ]);
   });
@@ -95,7 +97,7 @@ describe("ClaudeTranslator", () => {
       },
       tool_use_result: { stdout: "done" },
     });
-    expect(new ClaudeTranslator().translate(user, at)).toEqual([
+    expect(new ClaudeTranslator().translate(user, now)).toEqual([
       {
         type: "tool_result",
         runtimeCallId: "toolu_1",
@@ -129,7 +131,7 @@ describe("ClaudeTranslator", () => {
       usage: { input_tokens: 1 },
       permission_denials: [{ tool_name: "mcp__d1__forbidden" }],
     };
-    expect(new ClaudeTranslator().translate(message(result), at)).toEqual([
+    expect(new ClaudeTranslator().translate(message(result), now)).toEqual([
       {
         type: "turn_result",
         summary: {
@@ -144,6 +146,46 @@ describe("ClaudeTranslator", () => {
           permissionDenials: [{ tool_name: "mcp__d1__forbidden" }],
           evidence: result,
         },
+        at,
+      },
+    ]);
+  });
+
+  it("redacts secret-shaped values in assistant messages and tool results", () => {
+    const secret = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const translator = new ClaudeTranslator();
+    const [assistant] = translator.translate(
+      message({
+        type: "assistant",
+        message: { role: "assistant", content: [{ type: "text", text: `key ${secret}` }] },
+      }),
+      now,
+    );
+    expect(assistant).toEqual({
+      type: "assistant_message",
+      message: { role: "assistant", content: [{ type: "text", text: `key ${REDACTED}` }] },
+      at,
+    });
+    const [result] = translator.translate(
+      message({
+        type: "user",
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "toolu_1", content: `got ${secret}` }],
+        },
+        tool_use_result: { stdout: secret },
+      }),
+      now,
+    );
+    expect(result).toMatchObject({ content: `got ${REDACTED}`, raw: { stdout: REDACTED } });
+  });
+
+  it("summarises a successful result that carries no closing text", () => {
+    const result = { type: "result", subtype: "success", is_error: false, session_id: "session" };
+    expect(new ClaudeTranslator().translate(message(result), now)).toEqual([
+      {
+        type: "turn_result",
+        summary: { isError: false, outcome: "success", evidence: result },
         at,
       },
     ]);

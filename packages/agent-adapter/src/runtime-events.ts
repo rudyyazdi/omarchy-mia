@@ -20,6 +20,7 @@ export interface TurnSummary {
   outcome: string;
   /** The runtime's closing text, when it gave one. */
   finalText?: string;
+  /** The runtime's own token accounting, shaped as it reported it: forwarded and stored, never decided on. */
   usage?: unknown;
   totalCostUsd?: number;
   durationMs?: number;

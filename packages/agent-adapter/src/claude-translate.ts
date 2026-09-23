@@ -30,14 +30,15 @@ const summaryOf = (message: ResultMessage): TurnSummary => ({
 export class ClaudeTranslator {
   readonly #completedProposals = new Set<string>();
 
-  translate(message: RuntimeMessage, at: string): RuntimeEvent[] {
+  /** `now` stamps each event as it is produced. */
+  translate(message: RuntimeMessage, now: () => string): RuntimeEvent[] {
     return match(message)
       .with({ type: "system" }, (systemMessage): RuntimeEvent[] => {
         if (systemMessage.subtype !== "init") return [];
         // The union parsed InitMessageSchema first, so a system/init message that reached here satisfies it.
         const parsedInit = InitMessageSchema.safeParse(systemMessage);
         return parsedInit.success
-          ? [{ type: "runtime_init", init: initOf(parsedInit.data), at }]
+          ? [{ type: "runtime_init", init: initOf(parsedInit.data), at: now() }]
           : [];
       })
       .with({ type: "stream_event" }, ({ event }): RuntimeEvent[] => {
@@ -46,7 +47,7 @@ export class ClaudeTranslator {
           event.delta?.type === "text_delta" &&
           event.delta.text
         )
-          return [{ type: "text_delta", text: event.delta.text, at }];
+          return [{ type: "text_delta", text: event.delta.text, at: now() }];
         if (
           event.type === "content_block_start" &&
           event.content_block?.type === "tool_use" &&
@@ -60,14 +61,14 @@ export class ClaudeTranslator {
               toolIdentity: event.content_block.name,
               arguments: event.content_block.input ?? {},
               complete: false,
-              at,
+              at: now(),
             },
           ];
         return [];
       })
       .with({ type: "assistant" }, (assistantMessage): RuntimeEvent[] => {
         const events: RuntimeEvent[] = [
-          { type: "assistant_message", message: redactValue(assistantMessage.message), at },
+          { type: "assistant_message", message: redactValue(assistantMessage.message), at: now() },
         ];
         for (const block of assistantMessage.message.content) {
           if (block.type !== "tool_use" || !block.id || !block.name) continue;
@@ -79,7 +80,7 @@ export class ClaudeTranslator {
             toolIdentity: block.name,
             arguments: block.input ?? {},
             complete: true,
-            at,
+            at: now(),
           });
         }
         return events;
@@ -96,14 +97,14 @@ export class ClaudeTranslator {
                   isError: block.is_error === true,
                   content: redactValue(block.content ?? null),
                   raw: redactValue(userMessage.tool_use_result ?? null),
-                  at,
+                  at: now(),
                 },
               ]
             : [],
         );
       })
       .with({ type: "result" }, (resultMessage): RuntimeEvent[] => [
-        { type: "turn_result", summary: summaryOf(resultMessage), at },
+        { type: "turn_result", summary: summaryOf(resultMessage), at: now() },
       ])
       .with({ type: "other" }, (): RuntimeEvent[] => [])
       .exhaustive();

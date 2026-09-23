@@ -3,9 +3,11 @@ import type {
   PermissionDecision,
   PermissionRequest,
   RuntimeCancellation,
+  RuntimeInit,
   TurnHandle,
   TurnOptions,
   TurnResult,
+  TurnSummary,
 } from "@mia/agent-adapter";
 import type { TurnRunner } from "@mia/server";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -26,6 +28,8 @@ export class ScriptedTurn {
   survivesInterrupt = false;
   private ended = false;
   private turnCounter = 0;
+  /** Like the real adapter, the last reported init becomes the TurnResult's. */
+  private reportedInit: RuntimeInit | null = null;
 
   constructor(readonly options: TurnOptions) {
     const { promise, resolve } = Promise.withResolvers<TurnResult>();
@@ -43,14 +47,11 @@ export class ScriptedTurn {
   }
 
   init(model = "scripted-model"): void {
-    this.emit({
-      type: "runtime_init",
-      init: {
-        model,
-        evidence: { scripted: "init", session: this.options.runtimeConversationId, model },
-      },
-      at: new Date().toISOString(),
-    });
+    this.reportedInit = {
+      model,
+      evidence: { scripted: "init", session: this.options.runtimeConversationId, model },
+    };
+    this.emit({ type: "runtime_init", init: this.reportedInit, at: new Date().toISOString() });
   }
 
   propose(runtimeCallId: string, toolIdentity: string, args: unknown): void {
@@ -113,17 +114,23 @@ export class ScriptedTurn {
       : { code: status === "completed" ? 0 : 1, signal: null };
     let runtimeCancellation: RuntimeCancellation = "not_needed";
     if (this.interrupted) runtimeCancellation = this.survivesInterrupt ? "unknown" : "forced_kill";
+    // Like the real adapter, a summary is only returned after it was reported as a turn_result event.
+    const summary: TurnSummary | null =
+      status === "completed" && !this.interrupted
+        ? {
+            isError: false,
+            outcome: "success",
+            usage: { input_tokens: 1, output_tokens: 1 },
+            totalCostUsd: 0,
+            durationMs: 5,
+            numTurns: 1,
+            evidence: { scripted: "result", session: this.options.runtimeConversationId },
+          }
+        : null;
+    if (summary) this.emit({ type: "turn_result", summary, at: new Date().toISOString() });
     const result: TurnResult = {
       status: this.interrupted && !this.survivesInterrupt ? "killed" : status,
-      summary:
-        status === "completed" && !this.interrupted
-          ? {
-              isError: false,
-              outcome: "success",
-              usage: { input_tokens: 1, output_tokens: 1 },
-              evidence: { scripted: "result", session: this.options.runtimeConversationId },
-            }
-          : null,
+      summary,
       exit,
       error,
       streamLogPath,
@@ -139,7 +146,7 @@ export class ScriptedTurn {
         settings: {},
         mcp_config: {},
       },
-      init: null,
+      init: this.reportedInit,
       interrupted: this.interrupted,
       runtimeCancellation,
     };

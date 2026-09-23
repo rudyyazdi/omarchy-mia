@@ -953,14 +953,13 @@ export class Engine {
           })
           .with({ type: "turn_result" }, ({ summary }) => {
             this.record("runtime_result", summary.evidence, opts);
-            // The execution's usage record keeps its persisted snake_case keys.
             this.deps.writer.updateExecution(task.executionId, {
               usage: {
                 usage: summary.usage,
-                total_cost_usd: summary.totalCostUsd,
-                duration_ms: summary.durationMs,
-                duration_api_ms: summary.durationApiMs,
-                num_turns: summary.numTurns,
+                totalCostUsd: summary.totalCostUsd,
+                durationMs: summary.durationMs,
+                durationApiMs: summary.durationApiMs,
+                numTurns: summary.numTurns,
               },
             });
           })

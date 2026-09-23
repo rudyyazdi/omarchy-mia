@@ -31,8 +31,8 @@ Rules that everything else hangs off:
 | 1 | `packages/protocol/src/messages.ts` | The whole client/server vocabulary: 6 commands, 11 events. Everything else exists to produce or consume these. |
 | 2 | `packages/agent-adapter/src/launch.ts` | `prepareLaunch` builds the exact `claude` command line, the settings layer (`deny` rules, `ask` for everything else) and the MCP config that adds the bridge. |
 | 3 | `packages/agent-adapter/src/bridge.ts` | ~100 lines. One MCP tool, `request`, that awaits a handler. No handler ⇒ deny. |
-| 4 | `packages/agent-adapter/src/adapter.ts` | `submitTurn`: spawn, parse stdout lines into `AdapterEvent`s, kill on `interrupt()`. |
-| 5 | `apps/server/src/engine.ts` | Read top to bottom: `tx`/`emit`/`record` plumbing, then the six commands, then `onAdapterEvent`, `handlePermission`, `finishTurn`. |
+| 4 | `packages/agent-adapter/src/adapter.ts` | `submitTurn`: spawn, parse stdout lines and translate them (`claude-translate.ts`) into runtime-independent `RuntimeEvent`s, kill on `interrupt()`. |
+| 5 | `apps/server/src/engine.ts` | Read top to bottom: `tx`/`emit`/`record` plumbing, then the six commands, then `onRuntimeEvent`, `handlePermission`, `finishTurn`. |
 | 6 | `packages/records/src/schema.ts` and `writer.ts` | Tables and the only code that writes them. |
 | 7 | `packages/records/src/export.ts` | Snapshot → files → manifest → verify → rename. |
 | 8 | `fixtures/controlled-mcp/src/fixture.ts` | The test double you will poke by hand below. |
@@ -123,7 +123,7 @@ look. `npm run live` runs the same four unattended.
 
 Prompt: the `stream-context` scenario's first turn.
 
-In the code: `engine.submitText` → `adapter.submitTurn` → `onAdapterEvent("text_delta")` → `emit("text_delta")`. Now
+In the code: `engine.submitText` → `adapter.submitTurn` → `onRuntimeEvent("text_delta")` → `emit("text_delta")`. Now
 look at what was recorded:
 
 ```sh

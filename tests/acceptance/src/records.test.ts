@@ -120,6 +120,22 @@ describe("records, report and export", () => {
     );
     expect(snapshot.tables.events.some((event) => event.type === "error")).toBe(true);
     expect(snapshot.tables.diagnostics.length).toBeGreaterThan(0);
+    // The runtime's own result message is the recorded evidence; usage keeps its stored snake_case keys.
+    expect(
+      snapshot.tables.events
+        .filter((event) => event.type === "runtime_result")
+        .map((event): unknown => JSON.parse(event.payload)),
+    ).toContainEqual({ scripted: "result", session: expect.any(String) });
+    expect(
+      snapshot.tables.executions
+        .flatMap((execution) => (execution.usage ? [execution.usage] : []))
+        .map((usage): unknown => JSON.parse(usage)),
+    ).toContainEqual({
+      usage: expect.any(Object),
+      total_cost_usd: 0,
+      duration_ms: 5,
+      num_turns: 1,
+    });
     expect(
       snapshot.tables.artifacts.some(
         (artifact) => artifact.kind === "tool_output" && artifact.capture_status === "retained",

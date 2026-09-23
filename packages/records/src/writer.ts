@@ -76,6 +76,16 @@ export interface LinkInput {
  * All writes to the private catalog go through here. Payloads are redacted before persistence.
  * Callers wrap related writes in catalog.transaction so events and state rows commit together.
  */
+/** What a finished turn cost; stored in the execution's `usage` column under snake_case keys. */
+export interface ExecutionUsage {
+  /** The runtime's own token accounting, kept as reported. */
+  usage?: unknown;
+  totalCostUsd?: number;
+  durationMs?: number;
+  durationApiMs?: number;
+  numTurns?: number;
+}
+
 export class RecordWriter {
   readonly objects: ObjectStore;
 
@@ -375,7 +385,7 @@ export class RecordWriter {
       reportedModel?: string | null;
       reportedEffort?: string | null;
       effortEvidence?: unknown;
-      usage?: unknown;
+      usage?: ExecutionUsage;
     },
   ): void {
     this.catalog.update("executions", id, {
@@ -387,7 +397,18 @@ export class RecordWriter {
         fields.effortEvidence === undefined
           ? undefined
           : JSON.stringify(redactValue(fields.effortEvidence)),
-      usage: fields.usage === undefined ? undefined : JSON.stringify(redactValue(fields.usage)),
+      usage:
+        fields.usage === undefined
+          ? undefined
+          : JSON.stringify(
+              redactValue({
+                usage: fields.usage.usage,
+                total_cost_usd: fields.usage.totalCostUsd,
+                duration_ms: fields.usage.durationMs,
+                duration_api_ms: fields.usage.durationApiMs,
+                num_turns: fields.usage.numTurns,
+              }),
+            ),
     });
   }
 
