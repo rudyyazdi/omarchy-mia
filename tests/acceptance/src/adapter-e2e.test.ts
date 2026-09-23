@@ -54,6 +54,7 @@ const turnOptions = (
   firstTurn: true,
   runtimeDir: join(dir, "runtime", Math.random().toString(36).slice(2)),
   turnIndex: 1,
+  agentPromptFile: join(dir, "agent-prompt.md"),
   ...handlers,
 });
 

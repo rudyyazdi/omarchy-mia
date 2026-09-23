@@ -43,8 +43,11 @@ export interface LaunchInput {
   sessionId: string;
   resume: boolean;
   turnIndex: number;
-  /** Prompt file to append; the engine passes the conversation's retained snapshot so every turn uses the same bytes. */
-  agentPromptFile: string;
+  /**
+   * Prompt file to append, or null to append none; the engine passes the conversation's retained prompt object so
+   * every turn uses the same bytes.
+   */
+  agentPromptFile: string | null;
   /**
    * The environment the runtime inherits before `config.env` is applied; the entry point passes its own.
    * `MIA_RUNTIME_DEBUG` in it turns on the runtime's debug logging.
@@ -145,8 +148,9 @@ export const prepareLaunch = (input: LaunchInput): LaunchPlan => {
     BRIDGE_TOOL_IDENTITY,
     "--tools",
     config.builtinTools.length === 0 ? "" : config.builtinTools.join(","),
-    "--append-system-prompt-file",
-    resolve(input.agentPromptFile),
+    ...(input.agentPromptFile === null
+      ? []
+      : ["--append-system-prompt-file", resolve(input.agentPromptFile)]),
     resume ? "--resume" : "--session-id",
     sessionId,
   ];

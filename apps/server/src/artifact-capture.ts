@@ -24,8 +24,8 @@ export type PathFacts =
   | { exists: true; resolvedPath: string; regularFile: boolean; byteSize: number };
 
 /**
- * The largest file retained. The whole file is read synchronously inside the tool-result transaction,
- * so this bounds how long one declaration can stall the server and how much it holds in memory.
+ * The largest file retained. The whole file is read into memory before the tool-result transaction, so this
+ * bounds how much one declaration holds in memory and how long it pauses its own runtime's output.
  */
 export const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 

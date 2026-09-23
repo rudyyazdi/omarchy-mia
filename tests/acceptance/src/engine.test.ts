@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { writeFileSync, mkdirSync, mkdtempSync, existsSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -1291,6 +1291,45 @@ describe("configuration and provenance", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  /** The current conversation's agent prompt provenance: whether it was retained, and the digest of the bytes. */
+  const promptProvenance = () =>
+    must(
+      rows<{ availability: string; object_digest: string | null }>(
+        `SELECT p.availability, a.object_digest FROM provenance_entries p
+         JOIN conversations c ON c.provenance_set_id = p.provenance_set_id
+         LEFT JOIN artifacts a ON a.id = p.artifact_id
+         WHERE p.role = 'agent_prompt' AND c.id = ?`,
+        must(client.conversationId, "conversation id"),
+      )[0],
+      "agent prompt provenance",
+    );
+
+  it("runs every turn on the retained prompt object whose digest provenance recorded", async () => {
+    // Edited after the conversation started: no turn of this conversation may see the edit.
+    writeFileSync(ts.profile.runtime.agentPromptFile, "edited after start");
+    const digest = must(promptProvenance().object_digest, "agent prompt digest");
+    const retained = new ObjectStore(ts.server.catalog.paths).pathFor(digest);
+    const first = await submit("first");
+    expect(first.turn.options.agentPromptFile).toBe(retained);
+    first.turn.init();
+    first.turn.end();
+    await client.waitFor("task_finished", (event) => event.payload.task_id === first.taskId);
+    const second = await submit("second");
+    expect(second.turn.options.agentPromptFile).toBe(retained);
+    expect(ObjectStore.digestOf(readFileSync(retained))).toBe(digest);
+    second.turn.end();
+    await client.waitFor("task_finished", (event) => event.payload.task_id === second.taskId);
+  });
+
+  it("appends no prompt to a conversation whose prompt file was missing at start", async () => {
+    await restartSession({ agentPromptFile: join(tmpdir(), "mia-missing-prompt", "agent.md") });
+    expect(promptProvenance()).toEqual({ availability: "unavailable", object_digest: null });
+    const { turn, taskId } = await submit("no prompt");
+    expect(turn.options.agentPromptFile).toBeNull();
+    turn.end();
+    await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
   });
 
   it("refuses unsupported tool surfaces and unresolved placeholders", () => {

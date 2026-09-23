@@ -187,6 +187,7 @@ export class ProbeContext {
       firstTurn: spec.firstTurn,
       runtimeDir: this.runtimeDir(spec.sessionId),
       turnIndex: spec.turnIndex,
+      agentPromptFile: spec.config.agentPromptFile,
       onEvent: async (event) => {
         step.events.push(event);
         if (event.type === "text_delta") process.stdout.write(event.text);

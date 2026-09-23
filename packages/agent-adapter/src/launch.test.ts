@@ -4,12 +4,16 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MCP_TOOL_TIMEOUT_MS, prepareLaunch } from "./launch.ts";
 
-/** A launch plan for a minimal config in `dir`, inheriting `env`; `configEnv` is the profile's own. */
+/**
+ * A launch plan for a minimal config in `dir`, inheriting `env`; `configEnv` is the profile's own, and
+ * `agentPromptFile` replaces the prompt file written into `dir`.
+ */
 const planIn = (
   dir: string,
   env: NodeJS.ProcessEnv,
-  configEnv: Record<string, string> = {},
+  overrides: { configEnv?: Record<string, string>; agentPromptFile?: string | null } = {},
 ): ReturnType<typeof prepareLaunch> => {
+  const { configEnv = {} } = overrides;
   const promptFile = join(dir, "agent.md");
   writeFileSync(promptFile, "prompt\n");
   return prepareLaunch({
@@ -32,7 +36,8 @@ const planIn = (
     sessionId: "s",
     resume: false,
     turnIndex: 1,
-    agentPromptFile: promptFile,
+    agentPromptFile:
+      overrides.agentPromptFile === undefined ? promptFile : overrides.agentPromptFile,
     env,
   });
 };
@@ -53,7 +58,7 @@ describe("launch plan", () => {
     const plan = planIn(
       directory.path,
       { LANG: "C", SHARED: "inherited", CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "cli" },
-      { SHARED: "profile" },
+      { configEnv: { SHARED: "profile" } },
     );
     expect(plan.env).toEqual({
       LANG: "C",
@@ -77,6 +82,17 @@ describe("launch plan", () => {
     const planned = new Map(plan.setup.files.map((file) => [file.path, JSON.parse(file.content)]));
     expect(planned.get(argAfter("--mcp-config"))).toEqual(plan.description.mcp_config);
     expect(planned.get(argAfter("--settings"))).toEqual(plan.description.settings);
+  });
+
+  it("appends the prompt file it is given, and no prompt when given none", () => {
+    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-launch-"));
+    const retained = join(directory.path, "objects", "digest");
+    const withPrompt = planIn(directory.path, {}, { agentPromptFile: retained });
+    const at = withPrompt.args.indexOf("--append-system-prompt-file");
+    expect(withPrompt.args.slice(at, at + 2)).toEqual(["--append-system-prompt-file", retained]);
+    const withoutPrompt = planIn(directory.path, {}, { agentPromptFile: null });
+    expect(withoutPrompt.args).not.toContain("--append-system-prompt-file");
+    expect(withoutPrompt.args).toContain("--session-id");
   });
 
   it("turns on runtime debug logging only when the given environment sets MIA_RUNTIME_DEBUG", () => {

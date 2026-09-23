@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { match } from "ts-pattern";
 import {
   policyFor,
@@ -146,8 +145,11 @@ interface ConversationState {
   runtimeConversationId: string;
   provenanceSetId: string;
   directory: string;
-  /** Retained copy of the agent prompt used for every turn of this conversation. */
-  promptFile: string;
+  /**
+   * The retained agent prompt object every turn of this conversation appends; null when the prompt file was missing
+   * at start, so provenance recorded it unavailable and no turn appends one.
+   */
+  promptFile: string | null;
   turnCount: number;
   /**
    * A runtime has started this conversation's session, so the next turn resumes it instead of creating it. Set
@@ -466,15 +468,12 @@ export class Engine {
         writer.linkProvenanceSet(conv.id, provenance.provenance_set_id);
         if (previous.conversation)
           writer.updateConversation(previous.conversation.id, { status: "closed" });
-        // Every turn of this conversation appends exactly the prompt bytes recorded in provenance.
-        const promptFile = join(conv.directory, "agent-prompt.md");
-        writeFileSync(
-          promptFile,
-          existsSync(profile.runtime.agentPromptFile)
-            ? readFileSync(profile.runtime.agentPromptFile)
-            : "",
-          { mode: 0o600 },
-        );
+        // Every turn of this conversation appends exactly the prompt bytes recorded in provenance: the runtime reads
+        // the retained object itself, so neither a second read nor a copy can differ from the recorded digest.
+        const promptFile =
+          provenance.agent_prompt_digest === null
+            ? null
+            : writer.objects.pathFor(provenance.agent_prompt_digest);
         this.conversation = {
           id: conv.id,
           runtimeConversationId,

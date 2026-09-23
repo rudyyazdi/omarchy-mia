@@ -23,8 +23,8 @@ export interface TurnOptions {
   firstTurn: boolean;
   runtimeDir: string;
   turnIndex: number;
-  /** Defaults to config.agentPromptFile; the engine passes the conversation's retained snapshot. */
-  agentPromptFile?: string;
+  /** Prompt file to append, or null to append none; the engine passes the conversation's retained prompt object. */
+  agentPromptFile: string | null;
   permissionHandler: PermissionHandler;
   /**
    * Handles one runtime event and settles once it is handled; it must not reject. The adapter hands over the next
@@ -184,7 +184,7 @@ export class ClaudeCodeAdapter {
       sessionId: options.runtimeConversationId,
       resume: !options.firstTurn,
       turnIndex: options.turnIndex,
-      agentPromptFile: options.agentPromptFile ?? this.config.agentPromptFile,
+      agentPromptFile: options.agentPromptFile,
       env: this.env,
     });
     const streamLogPath = join(
