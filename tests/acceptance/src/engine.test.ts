@@ -1,4 +1,5 @@
-import { writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync, mkdtempSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigurationError, validateRuntimeConfig } from "@mia/agent-adapter";
@@ -1056,6 +1057,30 @@ describe("interruption path", () => {
 });
 
 describe("configuration and provenance", () => {
+  it("records the runtime identity probed at startup, not at each conversation start", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mia-identity-"));
+    try {
+      // A runtime whose `--version` answers whatever the file holds, so an upgrade mid-run is one write.
+      const versionFile = join(dir, "version");
+      writeFileSync(versionFile, "1.0.0 (Claude Code)\n");
+      const executable = join(dir, "claude");
+      writeFileSync(
+        executable,
+        `#!/bin/sh\nread -r version < '${versionFile}'\necho "$version"\n`,
+        { mode: 0o755 },
+      );
+      await restartSession({ executable });
+      writeFileSync(versionFile, "2.0.0 (Claude Code)\n");
+      await client.startConversation();
+      const versions = rows<{ version: string | null }>(
+        "SELECT version FROM provenance_entries WHERE role = 'runtime_identity'",
+      ).map((row) => row.version);
+      expect(versions).toEqual(["1.0.0 (Claude Code)", "1.0.0 (Claude Code)"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("refuses unsupported tool surfaces and unresolved placeholders", () => {
     const profile = testProfile(ts.dir);
     expect(() => validateRuntimeConfig({ ...profile.runtime, builtinTools: ["Bash"] })).toThrow(

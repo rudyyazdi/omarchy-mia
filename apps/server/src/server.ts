@@ -1,8 +1,15 @@
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { ApprovalBridge, ClaudeCodeAdapter, loadProfile, type Profile } from "@mia/agent-adapter";
+import {
+  ApprovalBridge,
+  ClaudeCodeAdapter,
+  loadProfile,
+  probeStaticCapabilities,
+  type Profile,
+} from "@mia/agent-adapter";
 import { errorMessage } from "@mia/protocol";
 import { Catalog, RecordWriter } from "@mia/records";
+import { collectBuildInfo } from "./build-info.ts";
 import { Engine, type TurnRunner } from "./engine.ts";
 import { startGateway, type GatewayHandle } from "./gateway.ts";
 
@@ -46,12 +53,18 @@ export const startServer = async (input: {
   log?: (message: string) => void;
   /**
    * The server process's environment: fills a profile's `${ENV}` placeholders, is what the runtime
-   * inherits, and names the bridge's request log (`MIA_MCP_HTTP_LOG`). The entry point passes its own.
+   * inherits and is probed with at startup, and names the bridge's request log (`MIA_MCP_HTTP_LOG`).
+   * The entry point passes its own.
    */
   env: NodeJS.ProcessEnv;
 }): Promise<MiaServer> => {
   const profile = resolveProfile(input);
   const log = input.log ?? ((message: string) => process.stderr.write(`[mia-server] ${message}\n`));
+  // Synchronous child processes are acceptable here only because nothing is serving yet.
+  const identity = {
+    runtime: probeStaticCapabilities(profile.runtime, input.env),
+    build: collectBuildInfo("mia-server", SOURCE_ROOT),
+  };
   mkdirSync(profile.stateDirectory, { recursive: true, mode: 0o700 });
   // Acquire in order; on any throw release what is already held, in reverse, before rethrowing.
   const catalog = new Catalog(profile.stateDirectory);
@@ -67,8 +80,7 @@ export const startServer = async (input: {
         catalog,
         writer,
         adapter,
-        sourceRoot: SOURCE_ROOT,
-        env: input.env,
+        identity,
         log,
       });
       const gateway = await startGateway({

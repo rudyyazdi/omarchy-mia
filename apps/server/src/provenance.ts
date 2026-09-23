@@ -1,9 +1,21 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
-import { ADAPTER_VERSION, probeStaticCapabilities, type Profile } from "@mia/agent-adapter";
+import { ADAPTER_VERSION, type Profile, type StaticCapabilities } from "@mia/agent-adapter";
 import { PROTOCOL_VERSION, redactValue, sha256Hex } from "@mia/protocol";
 import type { ProvenanceEntryRow, ProvenanceRole, RecordWriter } from "@mia/records";
-import { collectBuildInfo, type BuildInfo } from "./build-info.ts";
+import type { BuildInfo } from "./build-info.ts";
+
+/**
+ * What the running server is: the runtime it launches and the source tree it loaded. `startServer`
+ * computes it once before it listens, because both describe the process rather than a conversation and
+ * collecting them runs child processes that would stall every connection mid-serve. A runtime upgraded
+ * mid-run leaves `runtime.runtime_version` stale; each execution's retained init event records the
+ * version that actually ran.
+ */
+export interface ServerIdentity {
+  runtime: StaticCapabilities;
+  build: BuildInfo;
+}
 
 export interface ProvenanceSummary {
   provenance_set_id: string;
@@ -25,11 +37,9 @@ export const createConversationProvenance = (input: {
   profile: Profile;
   /** Client build as reported at connection time. */
   clientBuild: unknown;
-  sourceRoot: string;
-  /** The environment the runtime inherits, for the static probe's credential check. */
-  env: NodeJS.ProcessEnv;
+  identity: ServerIdentity;
 }): ProvenanceSummary => {
-  const { writer, profile, clientBuild, sourceRoot } = input;
+  const { writer, profile, clientBuild, identity } = input;
   const setId = writer.createProvenanceSet(
     `conversation provenance for profile ${profile.profile}`,
   );
@@ -136,7 +146,7 @@ export const createConversationProvenance = (input: {
   });
 
   // Runtime and adapter identity.
-  const staticCaps = probeStaticCapabilities(profile.runtime, input.env);
+  const staticCaps = identity.runtime;
   add("runtime_identity", {
     text: JSON.stringify(
       {
@@ -169,7 +179,7 @@ export const createConversationProvenance = (input: {
   }
 
   // Server build, plus retained local changes for dirty trees.
-  const build = collectBuildInfo("mia-server", sourceRoot);
+  const build = identity.build;
   const { local_changes: localChanges, ...buildSummary } = build;
   const buildArt = add("server_build", {
     text: JSON.stringify(buildSummary, null, 2),
