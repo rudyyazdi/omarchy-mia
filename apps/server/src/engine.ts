@@ -37,7 +37,12 @@ import {
   type RecordWriter,
   type ToolCallPolicy,
 } from "@mia/records";
-import { captureFields, extractDeclaredArtifact, type Capture } from "./artifact-capture.ts";
+import {
+  captureFields,
+  extractDeclaredArtifact,
+  type Capture,
+  type DeclaredArtifact,
+} from "./artifact-capture.ts";
 import { collectArtifact } from "./artifact-collector.ts";
 import type { Profile } from "./config.ts";
 import { createConversationProvenance } from "./provenance.ts";
@@ -175,6 +180,14 @@ interface TurnEvidence {
   relation: "runtime_transcript" | "task_output";
   originalPath: string | null;
   content: Exclude<RuntimeFileRead, { status: "absent" }>;
+}
+
+/** A tool output a completed call declared, and the tool_result event that declared it. */
+interface DeclaredOutput {
+  task: TaskState;
+  call: ToolCallState;
+  declared: DeclaredArtifact;
+  eventId: string;
 }
 
 /** State changes and effects a transaction queues; neither runs unless it commits. */
@@ -1519,12 +1532,7 @@ export class Engine {
     if (note) conversation.pendingNote = note;
   }
 
-  /**
-   * Retain one piece of a finished turn's evidence, linked to its task (inside tx). Each attempt runs in a
-   * savepoint: bytes that cannot be stored leave a failed artifact that says why, and if even that cannot be
-   * recorded the evidence is logged as lost. Either way the task, action and execution updates committed
-   * with it stand. A savepoint undoes rows only, so registerEvidence must queue no state change or effect.
-   */
+  /** Retain one piece of a finished turn's evidence, linked to its task (inside tx), best-effort. */
   private retainEvidence(task: TaskState, evidence: TurnEvidence): void {
     const capture = match(evidence.content)
       .with({ status: "read" }, ({ bytes }): Capture => ({ status: "retained", bytes }))
@@ -1533,17 +1541,29 @@ export class Engine {
         reason: `unreadable: ${reason}`,
       }))
       .exhaustive();
+    this.retainBestEffort(evidence.name, capture, (attempt) =>
+      this.registerEvidence(task, evidence, attempt),
+    );
+  }
+
+  /**
+   * Register a capture (inside tx) so that retaining it is best-effort and the records committed with it are
+   * not. The attempt runs in a savepoint: bytes that cannot be stored leave a failed capture that says why,
+   * and if even that cannot be recorded the loss is logged. A savepoint undoes rows only, so register must
+   * queue no state change or effect.
+   */
+  private retainBestEffort(
+    name: string,
+    capture: Capture,
+    register: (capture: Capture) => void,
+  ): void {
     const { catalog } = this.deps;
-    const first = catalog.savepoint(() => this.registerEvidence(task, evidence, capture));
+    const first = catalog.savepoint(() => register(capture));
     if (first.ok) return;
     const reason = `not retained: ${errorMessage(first.error)}`;
-    const fallback = catalog.savepoint(() =>
-      this.registerEvidence(task, evidence, { status: "failed", reason }),
-    );
+    const fallback = catalog.savepoint(() => register({ status: "failed", reason }));
     if (!fallback.ok)
-      this.deps.log(
-        `${evidence.name} lost, ${reason}; not recorded: ${errorMessage(fallback.error)}`,
-      );
+      this.deps.log(`${name} lost, ${reason}; not recorded: ${errorMessage(fallback.error)}`);
   }
 
   private registerEvidence(task: TaskState, evidence: TurnEvidence, capture: Capture): void {
@@ -1564,7 +1584,10 @@ export class Engine {
     });
   }
 
-  /** Records a declared tool output whatever its capture status; only a retained one becomes a task output. */
+  /**
+   * Records a declared tool output whatever its capture status, best-effort, so a failed write cannot undo
+   * the tool result and call update recorded with it.
+   */
   private collectArtifacts(
     task: TaskState,
     call: ToolCallState,
@@ -1572,15 +1595,24 @@ export class Engine {
   ): void {
     const declared = extractDeclaredArtifact(result.content);
     if (!declared) return;
-    const { writer } = this.deps;
     const capture = collectArtifact(declared, this.deps.profile.runtime.outputDirectories);
+    const output: DeclaredOutput = { task, call, declared, eventId: result.eventId };
+    this.retainBestEffort(`tool output ${declared.path}`, capture, (attempt) =>
+      this.registerToolOutput(output, attempt),
+    );
+  }
+
+  /** Only a retained tool output becomes a task output and gets an artifact_registered event. */
+  private registerToolOutput(output: DeclaredOutput, capture: Capture): void {
+    const { task, call, declared, eventId } = output;
+    const { writer } = this.deps;
     const conversationId = this.activeConversation.id;
     const art = writer.registerArtifact({
       kind: "tool_output",
       logicalName: declared.name ?? declared.path,
       mimeType: declared.mimeType ?? "application/octet-stream",
       producerExecutionId: task.executionId,
-      producerEventId: result.eventId,
+      producerEventId: eventId,
       originalPath: declared.path,
       externalLocator: capture.status === "retained" ? null : declared.path,
       ...captureFields(capture),
@@ -1608,7 +1640,7 @@ export class Engine {
           size: art.byteSize,
           original_path: declared.path,
         },
-        { taskId: task.id, executionId: task.executionId, causedBy: result.eventId },
+        { taskId: task.id, executionId: task.executionId, causedBy: eventId },
       );
     }
   }
