@@ -15,11 +15,33 @@ export interface ScenarioContext {
   budget: (label: string) => void;
 }
 
+/** Every live scenario, declared once; `SCENARIOS` defines each, the provider runs it, the assertion judges it. */
+export const ScenarioNameSchema = z.enum([
+  "stream-context",
+  "allowed",
+  "approve-reject",
+  "every-call",
+  "denied",
+  "silence-disconnect",
+  "cancellable",
+  "uncancellable",
+  "allow-policy-no-prompt",
+  "artifact-export",
+]);
+export type ScenarioName = z.infer<typeof ScenarioNameSchema>;
+
+/** Reads a promptfoo `vars.scenario` value; an unknown name is an error that names it. */
+export const parseScenarioName = (value: unknown): ScenarioName => {
+  const parsed = ScenarioNameSchema.safeParse(value);
+  if (!parsed.success) throw new Error(`unknown scenario ${String(value)}`);
+  return parsed.data;
+};
+
 const LedgerRefSchema = z.object({ tool: z.string(), call_id: z.string() });
 
 /** Evidence one scenario produces; also what the promptfoo assertion parses back from the provider's JSON output. */
 export const ScenarioEvidenceSchema = z.object({
-  scenario: z.string(),
+  scenario: ScenarioNameSchema,
   profile: z.string(),
   conversation_id: z.string(),
   task_ids: z.array(z.string()),
@@ -54,7 +76,7 @@ export const ScenarioEvidenceSchema = z.object({
 export type ScenarioEvidence = z.infer<typeof ScenarioEvidenceSchema>;
 
 export interface Scenario {
-  name: string;
+  name: ScenarioName;
   profile: "fixture-test" | "fixture-test-interrupt";
   run(
     ctx: ScenarioContext,
@@ -184,7 +206,7 @@ const evidenceOf = (
  * to it, and keeps every scenario's evidence assembled identically.
  */
 const taskScenario = (spec: {
-  name: string;
+  name: ScenarioName;
   profile: Scenario["profile"];
   tasks: TaskSpec[];
   notes?: string[];
@@ -379,7 +401,7 @@ export const SCENARIOS: Scenario[] = [
 ];
 
 export const runScenario = async (
-  name: string,
+  name: ScenarioName,
   ctx: ScenarioContext,
 ): Promise<ScenarioEvidence> => {
   const scenario = SCENARIOS.find((candidate) => candidate.name === name);

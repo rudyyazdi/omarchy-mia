@@ -1,8 +1,13 @@
 /** promptfoo javascript assertion: judge a scenario by fixture-ledger evidence and recorded events, never by model prose alone. */
 import { match } from "ts-pattern";
 import { z } from "zod";
-import { isRecord } from "@mia/protocol";
-import { ScenarioEvidenceSchema, type ScenarioEvidence } from "./scenarios.ts";
+import { errorMessage, isRecord } from "@mia/protocol";
+import {
+  parseScenarioName,
+  ScenarioEvidenceSchema,
+  type ScenarioEvidence,
+  type ScenarioName,
+} from "./scenarios.ts";
 
 type Result = { pass: boolean; score: number; reason: string };
 
@@ -49,7 +54,12 @@ const assertScenario = (output: string, context: { vars: Record<string, unknown>
   const slowEntered = () =>
     evidence.ledger_after.entered.filter((entry) => entry.tool === "slow").length;
 
-  const scenarioName = String(context.vars.scenario);
+  let scenarioName: ScenarioName;
+  try {
+    scenarioName = parseScenarioName(context.vars.scenario);
+  } catch (error) {
+    return fail(errorMessage(error));
+  }
   match(scenarioName)
     .with("stream-context", () => {
       if (idx("text_delta") < 0 || idx("text_delta") > idx("task_finished"))
@@ -163,9 +173,7 @@ const assertScenario = (output: string, context: { vars: Record<string, unknown>
       )
         problems.push("artifact call did not complete");
     })
-    .otherwise(() => {
-      problems.push(`no assertion for scenario ${scenarioName}`);
-    });
+    .exhaustive();
   return {
     pass: problems.length === 0,
     score: problems.length === 0 ? 1 : 0,

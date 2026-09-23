@@ -7,7 +7,13 @@ import { LiveCallBudget } from "@mia/agent-adapter";
 import { FixtureHarness } from "@mia/controlled-mcp";
 import { errorMessage } from "@mia/protocol";
 import { MiaClient } from "@mia/text-client";
-import { runScenario, SCENARIOS, type ScenarioContext } from "./scenarios.ts";
+import {
+  parseScenarioName,
+  runScenario,
+  SCENARIOS,
+  type ScenarioContext,
+  type ScenarioName,
+} from "./scenarios.ts";
 
 interface ProviderOptions {
   id?: string;
@@ -32,9 +38,14 @@ export default class MiaScenarioProvider {
     _prompt: string,
     context?: { vars?: Record<string, unknown> },
   ): Promise<{ output: string; error?: string; format?: string }> {
-    const scenarioName = String(context?.vars?.scenario ?? "");
+    let scenarioName: ScenarioName;
+    try {
+      scenarioName = parseScenarioName(context?.vars?.scenario);
+    } catch (error) {
+      return { output: "", error: errorMessage(error) };
+    }
     const scenario = SCENARIOS.find((candidate) => candidate.name === scenarioName);
-    if (!scenario) return { output: "", error: `unknown scenario ${scenarioName}` };
+    if (!scenario) return { output: "", error: `scenario ${scenarioName} has no definition` };
     const urlVar = scenario.profile === "fixture-test" ? "MIA_URL_1" : "MIA_URL_2";
     const secretVar =
       scenario.profile === "fixture-test" ? "MIA_SECRET_FILE_1" : "MIA_SECRET_FILE_2";
