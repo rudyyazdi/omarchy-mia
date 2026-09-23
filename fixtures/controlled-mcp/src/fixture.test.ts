@@ -2,11 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
+import { sendJson } from "@mia/mcp-http";
 import { FixtureHarness, startFixture, type FixtureHandle } from "./fixture.ts";
 
 let fixture: FixtureHandle;
@@ -31,6 +32,27 @@ const firstText = (result: Awaited<ReturnType<Client["callTool"]>>): string => {
     return first.text;
   }
   throw new Error("tool result carried no text block");
+};
+
+/** How long a unit test lets the ledger settle before its assertion reports what it saw. */
+const SETTLE_TIMEOUT_MS = 2_000;
+
+/** A stand-in for the harness server, answering each request with `answer`. */
+const startStub = async (answer: (req: IncomingMessage, res: ServerResponse) => void) => {
+  const server = createServer(answer);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("stub bound no TCP port");
+  return {
+    harness: new FixtureHarness(`http://127.0.0.1:${address.port}`),
+    close: async () => {
+      const closed = once(server, "close");
+      server.closeAllConnections();
+      server.close();
+      await closed;
+    },
+  };
 };
 
 const ArtifactResult = z.object({ artifact: z.object({ sha256: z.string(), path: z.string() }) });
@@ -65,20 +87,17 @@ describe("controlled fixture", () => {
     }
   });
 
-  it("waitEntered rejects when its signal aborts, and the next wait still sees the slow call", async () => {
-    await harness.reset();
-    const controller = new AbortController();
-    const aborted = harness.waitEntered({ signal: controller.signal });
-    controller.abort(new Error("caller gave up"));
-    await expect(aborted).rejects.toThrow("caller gave up");
-    const mcpClient = await client();
+  it("waitEntered rejects when its signal aborts during an open long poll", async () => {
+    const arrived = Promise.withResolvers<string | undefined>();
+    const stub = await startStub((req) => arrived.resolve(req.url)); // never answers
     try {
-      const call = mcpClient.callTool({ name: "slow", arguments: { mode: "cancellable" } });
-      const entered = await harness.waitEntered();
-      await harness.release(entered.call_id);
-      expect((await call).isError).not.toBe(true);
+      const controller = new AbortController();
+      const waiting = stub.harness.waitEntered({ signal: controller.signal });
+      expect(await arrived.promise).toBe("/wait-entered");
+      controller.abort(new Error("caller gave up"));
+      await expect(waiting).rejects.toThrow("caller gave up");
     } finally {
-      await mcpClient.close();
+      await stub.close();
     }
   });
 
@@ -87,24 +106,29 @@ describe("controlled fixture", () => {
       { status: 408, body: { error: "no slow call entered before timeout" } },
       { status: 200, body: { call_id: "fx-1", mode: "cancellable" } },
     ];
-    let requests = 0;
-    const server = createServer((_req, res) => {
-      const answer = answers[Math.min(requests, answers.length - 1)];
-      requests += 1;
-      res.writeHead(answer?.status ?? 500, { "content-type": "application/json" });
-      res.end(JSON.stringify(answer?.body));
+    const urls: (string | undefined)[] = [];
+    const stub = await startStub((req, res) => {
+      const answer = answers[urls.length];
+      urls.push(req.url);
+      sendJson(res, answer?.status ?? 500, answer?.body);
     });
-    server.listen(0, "127.0.0.1");
     try {
-      await once(server, "listening");
-      const address = server.address();
-      if (address === null || typeof address === "string") throw new Error("no TCP port");
-      const stub = new FixtureHarness(`http://127.0.0.1:${address.port}`);
-      await expect(stub.waitEntered()).resolves.toEqual({ call_id: "fx-1", mode: "cancellable" });
-      expect(requests).toBe(2);
+      await expect(stub.harness.waitEntered()).resolves.toEqual({
+        call_id: "fx-1",
+        mode: "cancellable",
+      });
+      expect(urls).toEqual(["/wait-entered", "/wait-entered"]);
     } finally {
-      server.closeAllConnections();
-      server.close();
+      await stub.close();
+    }
+  });
+
+  it("waitEntered rejects a 408 that is not the fixture's own long-poll bound", async () => {
+    const stub = await startStub((_req, res) => sendJson(res, 408, { error: "request timeout" }));
+    try {
+      await expect(stub.harness.waitEntered()).rejects.toThrow("wait-entered failed: 408");
+    } finally {
+      await stub.close();
     }
   });
 
@@ -122,6 +146,22 @@ describe("controlled fixture", () => {
     );
     expect(reads).toBe(1);
     expect(state.counter).toBe(0);
+  });
+
+  it("waitForState reads once more and returns when its signal aborts during the pause", async () => {
+    await harness.reset();
+    const controller = new AbortController();
+    let reads = 0;
+    await harness.waitForState(
+      () => {
+        reads += 1;
+        // Runs once this read is judged, while waitForState pauses before the next one.
+        if (reads === 1) queueMicrotask(() => controller.abort());
+        return false;
+      },
+      { signal: controller.signal },
+    );
+    expect(reads).toBe(2);
   });
 
   it("answers a failed harness request with a 500 and keeps serving", async () => {
@@ -167,8 +207,9 @@ describe("controlled fixture", () => {
     const entered = await harness.waitEntered();
     expect(entered.mode).toBe("cancellable");
     await mcpClient.close(); // drops the HTTP connection
-    const state = await harness.waitForState((current) =>
-      current.ledger.some((entry) => entry.kind === "cancelled"),
+    const state = await harness.waitForState(
+      (current) => current.ledger.some((entry) => entry.kind === "cancelled"),
+      { signal: AbortSignal.timeout(SETTLE_TIMEOUT_MS) },
     );
     expect(state.counter).toBe(0);
     expect(state.ledger.some((entry) => entry.kind === "cancelled" && entry.tool === "slow")).toBe(
@@ -188,7 +229,9 @@ describe("controlled fixture", () => {
     expect(before.counter).toBe(0);
     expect(before.pending).toHaveLength(1);
     await harness.release(entered.call_id);
-    const state = await harness.waitForState((current) => current.counter === 1);
+    const state = await harness.waitForState((current) => current.counter === 1, {
+      signal: AbortSignal.timeout(SETTLE_TIMEOUT_MS),
+    });
     expect(state.counter).toBe(1);
     expect(
       state.ledger.filter((entry) => entry.kind === "committed" && entry.tool === "slow"),
