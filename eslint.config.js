@@ -152,8 +152,8 @@ export default tseslint.config(
     rules: { "no-restricted-syntax": ["error", ...SOURCE_RESTRICTED_SYNTAX] },
   },
   {
-    // Workspace entry points other workspaces import (tests are imported by nothing). Repeats the
-    // list above because a later no-restricted-syntax entry replaces an earlier one.
+    // Workspace entry points. Each repeats its list above because a later no-restricted-syntax
+    // entry replaces an earlier one.
     files: [
       "packages/*/src/index.ts",
       "apps/*/src/index.ts",
@@ -161,6 +161,10 @@ export default tseslint.config(
       "tools/*/src/index.ts",
     ],
     rules: { "no-restricted-syntax": ["error", ...SOURCE_RESTRICTED_SYNTAX, NO_EXPORT_ALL] },
+  },
+  {
+    files: ["tests/*/src/index.ts"],
+    rules: { "no-restricted-syntax": ["error", ...RESTRICTED_SYNTAX, NO_EXPORT_ALL] },
   },
   {
     // Keeps entry points small; the rule is in AGENTS.md, Node.

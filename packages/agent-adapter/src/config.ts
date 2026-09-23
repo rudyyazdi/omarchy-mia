@@ -1,8 +1,6 @@
 import { z } from "zod";
 import { isSensitiveKey, isTokenCount, ToolPolicySchema } from "@mia/protocol";
 
-export { ToolPolicySchema, type ToolPolicy } from "@mia/protocol";
-
 export const EffortSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
 export type Effort = z.infer<typeof EffortSchema>;
 
