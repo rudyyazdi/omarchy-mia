@@ -468,8 +468,8 @@ export class Engine {
         writer.linkProvenanceSet(conv.id, provenance.provenance_set_id);
         if (previous.conversation)
           writer.updateConversation(previous.conversation.id, { status: "closed" });
-        // Every turn of this conversation appends exactly the prompt bytes recorded in provenance: the runtime reads
-        // the retained object itself, so neither a second read nor a copy can differ from the recorded digest.
+        // Every turn of this conversation appends the prompt bytes recorded in provenance: the runtime reads the
+        // retained object itself, so no second read of the prompt file or copy of it can drift from the record.
         const promptFile =
           provenance.agent_prompt_digest === null
             ? null

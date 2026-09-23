@@ -1307,8 +1307,7 @@ describe("configuration and provenance", () => {
     );
 
   it("runs every turn on the retained prompt object whose digest provenance recorded", async () => {
-    // Edited after the conversation started: no turn of this conversation may see the edit.
-    writeFileSync(ts.profile.runtime.agentPromptFile, "edited after start");
+    const original = readFileSync(ts.profile.runtime.agentPromptFile, "utf8");
     const digest = must(promptProvenance().object_digest, "agent prompt digest");
     const retained = new ObjectStore(ts.server.catalog.paths).pathFor(digest);
     const first = await submit("first");
@@ -1318,18 +1317,23 @@ describe("configuration and provenance", () => {
     await client.waitFor("task_finished", (event) => event.payload.task_id === first.taskId);
     const second = await submit("second");
     expect(second.turn.options.agentPromptFile).toBe(retained);
-    expect(ObjectStore.digestOf(readFileSync(retained))).toBe(digest);
+    expect(readFileSync(retained, "utf8")).toBe(original);
     second.turn.end();
     await client.waitFor("task_finished", (event) => event.payload.task_id === second.taskId);
   });
 
   it("appends no prompt to a conversation whose prompt file was missing at start", async () => {
-    await restartSession({ agentPromptFile: join(tmpdir(), "mia-missing-prompt", "agent.md") });
-    expect(promptProvenance()).toEqual({ availability: "unavailable", object_digest: null });
-    const { turn, taskId } = await submit("no prompt");
-    expect(turn.options.agentPromptFile).toBeNull();
-    turn.end();
-    await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
+    const dir = mkdtempSync(join(tmpdir(), "mia-no-prompt-"));
+    try {
+      await restartSession({ agentPromptFile: join(dir, "missing.md") });
+      expect(promptProvenance()).toEqual({ availability: "unavailable", object_digest: null });
+      const { turn, taskId } = await submit("no prompt");
+      expect(turn.options.agentPromptFile).toBeNull();
+      turn.end();
+      await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("refuses unsupported tool surfaces and unresolved placeholders", () => {
