@@ -20,6 +20,8 @@ export interface McpHttpServerOptions {
    * A write failure is reported once on stderr and turns logging off; it never fails a request.
    */
   logFile?: string;
+  /** Receives the request log's first failed write; defaults to a line on stderr. */
+  reportLogFailure?: (error: unknown) => void;
   /** Build a fresh McpServer per request (stateless Streamable HTTP mode). */
   createServer: (ctx: McpRequestContext) => McpServer;
 }
@@ -66,14 +68,16 @@ export const startMcpHttpServer = async (
   let requestCounter = 0;
   const logFile = options.logFile ?? process.env.MIA_MCP_HTTP_LOG;
   let boundPort: number | null = null;
+  const reportLogFailure =
+    options.reportLogFailure ??
+    ((error: unknown) =>
+      process.stderr.write(
+        `[mia-mcp-http] request log ${logFile} disabled: ${errorMessage(error)}\n`,
+      ));
   const requestLog =
     logFile === undefined || logFile === ""
       ? undefined
-      : createRequestLog(logFile, (error) =>
-          process.stderr.write(
-            `[mia-mcp-http] request log ${logFile} disabled: ${errorMessage(error)}\n`,
-          ),
-        );
+      : createRequestLog(logFile, reportLogFailure);
   const log = (entry: Record<string, unknown>) =>
     requestLog?.({ at: new Date().toISOString(), port: boundPort, ...entry });
 

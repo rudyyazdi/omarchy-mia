@@ -34,8 +34,10 @@ const initialize = (url: string) =>
 describe("MCP HTTP server", () => {
   it("keeps serving when its request log cannot be written", async () => {
     // A directory cannot be appended to, so every log write fails with EISDIR.
+    const failures: unknown[] = [];
     handle = await startMcpHttpServer({
       logFile: dir,
+      reportLogFailure: (error) => failures.push(error),
       createServer: () => new McpServer({ name: "mcp-http-test", version: "0" }),
     });
 
@@ -46,5 +48,27 @@ describe("MCP HTTP server", () => {
     const refused = await fetch(handle.url);
     expect(refused.status).toBe(405);
     await refused.body?.cancel();
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ code: "EISDIR" });
+  });
+
+  it("answers 500 when a request fails, and keeps serving", async () => {
+    let calls = 0;
+    handle = await startMcpHttpServer({
+      createServer: () => {
+        calls += 1;
+        if (calls === 1) throw new Error("factory failed");
+        return new McpServer({ name: "mcp-http-test", version: "0" });
+      },
+    });
+
+    const failed = await initialize(handle.url);
+    expect(failed.status).toBe(500);
+    expect(await failed.json()).toEqual({ error: "factory failed" });
+
+    const recovered = await initialize(handle.url);
+    expect(recovered.status).toBe(200);
+    await recovered.body?.cancel();
   });
 });

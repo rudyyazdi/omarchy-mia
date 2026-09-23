@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -32,5 +32,15 @@ describe("request log", () => {
     expect(() => log({ ev: "finish", req: 1 })).not.toThrow();
     expect(failures).toHaveLength(1);
     expect(failures[0]).toMatchObject({ code: "EISDIR" });
+  });
+
+  it("stays off after a failure even once the path becomes writable", async () => {
+    const failures: unknown[] = [];
+    const log = createRequestLog(dir, (error) => failures.push(error));
+    log({ ev: "request", req: 1 });
+    await rm(dir, { recursive: true });
+    log({ ev: "finish", req: 1 });
+    await expect(access(dir)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(failures).toHaveLength(1);
   });
 });

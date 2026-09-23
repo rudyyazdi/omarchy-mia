@@ -1,6 +1,6 @@
 import { appendFileSync } from "node:fs";
 
-/** Appends one diagnostics record; never throws. */
+/** Appends one diagnostics record; throws only if the failure reporter does. */
 export type RequestLog = (entry: Record<string, unknown>) => void;
 
 /**
