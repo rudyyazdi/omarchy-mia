@@ -24,7 +24,7 @@
     "client": "tsx apps/text-client/src/main.ts",
     "mia": "tsx apps/debug-cli/src/main.ts",
     "fixture": "tsx fixtures/controlled-mcp/src/main.ts",
-    "live": "tsx tests/acceptance/promptfoo/run.ts",
+    "live": "tsx tests/acceptance/promptfoo/main.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "dupes": "jscpd .",

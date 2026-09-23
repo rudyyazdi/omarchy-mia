@@ -121,14 +121,13 @@ const PROCESS_ENTRY_ONLY = [
   },
 ];
 
-// The files a process starts from other than a main.ts: the runtime's hook script, the promptfoo
-// provider plugin and the live-lane runner script (to become a main.ts: #110). The override below
-// turns no-restricted-properties off for them, which only carries PROCESS_ENTRY_ONLY.
+// The files a process starts from other than a main.ts: the runtime's hook script and the promptfoo
+// provider plugin. The override below turns no-restricted-properties off for them, which only
+// carries PROCESS_ENTRY_ONLY.
 const PROCESS_ENTRY_FILES = [
   "**/main.ts",
   "packages/agent-adapter/src/hook-capture.mjs",
   "tests/acceptance/promptfoo/provider.ts",
-  "tests/acceptance/promptfoo/run.ts",
 ];
 
 // Enforces AGENTS.md, Design: `export *` makes every helper a module exports public contract.

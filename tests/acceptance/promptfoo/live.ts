@@ -6,51 +6,27 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { Command } from "commander";
 import { z } from "zod";
 import { startFixture } from "@mia/controlled-mcp";
 import { errorMessage, isRecord } from "@mia/protocol";
 import { Catalog, exportConversation, snapshotConversation, verifyExport } from "@mia/records";
 import { loadProfile, startServer, type MiaServer } from "@mia/server";
-import {
-  readScenarioList,
-  readScenarioName,
-  ScenarioNameSchema,
-  type ScenarioName,
-} from "./scenarios.ts";
+import { readScenarioName, ScenarioNameSchema, type ScenarioName } from "./scenarios.ts";
 
-const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
-const program: Command = new Command()
-  .name("live")
-  .option("--repeat <N>", "promptfoo repeat count", "2")
-  // Checked before anything starts: promptfoo would silently match none.
-  .option(
-    "--scenarios <names>",
-    "comma-separated scenario names to run",
-    (value: string): ScenarioName[] => {
-      const read = readScenarioList(value);
-      return read.ok ? read.names : program.error(`--scenarios: ${read.error}`, { exitCode: 2 });
-    },
-  )
-  .option(
-    "--agent-prompt <path>",
-    "agent prompt file, relative to the repo root",
-    "prompts/agent-v1.md",
-  )
-  .option("--model <model>", "runtime model", "claude-sonnet-5")
-  .option("--out <dir>", "evidence directory (default: .mia-state/live/<timestamp>)");
-program.parse();
-const values = program.opts<{
+/** What `npm run live` was asked to run; `main.ts` reads it from the command line. */
+export interface LiveOptions {
+  /** The promptfoo repeat count, passed through as given. */
   repeat: string;
+  /** The scenarios to run; all of them when absent. */
   scenarios?: ScenarioName[];
+  /** The agent prompt file, relative to the repo root. */
   agentPrompt: string;
   model: string;
+  /** The evidence directory; `.mia-state/live/<timestamp>` when absent. */
   out?: string;
-}>();
-const requested = values.scenarios ?? ScenarioNameSchema.options;
-const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-const outDir = resolve(values.out ?? join(REPO_ROOT, ".mia-state", "live", stamp));
-mkdirSync(outDir, { recursive: true, mode: 0o700 });
+}
+
+const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 const log = (message: string) => console.log(`[live] ${message}`);
 
 const stringOrUndefined = (value: unknown): string | undefined =>
@@ -142,84 +118,47 @@ const writeLiveResults = ({
   );
 };
 
-const fixtureDir = join(outDir, "fixture");
-const fixture = await startFixture({ dir: fixtureDir, mcpLogFile: process.env.MIA_MCP_HTTP_LOG });
-log(`fixture ${fixture.mcpUrl} harness ${fixture.harnessUrl}`);
-const env = {
-  ...process.env,
-  MIA_FIXTURE_MCP_URL: fixture.mcpUrl,
-  MIA_FIXTURE_DIR: fixtureDir,
-  XDG_STATE_HOME: process.env.XDG_STATE_HOME ?? join(process.env.HOME ?? ".", ".local", "state"),
-};
-const agentPromptPath = resolve(REPO_ROOT, values.agentPrompt);
-const promptVersion = basename(agentPromptPath, ".md");
+/** What starting one server profile needs from the run. */
+interface ProfileRun {
+  outDir: string;
+  agentPromptPath: string;
+  model: string;
+  /** The environment the profile's `${ENV}` placeholders resolve against. */
+  profileEnv: NodeJS.ProcessEnv;
+  /** The environment the runtime inherits. */
+  runtimeEnv: NodeJS.ProcessEnv;
+  /** Owns each server: it is closed, then its log written, when the run ends however it ends. */
+  cleanup: AsyncDisposableStack;
+}
 
-const startProfile = async (name: string, index: number): Promise<MiaServer> => {
-  const profile = loadProfile(join(REPO_ROOT, "examples", "config", `${name}.json`), env);
-  profile.stateDirectory = join(outDir, `state-${index}`);
+const startProfile = async (name: string, index: number, run: ProfileRun): Promise<MiaServer> => {
+  const profile = loadProfile(
+    join(REPO_ROOT, "examples", "config", `${name}.json`),
+    run.profileEnv,
+  );
+  profile.stateDirectory = join(run.outDir, `state-${index}`);
   profile.server = {
     ...profile.server,
     port: 0,
-    secretFile: join(outDir, `state-${index}`, "client-secret"),
+    secretFile: join(run.outDir, `state-${index}`, "client-secret"),
   };
-  profile.runtime.workingDirectory = join(outDir, `work-${index}`);
-  profile.runtime.agentPromptFile = agentPromptPath;
-  profile.runtime.model = values.model;
+  profile.runtime.workingDirectory = join(run.outDir, `work-${index}`);
+  profile.runtime.agentPromptFile = run.agentPromptPath;
+  profile.runtime.model = run.model;
   const logs: string[] = [];
   const server = await startServer({
     profile,
-    // The runtime inherits the runner's own environment, not the promptfoo one built above.
-    env: process.env,
+    env: run.runtimeEnv,
     log: (message) => logs.push(`${new Date().toISOString()} ${message}`),
   });
-  process.on("exit", () =>
-    writeFileSync(join(outDir, `server-${index}.log`), logs.join("\n") + "\n"),
+  // Deferred callbacks run last in, first out: the server closes before its log is written.
+  run.cleanup.defer(() =>
+    writeFileSync(join(run.outDir, `server-${index}.log`), logs.join("\n") + "\n"),
   );
+  run.cleanup.defer(() => server.close());
   log(`server ${name} at ${server.gateway.url}`);
   return server;
 };
-
-const server1 = await startProfile("fixture-test", 1);
-const server2 = await startProfile("fixture-test-interrupt", 2);
-
-const pfEnv = {
-  ...env,
-  MIA_URL_1: server1.gateway.url,
-  MIA_SECRET_FILE_1: server1.profile.server.secretFile,
-  MIA_URL_2: server2.gateway.url,
-  MIA_SECRET_FILE_2: server2.profile.server.secretFile,
-  MIA_FIXTURE_HARNESS_URL: fixture.harnessUrl,
-  MIA_REPO_ROOT: REPO_ROOT,
-  MIA_AGENT_PROMPT_VERSION: promptVersion,
-  PROMPTFOO_DISABLE_TELEMETRY: "1",
-  PROMPTFOO_DISABLE_UPDATE: "1",
-  PROMPTFOO_DISABLE_SHARING: "1",
-  PROMPTFOO_CONFIG_DIR: join(outDir, "promptfoo-home"),
-  NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=tsx`.trim(),
-};
-const resultsPath = join(outDir, "results.json");
-const args = [
-  "eval",
-  "-c",
-  join(REPO_ROOT, "tests/acceptance/promptfoo/promptfooconfig.yaml"),
-  "-o",
-  resultsPath,
-  "--no-cache",
-  "--repeat",
-  values.repeat,
-  "--no-progress-bar",
-];
-if (values.scenarios) args.push("--filter-pattern", `^(${values.scenarios.join("|")})$`);
-log(`promptfoo ${args.join(" ")}`);
-const { promise: promptfooExited, resolve: resolveExit } = Promise.withResolvers<number>();
-const child = spawn(join(REPO_ROOT, "node_modules/.bin/promptfoo"), args, {
-  cwd: join(REPO_ROOT, "tests/acceptance/promptfoo"),
-  env: pfEnv,
-  stdio: "inherit",
-});
-child.on("close", (code) => resolveExit(code ?? 1));
-const exitCode = await promptfooExited;
-log(`promptfoo exited ${exitCode}`);
 
 /** The slice of a promptfoo result row the runner reads; everything else is kept but ignored. */
 const PfResultSchema = z.looseObject({
@@ -244,16 +183,66 @@ const PfOutputSchema = z.looseObject({
 });
 const RuntimeIdentitySchema = z.looseObject({ runtime_version: z.string().optional() });
 
-const rows: LiveRow[] = [];
-/** Results whose scenario name is not declared; they cannot form a row, so they fail the run. */
-const unreadResults: string[] = [];
-if (existsSync(resultsPath)) {
+/** Runs the promptfoo eval and resolves to its exit code; aborting `signal` kills it. */
+const runPromptfoo = async (
+  options: LiveOptions,
+  pfEnv: NodeJS.ProcessEnv,
+  { resultsPath, signal }: { resultsPath: string; signal: AbortSignal | undefined },
+): Promise<number> => {
+  const args = [
+    "eval",
+    "-c",
+    join(REPO_ROOT, "tests/acceptance/promptfoo/promptfooconfig.yaml"),
+    "-o",
+    resultsPath,
+    "--no-cache",
+    "--repeat",
+    options.repeat,
+    "--no-progress-bar",
+  ];
+  if (options.scenarios) args.push("--filter-pattern", `^(${options.scenarios.join("|")})$`);
+  log(`promptfoo ${args.join(" ")}`);
+  const { promise: promptfooExited, resolve: resolveExit } = Promise.withResolvers<number>();
+  const child = spawn(join(REPO_ROOT, "node_modules/.bin/promptfoo"), args, {
+    cwd: join(REPO_ROOT, "tests/acceptance/promptfoo"),
+    env: pfEnv,
+    stdio: "inherit",
+    signal,
+  });
+  // An abort or a failed start emits "error" and then still "close", which settles the exit.
+  child.on("error", (error) => log(`promptfoo: ${errorMessage(error)}`));
+  child.on("close", (code) => resolveExit(code ?? 1));
+  const exitCode = await promptfooExited;
+  log(`promptfoo exited ${exitCode}`);
+  return exitCode;
+};
+
+/**
+ * One row per promptfoo result, enriched with evidence from the catalog of whichever server ran
+ * it. A result whose scenario name is not declared cannot form a row; it comes back as a problem.
+ */
+const readRows = ({
+  resultsPath,
+  servers,
+  outDir,
+  promptVersion,
+}: {
+  resultsPath: string;
+  servers: MiaServer[];
+  outDir: string;
+  promptVersion: string;
+}): { rows: LiveRow[]; unreadResults: string[] } => {
+  const rows: LiveRow[] = [];
+  const unreadResults: string[] = [];
+  if (!existsSync(resultsPath)) return { rows, unreadResults };
   const raw = PfOutputSchema.parse(JSON.parse(readFileSync(resultsPath, "utf8")));
   const results = raw.results?.results ?? [];
-  const catalogs = [
-    new Catalog(server1.profile.stateDirectory, { readonly: true }),
-    new Catalog(server2.profile.stateDirectory, { readonly: true }),
-  ];
+  using opened = new DisposableStack();
+  const catalogs = servers.map((server) =>
+    opened.adopt(new Catalog(server.profile.stateDirectory, { readonly: true }), (catalog) =>
+      catalog.close(),
+    ),
+  );
   const repeatCounters: Partial<Record<ScenarioName, number>> = {};
   for (const [index, result] of results.entries()) {
     const read = readScenarioName(result.testCase?.vars?.scenario ?? result.vars?.scenario);
@@ -357,36 +346,100 @@ if (existsSync(resultsPath)) {
       export: exportResult,
     });
   }
-  for (const catalog of catalogs) catalog.close();
-}
-/** Requested scenarios that produced no row: a filter or config mismatch must not pass as "all passed". */
-const missingScenarios = requested.filter((name) => !rows.some((row) => row.scenario === name));
-const summary = {
-  generated_at: new Date().toISOString(),
-  out_dir: outDir,
-  model: values.model,
-  prompt_version: promptVersion,
-  repeat: Number(values.repeat),
-  promptfoo_exit: exitCode,
-  unread_results: unreadResults,
-  missing_scenarios: missingScenarios,
-  rows,
+  return { rows, unreadResults };
 };
-writeLiveResults({
-  rows,
-  summary,
-  problems: [
-    ...unreadResults.map((problem) => `skipped ${problem}`),
-    ...missingScenarios.map((name) => `scenario ${name} was requested but produced no result`),
-  ],
-  promptVersion,
-  outDirAbs: outDir,
-});
-log(
-  `wrote docs/D1/acceptance/live-results-${promptVersion}.md and ${join(outDir, "acceptance-live.json")}`,
-);
-await server1.close();
-await server2.close();
-await fixture.close();
-const clean = unreadResults.length === 0 && missingScenarios.length === 0;
-process.exit(exitCode === 0 && clean && rows.every((row) => row.pass) ? 0 : 1);
+
+/**
+ * Runs the live lane and resolves to the process exit code: 0 only when promptfoo passed, every
+ * requested scenario produced a row and every row passed. Before it settles, whether it resolves
+ * or rejects, both servers are closed and their logs written, then the fixture is closed.
+ */
+export const runLive = async (
+  options: LiveOptions,
+  env: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
+): Promise<number> => {
+  const requested = options.scenarios ?? ScenarioNameSchema.options;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const outDir = resolve(options.out ?? join(REPO_ROOT, ".mia-state", "live", stamp));
+  mkdirSync(outDir, { recursive: true, mode: 0o700 });
+
+  await using cleanup = new AsyncDisposableStack();
+  const fixtureDir = join(outDir, "fixture");
+  const fixture = await startFixture({ dir: fixtureDir, mcpLogFile: env.MIA_MCP_HTTP_LOG });
+  cleanup.defer(() => fixture.close());
+  log(`fixture ${fixture.mcpUrl} harness ${fixture.harnessUrl}`);
+  const fixtureEnv = {
+    ...env,
+    MIA_FIXTURE_MCP_URL: fixture.mcpUrl,
+    MIA_FIXTURE_DIR: fixtureDir,
+    XDG_STATE_HOME: env.XDG_STATE_HOME ?? join(env.HOME ?? ".", ".local", "state"),
+  };
+  const agentPromptPath = resolve(REPO_ROOT, options.agentPrompt);
+  const promptVersion = basename(agentPromptPath, ".md");
+
+  const run: ProfileRun = {
+    outDir,
+    agentPromptPath,
+    model: options.model,
+    profileEnv: fixtureEnv,
+    // The runtime inherits the runner's own environment, not the promptfoo one built here.
+    runtimeEnv: env,
+    cleanup,
+  };
+  const server1 = await startProfile("fixture-test", 1, run);
+  const server2 = await startProfile("fixture-test-interrupt", 2, run);
+
+  const pfEnv = {
+    ...fixtureEnv,
+    MIA_URL_1: server1.gateway.url,
+    MIA_SECRET_FILE_1: server1.profile.server.secretFile,
+    MIA_URL_2: server2.gateway.url,
+    MIA_SECRET_FILE_2: server2.profile.server.secretFile,
+    MIA_FIXTURE_HARNESS_URL: fixture.harnessUrl,
+    MIA_REPO_ROOT: REPO_ROOT,
+    MIA_AGENT_PROMPT_VERSION: promptVersion,
+    PROMPTFOO_DISABLE_TELEMETRY: "1",
+    PROMPTFOO_DISABLE_UPDATE: "1",
+    PROMPTFOO_DISABLE_SHARING: "1",
+    PROMPTFOO_CONFIG_DIR: join(outDir, "promptfoo-home"),
+    NODE_OPTIONS: `${env.NODE_OPTIONS ?? ""} --import=tsx`.trim(),
+  };
+  const resultsPath = join(outDir, "results.json");
+  const exitCode = await runPromptfoo(options, pfEnv, { resultsPath, signal });
+
+  const { rows, unreadResults } = readRows({
+    resultsPath,
+    servers: [server1, server2],
+    outDir,
+    promptVersion,
+  });
+  /** Requested scenarios that produced no row: a filter or config mismatch must not pass as "all passed". */
+  const missingScenarios = requested.filter((name) => !rows.some((row) => row.scenario === name));
+  const summary = {
+    generated_at: new Date().toISOString(),
+    out_dir: outDir,
+    model: options.model,
+    prompt_version: promptVersion,
+    repeat: Number(options.repeat),
+    promptfoo_exit: exitCode,
+    unread_results: unreadResults,
+    missing_scenarios: missingScenarios,
+    rows,
+  };
+  writeLiveResults({
+    rows,
+    summary,
+    problems: [
+      ...unreadResults.map((problem) => `skipped ${problem}`),
+      ...missingScenarios.map((name) => `scenario ${name} was requested but produced no result`),
+    ],
+    promptVersion,
+    outDirAbs: outDir,
+  });
+  log(
+    `wrote docs/D1/acceptance/live-results-${promptVersion}.md and ${join(outDir, "acceptance-live.json")}`,
+  );
+  const clean = unreadResults.length === 0 && missingScenarios.length === 0;
+  return exitCode === 0 && clean && rows.every((row) => row.pass) ? 0 : 1;
+};
