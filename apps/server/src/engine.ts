@@ -48,7 +48,11 @@ import {
   type DeclaredArtifact,
 } from "./artifact-capture.ts";
 import type { ArtifactCollector } from "./artifact-collector.ts";
-import { createConversationProvenance, type ServerIdentity } from "./provenance.ts";
+import {
+  createConversationProvenance,
+  readConversationFilesSync,
+  type ServerIdentity,
+} from "./provenance.ts";
 import {
   bindPermissionRequest,
   bindStreamProposal,
@@ -451,6 +455,8 @@ export class Engine {
       client: this.activeClientId,
     };
     try {
+      // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 makes engine commands async
+      const files = readConversationFilesSync(profile);
       // Unlike task transitions, this sets state inside the transaction, because `record` reads the active
       // conversation; the catch below restores it.
       return this.tx(() => {
@@ -459,6 +465,7 @@ export class Engine {
           profile,
           clientBuild: ctx.clientBuild,
           identity: this.deps.identity,
+          files,
         });
         const runtimeConversationId = randomUUID();
         const conv = writer.createConversation({

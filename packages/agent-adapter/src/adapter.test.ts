@@ -22,14 +22,16 @@ import {
 describe("writeLaunchFiles", () => {
   it("creates the planned directories and files, owner-only, with the planned contents", async () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-launch-files-"));
-    const runtimeDir = join(directory.path, "conversation", "runtime");
+    // The conversation directory does not exist before its first turn: the launch creates it, owner-only too.
+    const conversationDir = join(directory.path, "conversation");
+    const runtimeDir = join(conversationDir, "runtime");
     const workingDirectory = join(directory.path, "work");
     const settings = join(runtimeDir, "settings.json");
     await writeLaunchFiles({
       directories: [runtimeDir, workingDirectory],
       files: [{ path: settings, content: "{}" }],
     });
-    for (const created of [runtimeDir, workingDirectory]) {
+    for (const created of [conversationDir, runtimeDir, workingDirectory]) {
       expect(statSync(created).isDirectory()).toBe(true);
       expect(statSync(created).mode & 0o077).toBe(0);
     }
