@@ -27,6 +27,9 @@ export const defaultStateDir = (): string => {
   return join(base, "mia");
 };
 
+/** A savepoint's result: fn's value, or the error fn's writes were undone after. */
+export type SavepointOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
+
 export interface CatalogPaths {
   root: string;
   database: string;
@@ -116,6 +119,26 @@ export class Catalog {
         /* already rolled back */
       }
       throw error;
+    }
+  }
+
+  /**
+   * Run fn inside the open transaction so that a throw undoes only fn's writes, and the transaction can still
+   * commit the rest: how a best-effort write stays out of the fate of the records around it. A failure that
+   * ended the whole transaction (SQLite rolls back on some I/O errors) throws, because nothing is left to commit.
+   */
+  savepoint<T>(fn: () => T): SavepointOutcome<T> {
+    if (!this.db.isTransaction) throw new Error("savepoint needs an open transaction");
+    this.db.exec("SAVEPOINT attempt");
+    try {
+      const value = fn();
+      this.db.exec("RELEASE attempt");
+      return { ok: true, value };
+    } catch (error) {
+      if (!this.db.isTransaction) throw error;
+      this.db.exec("ROLLBACK TO attempt");
+      this.db.exec("RELEASE attempt");
+      return { ok: false, error };
     }
   }
 

@@ -1,4 +1,4 @@
-import { writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigurationError, validateRuntimeConfig } from "@mia/agent-adapter";
@@ -214,6 +214,85 @@ describe("streaming and commands", () => {
       read_error: expect.stringContaining("EISDIR"),
       note: expect.stringContaining("hook evidence unreadable (EISDIR"),
     });
+  });
+
+  /** Ends a turn after `prepare` has set it up to lose its transcript; returns the transcript artifacts. */
+  const finishLosingTranscript = async (prepare: (turn: ScriptedTurn) => void) => {
+    const { turn, taskId } = await submit("hello");
+    turn.init();
+    prepare(turn);
+    turn.end();
+    const finished = await client.waitFor("task_finished");
+    expect(finished.payload.status).toBe("completed");
+    expect(taskStatus(taskId)).toBe("completed");
+    return rows<{ capture_status: string; capture_reason: string | null; object_digest: null }>(
+      `SELECT a.capture_status, a.capture_reason, a.object_digest FROM artifacts a
+       JOIN artifact_links l ON l.artifact_id = a.id
+       WHERE l.task_id = ? AND l.relation = 'runtime_transcript'`,
+      taskId,
+    );
+  };
+
+  it("records a turn finished, and why its transcript is missing, when the transcript cannot be read", async () => {
+    const transcripts = await finishLosingTranscript((turn) => {
+      turn.transcriptUnreadable = true;
+    });
+    expect(transcripts).toEqual([
+      {
+        capture_status: "failed",
+        capture_reason: expect.stringContaining("unreadable: EISDIR"),
+        object_digest: null,
+      },
+    ]);
+  });
+
+  it("records a turn finished, and why its transcript is missing, when the transcript cannot be stored", async () => {
+    const transcripts = await finishLosingTranscript(() => {
+      // A file where the object store stages its writes makes every object write fail.
+      const { staging } = ts.server.catalog.paths;
+      rmSync(staging, { recursive: true });
+      writeFileSync(staging, "");
+    });
+    expect(transcripts).toEqual([
+      {
+        capture_status: "failed",
+        capture_reason: expect.stringContaining("not retained: "),
+        object_digest: null,
+      },
+    ]);
+  });
+
+  /** Make linking a runtime transcript fail after its object and artifact rows are written, when `when` holds. */
+  const failTranscriptLinks = (when: string): void => {
+    ts.server.catalog.db.exec(`CREATE TRIGGER fail_transcript_link BEFORE INSERT ON artifact_links
+      WHEN NEW.relation = 'runtime_transcript' AND ${when}
+      BEGIN SELECT RAISE(ABORT, 'simulated link failure'); END`);
+  };
+  const countRows = (table: string): number => rows(`SELECT 1 FROM ${table}`).length;
+
+  it("undoes a transcript's partial rows when its retention fails midway, and records it failed", async () => {
+    let objectsBefore = 0;
+    const transcripts = await finishLosingTranscript(() => {
+      failTranscriptLinks(
+        "(SELECT capture_status FROM artifacts WHERE id = NEW.artifact_id) = 'retained'",
+      );
+      objectsBefore = countRows("objects");
+    });
+    expect(transcripts).toEqual([
+      {
+        capture_status: "failed",
+        capture_reason: expect.stringContaining("not retained: simulated link failure"),
+        object_digest: null,
+      },
+    ]);
+    expect(countRows("objects")).toBe(objectsBefore);
+    expect(rows("SELECT 1 FROM artifacts WHERE kind = 'runtime_transcript'")).toHaveLength(1);
+  });
+
+  it("records a turn finished when not even its failed transcript can be recorded", async () => {
+    const transcripts = await finishLosingTranscript(() => failTranscriptLinks("1"));
+    expect(transcripts).toEqual([]);
+    expect(rows("SELECT 1 FROM artifacts WHERE kind = 'runtime_transcript'")).toHaveLength(0);
   });
 });
 

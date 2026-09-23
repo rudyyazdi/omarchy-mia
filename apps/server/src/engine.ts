@@ -4,7 +4,9 @@ import { join, resolve } from "node:path";
 import { match } from "ts-pattern";
 import {
   readHookEvidence,
+  readRuntimeFile,
   type HookEvidence,
+  type RuntimeFileRead,
   type RuntimeEvent,
   type PermissionDecision,
   type PermissionRequest,
@@ -35,7 +37,7 @@ import {
   type RecordWriter,
   type ToolCallPolicy,
 } from "@mia/records";
-import { extractDeclaredArtifact } from "./artifact-capture.ts";
+import { captureFields, extractDeclaredArtifact, type Capture } from "./artifact-capture.ts";
 import { collectArtifact } from "./artifact-collector.ts";
 import type { Profile } from "./config.ts";
 import { createConversationProvenance } from "./provenance.ts";
@@ -165,6 +167,15 @@ interface NewCallInput {
 }
 
 const RUNTIME_IDENTITY = "claude-code";
+
+/** An artifact a finished turn retains for its task, with the bytes read for it or why they could not be. */
+interface TurnEvidence {
+  kind: ArtifactKind;
+  name: string;
+  relation: "runtime_transcript" | "task_output";
+  originalPath: string | null;
+  content: Exclude<RuntimeFileRead, { status: "absent" }>;
+}
 
 /** State changes and effects a transaction queues; neither runs unless it commits. */
 interface CommitQueue {
@@ -1394,6 +1405,8 @@ export class Engine {
     const actions = classifyActions(calls, task.interrupted);
     const unknown = actions.some((action) => action.status === "unknown");
     const { status, error } = classifyTask({ interrupted: task.interrupted, result, unknown });
+    // Read before the transaction: retaining evidence is best-effort, recording that the task finished is not.
+    const transcript = readRuntimeFile(result.streamLogPath);
     const hookEvidence = readHookEvidence(result.hookEvidencePath);
     const { records: hooks, malformedLines, readError } = hookEvidence;
     const efforts = effortLevels(hooks);
@@ -1413,42 +1426,24 @@ export class Engine {
         );
         for (const approval of stillPending)
           writer.updateApproval(approval.id, { status: "expired", reason: "task ended" });
-        const retain = (artifact: {
-          kind: ArtifactKind;
-          name: string;
-          bytes: Buffer;
-          relation: "runtime_transcript" | "task_output";
-          originalPath?: string;
-        }) => {
-          const art = writer.registerArtifact({
-            kind: artifact.kind,
-            logicalName: artifact.name,
-            mimeType: "application/x-ndjson",
-            bytes: artifact.bytes,
-            producerExecutionId: task.executionId,
-            originalPath: artifact.originalPath ?? null,
-          });
-          writer.linkArtifact({
-            conversationId: conversation.id,
-            artifactId: art.artifactId,
-            relation: artifact.relation,
-            taskId: task.id,
-          });
-        };
-        if (existsSync(result.streamLogPath))
-          retain({
+        if (transcript.status !== "absent")
+          this.retainEvidence(task, {
             kind: "runtime_transcript",
             name: `turn-${conversation.turnCount}.stream.jsonl`,
-            bytes: readFileSync(result.streamLogPath),
             relation: "runtime_transcript",
             originalPath: result.streamLogPath,
+            content: transcript,
           });
         if (hooks.length > 0)
-          retain({
+          this.retainEvidence(task, {
             kind: "effort_evidence",
             name: `turn-${conversation.turnCount}.hooks.jsonl`,
-            bytes: Buffer.from(hooks.map((hook) => JSON.stringify(hook)).join("\n") + "\n"),
             relation: "task_output",
+            originalPath: null,
+            content: {
+              status: "read",
+              bytes: Buffer.from(hooks.map((hook) => JSON.stringify(hook)).join("\n") + "\n"),
+            },
           });
         writer.updateExecution(task.executionId, {
           status: executionStatusFor(task.interrupted, result),
@@ -1524,6 +1519,51 @@ export class Engine {
     if (note) conversation.pendingNote = note;
   }
 
+  /**
+   * Retain one piece of a finished turn's evidence, linked to its task (inside tx). Each attempt runs in a
+   * savepoint: bytes that cannot be stored leave a failed artifact that says why, and if even that cannot be
+   * recorded the evidence is logged as lost. Either way the task, action and execution updates committed
+   * with it stand. A savepoint undoes rows only, so registerEvidence must queue no state change or effect.
+   */
+  private retainEvidence(task: TaskState, evidence: TurnEvidence): void {
+    const capture = match(evidence.content)
+      .with({ status: "read" }, ({ bytes }): Capture => ({ status: "retained", bytes }))
+      .with({ status: "unreadable" }, ({ reason }): Capture => ({
+        status: "failed",
+        reason: `unreadable: ${reason}`,
+      }))
+      .exhaustive();
+    const { catalog } = this.deps;
+    const first = catalog.savepoint(() => this.registerEvidence(task, evidence, capture));
+    if (first.ok) return;
+    const reason = `not retained: ${errorMessage(first.error)}`;
+    const fallback = catalog.savepoint(() =>
+      this.registerEvidence(task, evidence, { status: "failed", reason }),
+    );
+    if (!fallback.ok)
+      this.deps.log(
+        `${evidence.name} lost, ${reason}; not recorded: ${errorMessage(fallback.error)}`,
+      );
+  }
+
+  private registerEvidence(task: TaskState, evidence: TurnEvidence, capture: Capture): void {
+    const { writer } = this.deps;
+    const artifact = writer.registerArtifact({
+      kind: evidence.kind,
+      logicalName: evidence.name,
+      mimeType: "application/x-ndjson",
+      producerExecutionId: task.executionId,
+      originalPath: evidence.originalPath,
+      ...captureFields(capture),
+    });
+    writer.linkArtifact({
+      conversationId: this.activeConversation.id,
+      artifactId: artifact.artifactId,
+      relation: evidence.relation,
+      taskId: task.id,
+    });
+  }
+
   /** Records a declared tool output whatever its capture status; only a retained one becomes a task output. */
   private collectArtifacts(
     task: TaskState,
@@ -1542,13 +1582,8 @@ export class Engine {
       producerExecutionId: task.executionId,
       producerEventId: result.eventId,
       originalPath: declared.path,
-      ...(capture.status === "retained"
-        ? { bytes: capture.bytes }
-        : {
-            captureStatus: capture.status,
-            externalLocator: declared.path,
-            captureReason: capture.reason,
-          }),
+      externalLocator: capture.status === "retained" ? null : declared.path,
+      ...captureFields(capture),
     });
     writer.linkArtifact({
       conversationId,

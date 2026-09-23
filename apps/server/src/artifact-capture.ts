@@ -45,6 +45,14 @@ export type Eligibility =
 
 export type Capture = { status: Extract<CaptureStatus, "retained">; bytes: Buffer } | NotRetained;
 
+/** The artifact fields a capture sets: its bytes, or its capture status and why nothing was retained. */
+export const captureFields = (
+  capture: Capture,
+): { bytes: Buffer } | { captureStatus: NotRetained["status"]; captureReason: string } =>
+  capture.status === "retained"
+    ? { bytes: capture.bytes }
+    : { captureStatus: capture.status, captureReason: capture.reason };
+
 /** Text blocks of a tool result: a bare string, or the `text` of every block that carries one. */
 const resultTexts = (content: unknown): string[] => {
   if (typeof content === "string") return [content];

@@ -2,6 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { match } from "ts-pattern";
 import { z } from "zod";
 import { errorMessage, redactString } from "@mia/protocol";
 import type { ApprovalBridge, PermissionHandler } from "./bridge.ts";
@@ -348,20 +349,29 @@ const parseHookLine = (line: string): Record<string, unknown> | null => {
   }
 };
 
+/** A file the runtime writes during a turn, read after it ends; `absent` when the runtime never wrote it. */
+export type RuntimeFileRead =
+  | { status: "absent" }
+  | { status: "read"; bytes: Buffer }
+  | { status: "unreadable"; reason: string };
+
 /**
- * Evidence is best-effort: a malformed line is counted and skipped, and an unreadable file is reported,
- * rather than thrown, because a throw here would keep the turn that wrote it from being recorded as finished.
+ * Reads a runtime-written file without throwing, because a throw after the turn would keep it from being
+ * recorded as finished. Only a missing file is absent; any other failure (EACCES, EISDIR, ENOTDIR) is reported.
  */
-export const readHookEvidence = (path: string): HookEvidence => {
-  const evidence: HookEvidence = { records: [], malformedLines: 0, readError: null };
-  let text: string;
+export const readRuntimeFile = (path: string): RuntimeFileRead => {
   try {
-    text = readFileSync(path, "utf8");
+    return { status: "read", bytes: readFileSync(path) };
   } catch (error) {
-    // Only a missing file means the hook never wrote; any other failure (EACCES, ENOTDIR) is reported.
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") return evidence;
-    return { ...evidence, readError: errorMessage(error) };
+    if (error instanceof Error && "code" in error && error.code === "ENOENT")
+      return { status: "absent" };
+    return { status: "unreadable", reason: errorMessage(error) };
   }
+};
+
+/** Counts and skips malformed lines, such as the truncated last line of a turn killed mid-write. */
+const parseHookEvidence = (text: string): HookEvidence => {
+  const evidence: HookEvidence = { records: [], malformedLines: 0, readError: null };
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     const record = parseHookLine(line);
@@ -370,3 +380,14 @@ export const readHookEvidence = (path: string): HookEvidence => {
   }
   return evidence;
 };
+
+/** Evidence is best-effort: a malformed line is skipped, and an unreadable file is reported rather than thrown. */
+export const readHookEvidence = (path: string): HookEvidence =>
+  match(readRuntimeFile(path))
+    .with({ status: "absent" }, () => parseHookEvidence(""))
+    .with({ status: "unreadable" }, ({ reason }) => ({
+      ...parseHookEvidence(""),
+      readError: reason,
+    }))
+    .with({ status: "read" }, ({ bytes }) => parseHookEvidence(bytes.toString("utf8")))
+    .exhaustive();
