@@ -14,6 +14,10 @@ import { FixtureHarness, startFixture, type FixtureHandle } from "@mia/controlle
 import { REPO_ROOT, testProfile } from "./harness.ts";
 
 const FAKE = resolve(REPO_ROOT, "tests/fake-claude/bin.sh");
+/** How long the fake runtime may take to reach the fixture's slow tool. */
+const SLOW_ENTERED_TIMEOUT_MS = 20_000;
+/** How long the fixture's ledger may take to settle after the event that caused it. */
+const LEDGER_SETTLE_TIMEOUT_MS = 5_000;
 let dir: string;
 let fixture: FixtureHandle;
 let harness: FixtureHarness;
@@ -116,11 +120,14 @@ describe("real adapter against a fake runtime process", () => {
         return { behavior: "allow" };
       },
       async (handle) => {
-        await harness.waitEntered(20_000);
+        await harness.waitEntered({ signal: AbortSignal.timeout(SLOW_ENTERED_TIMEOUT_MS) });
         const cancellation = await handle.interrupt();
         expect(cancellation).toBe("forced_kill");
-        await harness.waitForState((state) =>
-          state.ledger.some((entry) => entry.kind === "cancelled"),
+        await harness.waitForState(
+          (state) => state.ledger.some((entry) => entry.kind === "cancelled"),
+          {
+            signal: AbortSignal.timeout(LEDGER_SETTLE_TIMEOUT_MS),
+          },
         );
       },
     );

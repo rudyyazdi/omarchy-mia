@@ -64,6 +64,8 @@ export const readScenarioList = (
 
 /** How long one command may wait for its acknowledgement. */
 const ACK_TIMEOUT_MS = 30_000;
+/** How long the fixture's ledger may take to settle after the event that caused it. */
+const LEDGER_SETTLE_TIMEOUT_MS = 5_000;
 const acknowledgedWithin = (ctx: ScenarioContext) => ({ signal: ctx.within(ACK_TIMEOUT_MS) });
 
 const LedgerRefSchema = z.object({ tool: z.string(), call_id: z.string() });
@@ -281,7 +283,7 @@ const interruptAtEntered = async ({
   taskId,
   notes,
 }: TaskContext): Promise<{ call_id: string }> => {
-  const entered = await ctx.harness.waitEntered(300_000);
+  const entered = await ctx.harness.waitEntered({ signal: ctx.within(300_000) });
   notes.push(`entered ${entered.call_id} (${entered.mode})`);
   const ack = await ctx.client.interrupt(taskId, acknowledgedWithin(ctx));
   notes.push(`interrupt ack ${ack.disposition}`);
@@ -407,8 +409,10 @@ export const SCENARIOS: Scenario[] = [
           );
           notes.push(`commits before release: ${commitCount(await ctx.harness.state())}`);
           await ctx.harness.release(entered.call_id);
-          await ctx.harness.waitForState((state) =>
-            state.ledger.some((entry) => entry.kind === "committed" && entry.tool === "slow"),
+          await ctx.harness.waitForState(
+            (state) =>
+              state.ledger.some((entry) => entry.kind === "committed" && entry.tool === "slow"),
+            { signal: ctx.within(LEDGER_SETTLE_TIMEOUT_MS) },
           );
         },
       },

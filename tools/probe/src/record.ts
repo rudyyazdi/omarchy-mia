@@ -16,6 +16,14 @@ export interface ProbeOptions {
   only?: string;
 }
 
+/** Deadlines the probe's entry point builds; each call starts a fresh one for a single wait. */
+export interface ProbeDeadlines {
+  /** How long the model may take to call the fixture's slow tool. */
+  slowEntered: () => AbortSignal;
+  /** How long the fixture's ledger may take to settle after the event that caused it. */
+  ledgerSettled: () => AbortSignal;
+}
+
 export interface StepRecord {
   name: string;
   session_id: string;

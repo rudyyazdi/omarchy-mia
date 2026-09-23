@@ -1,5 +1,10 @@
 import { Command } from "commander";
-import { runProbe, type ProbeOptions } from "./probe.ts";
+import { runProbe, type ProbeDeadlines, type ProbeOptions } from "./probe.ts";
+
+const deadlines: ProbeDeadlines = {
+  slowEntered: () => AbortSignal.timeout(120_000),
+  ledgerSettled: () => AbortSignal.timeout(5_000),
+};
 
 const program = new Command()
   .name("probe")
@@ -16,4 +21,4 @@ const program = new Command()
   )
   .option("--only <names>", "comma-separated step names to run");
 program.parse();
-await runProbe(program.opts<ProbeOptions>(), process.env);
+await runProbe(program.opts<ProbeOptions>(), process.env, deadlines);

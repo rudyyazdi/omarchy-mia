@@ -50,6 +50,15 @@ export interface FixtureHandle {
   close(): Promise<void>;
 }
 
+/**
+ * How long one `/wait-entered` long poll stays open when the request names no `timeout_ms`. It
+ * bounds a single request, not the caller's wait: `FixtureHarness.waitEntered` polls again.
+ */
+const WAIT_ENTERED_POLL_MS = 60_000;
+/** The error a `/wait-entered` long poll answers with when it ends at its bound. */
+const NOTHING_ENTERED = "no slow call entered before timeout";
+const NothingEnteredSchema = z.object({ error: z.literal(NOTHING_ENTERED) });
+
 type ControlledSlowCall = PendingSlowCall & { release: () => void; cancel: () => void };
 
 /**
@@ -263,19 +272,22 @@ export const startFixture = async (options: FixtureOptions): Promise<FixtureHand
       // Long-poll until a slow call has entered (or one is already pending and unreleased).
       const existing = [...pending.values()].find((call) => !call.released && !call.cancelled);
       if (existing) return sendJson(res, 200, { call_id: existing.call_id, mode: existing.mode });
-      const timeoutMs = Number(url.searchParams.get("timeout_ms") ?? "60000");
+      const timeoutMs = Number(url.searchParams.get("timeout_ms") ?? WAIT_ENTERED_POLL_MS);
       const { promise, resolve: entered } = Promise.withResolvers<PendingSlowCall | null>();
-      // Match the timer API's handling of invalid or out-of-range delays.
-      const delay = timeoutMs >= 1 && timeoutMs <= 2_147_483_647 ? Math.trunc(timeoutMs) : 1;
+      // The fixture's own bound caps what a request asks for; an invalid delay ends the poll at once.
+      const delay = timeoutMs >= 1 ? Math.min(Math.trunc(timeoutMs), WAIT_ENTERED_POLL_MS) : 1;
       const deadline = AbortSignal.timeout(delay);
-      const onTimeout = () => entered(null);
-      deadline.addEventListener("abort", onTimeout, { once: true });
+      const stopWaiting = () => entered(null);
+      deadline.addEventListener("abort", stopWaiting, { once: true });
+      // A client that aborts its poll closes the response: drop its waiter now, not at the bound.
+      res.once("close", stopWaiting);
       enteredWaiters.add(entered);
       const call = await promise;
-      deadline.removeEventListener("abort", onTimeout);
+      deadline.removeEventListener("abort", stopWaiting);
+      res.off("close", stopWaiting);
       enteredWaiters.delete(entered);
       if (call) sendJson(res, 200, { call_id: call.call_id, mode: call.mode });
-      else sendJson(res, 408, { error: "no slow call entered before timeout" });
+      else sendJson(res, 408, { error: NOTHING_ENTERED });
       return;
     }
     if (req.method === "POST" && url.pathname === "/release") {
@@ -323,6 +335,23 @@ export const startFixture = async (options: FixtureOptions): Promise<FixtureHand
   };
 };
 
+/** Parses a response body that may not be JSON; anything that is not comes back as `undefined`. */
+const jsonOrUndefined = (text: string): unknown => {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+};
+
+/** How often `waitForState` reads the fixture state. */
+const STATE_POLL_MS = 25;
+
+/** A harness wait ends when `signal` aborts; without one it has no deadline of its own. */
+export interface HarnessWaitOptions {
+  signal?: AbortSignal;
+}
+
 /** Client for the private harness API. */
 export class FixtureHarness {
   constructor(readonly baseUrl: string) {}
@@ -333,28 +362,43 @@ export class FixtureHarness {
   async reset(): Promise<void> {
     await fetch(`${this.baseUrl}/reset`, { method: "POST" });
   }
-  async waitEntered(timeoutMs = 60_000): Promise<{ call_id: string; mode: string }> {
-    const res = await fetch(`${this.baseUrl}/wait-entered?timeout_ms=${timeoutMs}`, {
-      method: "POST",
-    });
-    if (!res.ok) throw new Error(`wait-entered failed: ${res.status} ${await res.text()}`);
-    return EnteredSchema.parse(await res.json());
+  /**
+   * Resolve with the first slow call that has entered and not been released, however long that
+   * takes; reject once `signal` aborts. The fixture ends each long poll at a bound of its own (a
+   * 408 naming that), and polling again is what keeps the caller's signal the only deadline. Any
+   * other failure, including a 408 from something that is not the fixture, rejects.
+   */
+  async waitEntered({ signal }: HarnessWaitOptions = {}): Promise<{
+    call_id: string;
+    mode: string;
+  }> {
+    for (;;) {
+      const res = await fetch(`${this.baseUrl}/wait-entered`, { method: "POST", signal });
+      if (!res.ok) {
+        const text = await res.text();
+        if (res.status === 408 && NothingEnteredSchema.safeParse(jsonOrUndefined(text)).success)
+          continue;
+        throw new Error(`wait-entered failed: ${res.status} ${text}`);
+      }
+      return EnteredSchema.parse(await res.json());
+    }
   }
   /**
-   * Poll the state until `settled` holds, then return it; return the last state seen once the budget
-   * is spent, so the caller's own assertion reports what was actually observed. The fixture is a
-   * separate process: its ledger settles a moment after the event that caused it, and every caller
-   * needs the same bounded wait rather than a sleep long enough "most of the time".
+   * Poll the state until `settled` holds, then return it; once `signal` aborts, return the last
+   * state seen instead, so the caller's own assertion reports what was actually observed. The
+   * fixture is a separate process: its ledger settles a moment after the event that caused it, so a
+   * caller polls until it has, bounded by its own signal, rather than sleeping long enough "most of
+   * the time". Without a signal the poll has no end of its own.
    */
   async waitForState(
     settled: (state: FixtureState) => boolean,
-    timeoutMs = 5_000,
+    { signal }: HarnessWaitOptions = {},
   ): Promise<FixtureState> {
-    const deadline = Date.now() + timeoutMs;
     for (;;) {
       const state = await this.state();
-      if (settled(state) || Date.now() >= deadline) return state;
-      await sleep(25);
+      if (settled(state) || signal?.aborted === true) return state;
+      // The pause only rejects when the signal aborts; the next pass then reads and returns the state.
+      await sleep(STATE_POLL_MS, undefined, { signal, ref: false }).catch(() => undefined);
     }
   }
 
