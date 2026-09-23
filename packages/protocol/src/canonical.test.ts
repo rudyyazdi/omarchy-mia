@@ -26,5 +26,6 @@ describe("canonical encoding", () => {
     const parsed: unknown = JSON.parse('{"b":1,"__proto__":{"path":"/etc/passwd"}}');
     expect(canonicalJson(parsed)).toBe('{"__proto__":{"path":"/etc/passwd"},"b":1}');
     expect(canonicalDigest(parsed)).not.toBe(canonicalDigest({ b: 1 }));
+    expect(canonicalJson(JSON.parse('{"a":{"__proto__":1}}'))).toBe('{"a":{"__proto__":1}}');
   });
 });
