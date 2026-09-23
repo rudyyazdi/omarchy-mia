@@ -75,6 +75,7 @@ describe("server lifecycle", () => {
           profile,
           adapter: new ScriptedRuntime(),
           log: () => undefined,
+          evidenceReadDeadline: unbounded,
           env: {},
         }),
       ).rejects.toThrow();
@@ -100,6 +101,7 @@ describe("server lifecycle", () => {
         profile: testProfile(dir),
         adapter: new ScriptedRuntime(),
         log: () => undefined,
+        evidenceReadDeadline: unbounded,
         env: { MIA_MCP_HTTP_LOG: logFile },
       });
       try {
@@ -137,6 +139,7 @@ describe("server lifecycle", () => {
         profile: testProfile(dir),
         adapter: new ScriptedRuntime(),
         log: () => undefined,
+        evidenceReadDeadline: unbounded,
         env: {},
       });
       const bridgeUrl = server.bridge.url;

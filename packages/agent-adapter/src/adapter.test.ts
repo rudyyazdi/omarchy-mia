@@ -1,8 +1,39 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempDisposableSync, writeFileSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { probeStaticCapabilities, readHookEvidence } from "./adapter.ts";
+import { probeStaticCapabilities, readHookEvidence, readRuntimeFile } from "./adapter.ts";
+
+describe("readRuntimeFile", () => {
+  it("gives up on a read blocked in open() once its deadline aborts", async () => {
+    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-runtime-file-"));
+    // Opening a FIFO for reading blocks until something opens it for writing.
+    const path = join(directory.path, "held.jsonl");
+    execFileSync("mkfifo", [path]);
+    const deadline = new AbortController();
+    const read = readRuntimeFile(path, { signal: deadline.signal });
+    deadline.abort(new DOMException("deadline", "TimeoutError"));
+    try {
+      expect(await read).toEqual({ status: "unreadable", reason: "timed out" });
+    } finally {
+      // Lets the abandoned open return, so it closes its descriptor instead of holding a worker thread.
+      await (await open(path, "w")).close();
+    }
+  });
+
+  it("reports why a read was abandoned before it started", async () => {
+    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-runtime-file-"));
+    const path = join(directory.path, "transcript.jsonl");
+    writeFileSync(path, "{}\n");
+    const signal = AbortSignal.abort(new Error("abandoned at shutdown"));
+    expect(await readRuntimeFile(path, { signal })).toEqual({
+      status: "unreadable",
+      reason: "abandoned at shutdown",
+    });
+  });
+});
 
 describe("readHookEvidence", () => {
   it("returns no evidence when the hook never wrote a file", async () => {

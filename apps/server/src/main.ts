@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { errorMessage } from "@mia/protocol";
-import { SHUTDOWN_TURN_WAIT_MS, startServer } from "./server.ts";
+import { EVIDENCE_READ_TIMEOUT_MS, SHUTDOWN_TURN_WAIT_MS, startServer } from "./server.ts";
 
 const program = new Command()
   .name("mia-server")
@@ -11,7 +11,11 @@ const program = new Command()
 const { config } = program.opts<{ config: string }>();
 
 try {
-  const server = await startServer({ profilePath: config, env: process.env });
+  const server = await startServer({
+    profilePath: config,
+    env: process.env,
+    evidenceReadDeadline: () => AbortSignal.timeout(EVIDENCE_READ_TIMEOUT_MS),
+  });
   const shutdown = () => {
     server.close(AbortSignal.timeout(SHUTDOWN_TURN_WAIT_MS)).then(
       () => process.exit(0),

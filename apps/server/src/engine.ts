@@ -161,6 +161,11 @@ export interface EngineDeps {
   adapter: TurnRunner;
   /** Computed once at startup; every conversation's provenance records it. */
   identity: ServerIdentity;
+  /**
+   * A fresh deadline for one turn's evidence reads (the transcript and the hook evidence). A read still pending
+   * when it aborts is recorded unreadable, so a read that never returns cannot keep the task from finishing.
+   */
+  evidenceReadDeadline: () => AbortSignal;
   log: (message: string) => void;
 }
 
@@ -260,6 +265,11 @@ export class Engine {
   private delivery: Delivery | null = null;
   /** Set once by shutdown: from then on every command is refused and no new task can start. */
   private shuttingDown = false;
+  /**
+   * Aborted when shutdown stops waiting: a turn-end evidence read still pending is abandoned so the turn is
+   * recorded before the catalog closes. Not at the start of shutdown, so a turn it kills keeps its evidence.
+   */
+  private readonly stopping = new AbortController();
   /** What the transaction in progress will apply and perform once it commits. */
   private queued: CommitQueue = emptyQueue();
 
@@ -1470,9 +1480,10 @@ export class Engine {
     // Read before the transaction: retaining evidence is best-effort, recording that the task finished is not.
     // Read before anything else is computed: a command handled while the reads are awaited (a decision)
     // changes the task, and the records must reflect it.
+    const signal = AbortSignal.any([this.stopping.signal, this.deps.evidenceReadDeadline()]);
     const [transcript, hookEvidence] = await Promise.all([
-      readRuntimeFile(result.streamLogPath),
-      readHookEvidence(result.hookEvidencePath),
+      readRuntimeFile(result.streamLogPath, { signal }),
+      readHookEvidence(result.hookEvidencePath, { signal }),
     ]);
     const conversation = this.conversation;
     if (!conversation) return;
@@ -1713,7 +1724,9 @@ export class Engine {
    * gate closes, pending approvals are invalidated, the outcome is recorded), then wait for the task to
    * finish or for `turnWait` to abort. It never rejects. When the interruption cannot be recorded the
    * runtime is killed anyway, because a runtime left running outlives the server and can keep calling tools.
-   * A task still running when `turnWait` aborts finishes, if ever, into a closed catalog and stays unrecorded.
+   * When `turnWait` aborts, a turn whose runtime has ended but whose evidence is still being read is recorded
+   * without the evidence still pending (recording is then synchronous, so the wait for it is bounded). A task
+   * whose runtime is still running then finishes, if ever, into a closed catalog and stays unrecorded.
    */
   async shutdown(turnWait: AbortSignal): Promise<void> {
     this.shuttingDown = true;
@@ -1727,14 +1740,19 @@ export class Engine {
         .catch((error: unknown) => this.deps.log(`interrupt failed: ${errorMessage(error)}`));
     }
     const timedOut = Promise.withResolvers<"timed_out">();
-    const onAbort = () => timedOut.resolve("timed_out");
+    const onAbort = () => {
+      this.stopping.abort(new Error("abandoned at shutdown"));
+      timedOut.resolve("timed_out");
+    };
     if (turnWait.aborted) onAbort();
     else turnWait.addEventListener("abort", onAbort, { once: true });
     const outcome = await Promise.race([
       task.finished.then(() => "finished" as const),
       timedOut.promise,
     ]).finally(() => turnWait.removeEventListener("abort", onAbort));
-    if (outcome === "timed_out")
+    if (outcome === "finished") return;
+    if (task.runtimeEnded) await task.finished;
+    else
       this.deps.log(`shutdown: task ${task.id} did not finish in time; its outcome is unrecorded`);
   }
 }
