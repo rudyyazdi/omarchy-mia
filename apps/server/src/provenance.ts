@@ -95,15 +95,15 @@ export const createConversationProvenance = (input: {
   let promptDigest: string | null = null;
   let promptVersion: string | null = null;
   if (existsSync(profile.runtime.agentPromptFile)) {
-    const bytes = readFileSync(profile.runtime.agentPromptFile);
-    promptDigest = sha256Hex(bytes);
     promptVersion = basename(profile.runtime.agentPromptFile).replace(/\.md$/, "");
-    add("agent_prompt", {
-      bytes,
-      version: promptVersion,
-      mime: "text/markdown",
-      logicalName: basename(profile.runtime.agentPromptFile),
-    });
+    // The digest the object was stored under, so the engine can hand the runtime that very object.
+    promptDigest =
+      add("agent_prompt", {
+        bytes: readFileSync(profile.runtime.agentPromptFile),
+        version: promptVersion,
+        mime: "text/markdown",
+        logicalName: basename(profile.runtime.agentPromptFile),
+      })?.digest ?? null;
   } else {
     add("agent_prompt", null, `agent prompt file missing: ${profile.runtime.agentPromptFile}`);
   }
