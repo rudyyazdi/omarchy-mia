@@ -1,7 +1,9 @@
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import { writeFileSync, mkdirSync, mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { ConfigurationError, validateRuntimeConfig } from "@mia/agent-adapter";
 import {
   LIMITS,
@@ -351,6 +353,96 @@ describe("streaming and commands", () => {
       read_error: expect.stringContaining("EISDIR"),
       note: expect.stringContaining("hook evidence unreadable (EISDIR"),
     });
+  });
+
+  /**
+   * Ends the turn with its hook evidence a FIFO whose writer holds it open, so the engine's turn-end read cannot
+   * finish until `release`. Resolves once the engine has opened the FIFO: the writer's open returns only then.
+   * The writer lets go by itself after a while only so that a server blocked in a synchronous read (which could
+   * never reach `release`) fails the test instead of hanging it; a passing run never gets there.
+   */
+  const endHoldingHookEvidence = async (turn: ScriptedTurn, line: string) => {
+    const path = join(turn.options.runtimeDir, "hook-evidence.jsonl");
+    execFileSync("mkfifo", [path]);
+    const writer = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const fs = require("node:fs");
+         const fd = fs.openSync(process.argv[1], "w");
+         fs.writeSync(fd, process.argv[2]);
+         process.stdout.write("opened\\n");
+         const release = () => { fs.closeSync(fd); process.exit(0); };
+         process.stdin.on("end", release).resume();
+         setTimeout(release, 10_000);`,
+        path,
+        line,
+      ],
+      { stdio: ["pipe", "pipe", "inherit"] },
+    );
+    const exited = once(writer, "exit");
+    onTestFinished(async () => {
+      if (writer.exitCode !== null || writer.signalCode !== null) return;
+      writer.kill("SIGKILL");
+      await exited;
+    });
+    const opened = once(writer.stdout, "data");
+    turn.end();
+    await opened;
+    return {
+      /** Lets the read finish, and removes the FIFO so the conversation's next turn finds no hook evidence. */
+      release: async (): Promise<void> => {
+        writer.stdin.end();
+        await exited;
+        rmSync(path);
+      },
+    };
+  };
+
+  it("answers another connection while a turn-end read is held open, then records the turn", async () => {
+    const { turn, taskId } = await submit("hello");
+    turn.init();
+    const held = await endHoldingHookEvidence(turn, `${JSON.stringify({ effort: "medium" })}\n`);
+    const other = await ts.connect("client-B");
+    expect((await other.sendDiagnostics()).disposition).toBe("accepted");
+    expect(taskStatus(taskId)).toBe("running");
+    await held.release();
+    expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
+    const execution = must(
+      rows<{ effort_evidence: string }>(
+        "SELECT effort_evidence FROM executions WHERE task_id = ?",
+        taskId,
+      )[0],
+    );
+    expect(JSON.parse(execution.effort_evidence)).toMatchObject({ values: ["medium"] });
+  });
+
+  it("records a turn whose runtime exited as it ended, when an interruption arrives while it is recorded", async () => {
+    const { turn, taskId } = await submit("hello");
+    turn.init();
+    const held = await endHoldingHookEvidence(turn, "");
+    expect(ackResult(await client.interrupt(taskId))).toEqual({ runtime_ended: true });
+    await held.release();
+    expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
+    expect(taskStatus(taskId)).toBe("completed");
+    expect(rows("SELECT 1 FROM events WHERE type LIKE 'interruption%'")).toEqual([]);
+    const { turn: next } = await submit("and now?");
+    expect(next.options.text).not.toContain("[Mia note, not from the user]");
+    next.end();
+    await client.waitFor("task_finished", (event) => event.payload.task_id !== taskId);
+  });
+
+  it("never releases a call approved after its runtime exited, while the turn is recorded", async () => {
+    const { turn, taskId, held: request, requested } = await submitHeldCall("change");
+    const held = await endHoldingHookEvidence(turn, "");
+    const ack = await decide(taskId, requested.payload.approval_id, "approve");
+    expect(ackResult(ack).released).toBe(false);
+    expect((await request).behavior).toBe("deny");
+    await held.release();
+    expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
+    expect(rows("SELECT status FROM tool_calls WHERE task_id = ?", taskId)).toEqual([
+      { status: "blocked_gate" },
+    ]);
   });
 
   /** Ends a turn after `prepare` has set it up to lose its transcript; returns the transcript artifacts. */

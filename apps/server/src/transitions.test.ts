@@ -134,6 +134,7 @@ describe("decideInterruption", () => {
   it("closes the gate, advances the epoch, and invalidates every pending approval without release", () => {
     const outcome = decideInterruption({
       taskStatus: "awaiting_approval",
+      runtimeEnded: false,
       conversationEpoch: 3,
       pending,
     });
@@ -153,14 +154,36 @@ describe("decideInterruption", () => {
 
   it("is idempotent while interrupting and refuses a finished task", () => {
     expect(
-      decideInterruption({ taskStatus: "interrupting", conversationEpoch: 3, pending }),
+      decideInterruption({
+        taskStatus: "interrupting",
+        runtimeEnded: false,
+        conversationEpoch: 3,
+        pending,
+      }),
     ).toEqual({ kind: "already_interrupting" });
     const finished: TaskStatus[] = ["completed", "failed", "interrupted", "outcome_unknown"];
     for (const taskStatus of finished)
-      expect(decideInterruption({ taskStatus, conversationEpoch: 3, pending })).toEqual({
+      expect(
+        decideInterruption({ taskStatus, runtimeEnded: false, conversationEpoch: 3, pending }),
+      ).toEqual({
         kind: "invalid",
         taskStatus,
       });
+  });
+
+  it("interrupts nothing once the runtime has ended, unless an interruption is already under way", () => {
+    for (const taskStatus of ["running", "awaiting_approval"] satisfies TaskStatus[])
+      expect(
+        decideInterruption({ taskStatus, runtimeEnded: true, conversationEpoch: 3, pending }),
+      ).toEqual({ kind: "runtime_ended" });
+    expect(
+      decideInterruption({
+        taskStatus: "interrupting",
+        runtimeEnded: true,
+        conversationEpoch: 3,
+        pending,
+      }),
+    ).toEqual({ kind: "already_interrupting" });
   });
 });
 

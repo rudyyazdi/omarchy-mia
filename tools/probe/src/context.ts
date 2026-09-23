@@ -206,7 +206,7 @@ export class ProbeContext {
     step.turn = await handle.result;
     process.stdout.write("\n");
     step.ledger_after = await harness.state();
-    const hooks = readHookEvidence(step.turn.hookEvidencePath);
+    const hooks = await readHookEvidence(step.turn.hookEvidencePath);
     step.hook_evidence = hooks.records;
     step.hook_evidence_malformed_lines = hooks.malformedLines;
     step.hook_evidence_read_error = hooks.readError;

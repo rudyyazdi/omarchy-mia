@@ -111,6 +111,11 @@ interface TaskState {
   status: TaskStatus;
   gateOpen: boolean;
   interrupted: boolean;
+  /**
+   * The runtime's turn has ended and finishTurn is recording it. Memory only: the task stays running in the
+   * records until finishTurn commits, but nothing can be released to or interrupted in a runtime that is gone.
+   */
+  runtimeEnded: boolean;
   handle: TurnHandle | null;
   calls: Map<string, ToolCallState[]>;
   pendingApprovals: Map<string, ToolCallState>;
@@ -552,6 +557,7 @@ export class Engine {
       status: "running",
       gateOpen: true,
       interrupted: false,
+      runtimeEnded: false,
       handle: null,
       calls: new Map(),
       pendingApprovals: new Map(),
@@ -706,6 +712,7 @@ export class Engine {
   private interrupt(task: TaskState): CommandResult {
     const outcome = decideInterruption({
       taskStatus: task.status,
+      runtimeEnded: task.runtimeEnded,
       conversationEpoch: this.activeConversation.epoch,
       pending: [...task.pendingApprovals].map(([approvalId, call]) => ({ approvalId, call })),
     });
@@ -713,6 +720,10 @@ export class Engine {
       .with({ kind: "already_interrupting" }, (): CommandResult => ({
         ok: true,
         result: { already_interrupting: true },
+      }))
+      .with({ kind: "runtime_ended" }, (): CommandResult => ({
+        ok: true,
+        result: { runtime_ended: true },
       }))
       .with({ kind: "invalid" }, ({ taskStatus }) => fail("invalid_state", `task is ${taskStatus}`))
       .with({ kind: "interrupt" }, (interruption) => this.commitInterruption(task, interruption))
@@ -1452,6 +1463,17 @@ export class Engine {
   // ---------------------------------------------------------------- turn completion
 
   private async finishTurn(task: TaskState, result: TurnResult): Promise<void> {
+    // Before the reads below yield: a decision or interruption handled while they are awaited must not release
+    // a call to, or record an interruption of, a runtime that already exited. An approval then ends blocked.
+    task.runtimeEnded = true;
+    task.gateOpen = false;
+    // Read before the transaction: retaining evidence is best-effort, recording that the task finished is not.
+    // Read before anything else is computed: a command handled while the reads are awaited (a decision)
+    // changes the task, and the records must reflect it.
+    const [transcript, hookEvidence] = await Promise.all([
+      readRuntimeFile(result.streamLogPath),
+      readHookEvidence(result.hookEvidencePath),
+    ]);
     const conversation = this.conversation;
     if (!conversation) return;
     const opts = this.taskOpts(task);
@@ -1459,9 +1481,6 @@ export class Engine {
     const actions = classifyActions(calls, task.interrupted);
     const unknown = actions.some((action) => action.status === "unknown");
     const { status, error } = classifyTask({ interrupted: task.interrupted, result, unknown });
-    // Read before the transaction: retaining evidence is best-effort, recording that the task finished is not.
-    const transcript = readRuntimeFile(result.streamLogPath);
-    const hookEvidence = readHookEvidence(result.hookEvidencePath);
     const { records: hooks, malformedLines, readError } = hookEvidence;
     const efforts = effortLevels(hooks);
     try {

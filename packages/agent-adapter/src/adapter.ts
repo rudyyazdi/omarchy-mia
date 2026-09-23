@@ -1,5 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, appendFileSync, readFileSync } from "node:fs";
+import { existsSync, appendFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { match } from "ts-pattern";
 import { z } from "zod";
@@ -376,10 +377,11 @@ export type RuntimeFileRead =
 /**
  * Reads a runtime-written file without throwing, because a throw after the turn would keep it from being
  * recorded as finished. Only a missing file is absent; any other failure (EACCES, EISDIR, ENOTDIR) is reported.
+ * Asynchronous because the server reads at turn end while it serves other connections.
  */
-export const readRuntimeFile = (path: string): RuntimeFileRead => {
+export const readRuntimeFile = async (path: string): Promise<RuntimeFileRead> => {
   try {
-    return { status: "read", bytes: readFileSync(path) };
+    return { status: "read", bytes: await readFile(path) };
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT")
       return { status: "absent" };
@@ -400,8 +402,8 @@ const parseHookEvidence = (text: string): HookEvidence => {
 };
 
 /** Evidence is best-effort: a malformed line is skipped, and an unreadable file is reported rather than thrown. */
-export const readHookEvidence = (path: string): HookEvidence =>
-  match(readRuntimeFile(path))
+export const readHookEvidence = async (path: string): Promise<HookEvidence> =>
+  match(await readRuntimeFile(path))
     .with({ status: "absent" }, () => parseHookEvidence(""))
     .with({ status: "unreadable" }, ({ reason }) => ({
       ...parseHookEvidence(""),
