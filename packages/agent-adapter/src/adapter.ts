@@ -4,7 +4,7 @@ import { mkdir, open, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { match } from "ts-pattern";
 import { z } from "zod";
-import { errorMessage, redactString, type RuntimeCancellation } from "@mia/protocol";
+import { errorMessage, isNotFound, redactString, type RuntimeCancellation } from "@mia/protocol";
 import type { ExecutionStatus } from "@mia/records";
 import type { ApprovalBridge, PermissionHandler } from "./bridge.ts";
 import type { RuntimeConfig } from "./config.ts";
@@ -527,8 +527,7 @@ const readOrReport = async (
     return await readRegularFile(path, signal);
   } catch (error) {
     if (signal?.aborted) return { status: "unreadable", reason: abortReason(signal.reason) };
-    if (error instanceof Error && "code" in error && error.code === "ENOENT")
-      return { status: "absent" };
+    if (isNotFound(error)) return { status: "absent" };
     return { status: "unreadable", reason: errorMessage(error) };
   }
 };

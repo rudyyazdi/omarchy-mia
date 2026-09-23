@@ -199,8 +199,8 @@ xdg-open /tmp/mia-export/report.html
 
 Now tamper and re-verify: `echo x >> /tmp/mia-export/events.jsonl; npm run mia -- debug verify /tmp/mia-export`
 (checksum mismatch). Edit `prompts/agent-v1.md`, re-run `debug conversation`: the `agent_prompt` provenance
-digest is unchanged, because `provenance.ts` stored bytes, not a path, and `engine.startConversation` copied the
-prompt into the conversation directory for later turns.
+digest is unchanged, because `provenance.ts` stored bytes, not a path, and every turn appends that retained
+object rather than the file.
 
 Where the bytes live:
 

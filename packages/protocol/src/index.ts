@@ -49,5 +49,5 @@ export {
   redactValue,
   registerSecret,
 } from "./redact.ts";
-export { errorMessage } from "./errors.ts";
+export { errorMessage, isNotFound } from "./errors.ts";
 export { isRecord } from "./value.ts";

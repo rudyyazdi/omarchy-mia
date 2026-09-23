@@ -1,7 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { ADAPTER_VERSION, type Profile, type StaticCapabilities } from "@mia/agent-adapter";
-import { PROTOCOL_VERSION, redactValue, sha256Hex } from "@mia/protocol";
+import { isNotFound, PROTOCOL_VERSION, redactValue, sha256Hex } from "@mia/protocol";
 import type { ProvenanceEntryRow, ProvenanceRole, RecordWriter } from "@mia/records";
 import type { BuildInfo } from "./build-info.ts";
 
@@ -28,6 +28,38 @@ export interface ProvenanceSummary {
   entries: Pick<ProvenanceEntryRow, "role" | "availability" | "artifact_id" | "reason">[];
 }
 
+/** A file that shaped a conversation, read before its transaction; `bytes` is null when the file did not exist. */
+export interface ConversationFile {
+  path: string;
+  bytes: Buffer | null;
+}
+
+/** The files a conversation's provenance retains, read by `readConversationFilesSync`. */
+export interface ConversationFiles {
+  agentPrompt: ConversationFile;
+  architecture: ConversationFile;
+}
+
+const readConversationFileSync = (path: string): ConversationFile => {
+  try {
+    return { path, bytes: readFileSync(path) };
+  } catch (error) {
+    if (isNotFound(error)) return { path, bytes: null };
+    throw error;
+  }
+};
+
+/**
+ * Reads the profile's agent prompt and architecture document before the transaction that records a conversation
+ * opens, so `createConversationProvenance` reads no file. Only a file that does not exist (`ENOENT`) is recorded as
+ * unavailable; any other read failure, a path through a non-directory or an unreadable parent included, throws, and
+ * no conversation starts, because a misconfigured path should not silently drop provenance.
+ */
+export const readConversationFilesSync = (profile: Profile): ConversationFiles => ({
+  agentPrompt: readConversationFileSync(profile.runtime.agentPromptFile),
+  architecture: readConversationFileSync(profile.architectureDocument),
+});
+
 /**
  * Snapshot everything that shaped this conversation, immutably, at creation time, except the runtime and
  * build identity, which record the server as it was at startup (see `ServerIdentity`). Later edits to the
@@ -39,8 +71,9 @@ export const createConversationProvenance = (input: {
   /** Client build as reported at connection time. */
   clientBuild: unknown;
   identity: ServerIdentity;
+  files: ConversationFiles;
 }): ProvenanceSummary => {
-  const { writer, profile, clientBuild, identity } = input;
+  const { writer, profile, clientBuild, identity, files } = input;
   const setId = writer.createProvenanceSet(
     `conversation provenance for profile ${profile.profile}`,
   );
@@ -94,20 +127,19 @@ export const createConversationProvenance = (input: {
   // Mia-owned agent instructions.
   let promptDigest: string | null = null;
   let promptVersion: string | null = null;
-  // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
-  if (existsSync(profile.runtime.agentPromptFile)) {
-    promptVersion = basename(profile.runtime.agentPromptFile).replace(/\.md$/, "");
+  const prompt = files.agentPrompt;
+  if (prompt.bytes !== null) {
+    promptVersion = basename(prompt.path).replace(/\.md$/, "");
     // The digest the object was stored under, so the engine can hand the runtime that very object.
     promptDigest =
       add("agent_prompt", {
-        // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
-        bytes: readFileSync(profile.runtime.agentPromptFile),
+        bytes: prompt.bytes,
         version: promptVersion,
         mime: "text/markdown",
-        logicalName: basename(profile.runtime.agentPromptFile),
+        logicalName: basename(prompt.path),
       })?.digest ?? null;
   } else {
-    add("agent_prompt", null, `agent prompt file missing: ${profile.runtime.agentPromptFile}`);
+    add("agent_prompt", null, `agent prompt file missing: ${prompt.path}`);
   }
   // Exposed runtime instructions: the runtime does not expose its full system prompt over the stream.
   add(
@@ -168,19 +200,17 @@ export const createConversationProvenance = (input: {
 
   // Architecture document revision.
   let architectureRevision: string | null = null;
-  // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
-  if (existsSync(profile.architectureDocument)) {
-    // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
-    const bytes = readFileSync(profile.architectureDocument);
-    architectureRevision = sha256Hex(bytes);
+  const architecture = files.architecture;
+  if (architecture.bytes !== null) {
+    architectureRevision = sha256Hex(architecture.bytes);
     add("architecture", {
-      bytes,
+      bytes: architecture.bytes,
       version: architectureRevision.slice(0, 12),
       mime: "text/markdown",
-      logicalName: basename(profile.architectureDocument),
+      logicalName: basename(architecture.path),
     });
   } else {
-    add("architecture", null, `architecture document missing: ${profile.architectureDocument}`);
+    add("architecture", null, `architecture document missing: ${architecture.path}`);
   }
 
   // Server build, plus retained local changes for dirty trees.

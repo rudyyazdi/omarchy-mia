@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -40,6 +40,15 @@ describe("record writer", () => {
       }),
     ).toThrow();
     expect(catalog.all("SELECT * FROM events")).toHaveLength(0);
+  });
+
+  it("records a conversation without creating its directory", () => {
+    const conv = writer.createConversation({
+      provenanceSetId: writer.createProvenanceSet("test"),
+      runtimeConversationId: "rt-1",
+    });
+    expect(conv.directory.startsWith(catalog.paths.conversations)).toBe(true);
+    expect(existsSync(conv.directory)).toBe(false);
   });
 
   it("assigns a dense per-conversation sequence and redacts payloads", () => {

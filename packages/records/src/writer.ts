@@ -1,4 +1,3 @@
-import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { match, P } from "ts-pattern";
 import { z } from "zod";
@@ -375,6 +374,10 @@ export class RecordWriter {
 
   // ---- conversations, tasks, executions ----
 
+  /**
+   * Records a conversation and names its directory without creating it, so recording one does no file I/O; whoever
+   * first writes into the directory creates it.
+   */
   createConversation(input: { provenanceSetId: string; runtimeConversationId: string }): {
     id: string;
     startedAt: string;
@@ -386,8 +389,6 @@ export class RecordWriter {
       this.catalog.paths.conversations,
       `${startedAt.replace(/[:.]/g, "-")}_${id}`,
     );
-    // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
     this.catalog.insert("conversations", {
       id,
       started_at: startedAt,

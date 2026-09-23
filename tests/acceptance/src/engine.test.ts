@@ -1,5 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { writeFileSync, mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
+import {
+  writeFileSync,
+  mkdirSync,
+  mkdtempDisposableSync,
+  mkdtempSync,
+  existsSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -1334,6 +1342,27 @@ describe("configuration and provenance", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("refuses to start a conversation whose prompt cannot be read, and keeps the current one", async () => {
+    using dir = mkdtempDisposableSync(join(tmpdir(), "mia-unreadable-prompt-"));
+    const promptFile = join(dir.path, "agent.md");
+    writeFileSync(promptFile, "prompt");
+    await restartSession({ agentPromptFile: promptFile });
+    const current = must(client.conversationId, "conversation id");
+    const count = (table: string) => rows(`SELECT id FROM ${table}`).length;
+    const before = { conversations: count("conversations"), sets: count("provenance_sets") };
+    // A directory where the prompt was: it exists, so it is not "missing", and reading it fails (EISDIR).
+    rmSync(promptFile);
+    mkdirSync(promptFile);
+    await expect(client.startConversation()).rejects.toThrow("record_failure");
+    expect({ conversations: count("conversations"), sets: count("provenance_sets") }).toEqual(
+      before,
+    );
+    expect(client.conversationId).toBe(current);
+    const { turn, taskId } = await submit("still here");
+    turn.end();
+    await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
   });
 
   it("refuses unsupported tool surfaces and unresolved placeholders", () => {
