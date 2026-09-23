@@ -260,9 +260,9 @@ export const verifyExportSync = (dir: string): VerificationResult => {
   } catch {
     return failedVerification("export directory unreadable");
   }
-  // Records a failed read as a problem; `missingProblem` null means an absent file is not one. The reads stay
-  // in this function's body, where lint can see they run synchronously, and only their results pass through here.
-  const bytesOf = (read: ExportReadResult, missingProblem: string | null): Buffer | null =>
+  // Records a failed read as a problem; `missingProblem` null means an absent file is not one. It takes a read's
+  // result, not a name, so every read stays in this function's body, where lint can see it runs synchronously.
+  const bytesOrProblem = (read: ExportReadResult, missingProblem: string | null): Buffer | null =>
     match(read)
       .with({ status: "read" }, ({ bytes }) => bytes)
       .with({ status: "missing" }, () => {
@@ -274,7 +274,7 @@ export const verifyExportSync = (dir: string): VerificationResult => {
         return null;
       })
       .exhaustive();
-  const manifestBytes = bytesOf(files.readSync("manifest.json"), "manifest.json missing");
+  const manifestBytes = bytesOrProblem(files.readSync("manifest.json"), "manifest.json missing");
   if (!manifestBytes) return failedVerification(problems[0] ?? "manifest.json unreadable");
   let manifestJson: unknown;
   try {
@@ -301,7 +301,7 @@ export const verifyExportSync = (dir: string): VerificationResult => {
   const manifest = parsed.data;
   let checkedFiles = 0;
   for (const [rel, expected] of Object.entries(manifest.files)) {
-    const bytes = bytesOf(files.readSync(rel), `file missing: ${rel}`);
+    const bytes = bytesOrProblem(files.readSync(rel), `file missing: ${rel}`);
     if (!bytes) continue;
     if (bytes.byteLength !== expected.bytes || sha256Hex(bytes) !== expected.sha256)
       problems.push(`checksum mismatch: ${rel}`);
@@ -314,12 +314,13 @@ export const verifyExportSync = (dir: string): VerificationResult => {
     if (rel !== "manifest.json" && !Object.hasOwn(manifest.files, rel))
       problems.push(`unlisted file: ${rel}`);
   }
-  const tableBytes = new Map<ExportTable, Buffer | null>();
-  for (const table of EXPORT_TABLES)
-    tableBytes.set(table, bytesOf(files.readSync(tableFile(table)), null));
   // Validate only row identities and fields used below, not the full catalog schemas.
-  const readTable = <Row>(table: ExportTable, schema: z.ZodType<Row>): Row[] => {
-    const bytes = tableBytes.get(table);
+  const parseTable = <Row>(
+    read: ExportReadResult,
+    table: ExportTable,
+    schema: z.ZodType<Row>,
+  ): Row[] => {
+    const bytes = bytesOrProblem(read, null);
     const rows: Row[] = [];
     if (bytes) {
       for (const line of bytes.toString("utf8").split("\n").filter(Boolean)) {
@@ -336,33 +337,46 @@ export const verifyExportSync = (dir: string): VerificationResult => {
   };
   // Objects use a digest key; artifact dependencies use a composite key instead of id.
   const tables = {
-    objects: readTable(
+    objects: parseTable(
+      files.readSync(tableFile("objects")),
       "objects",
       z.object({ digest: z.string() }) satisfies z.ZodType<Pick<ObjectRow, "digest">>,
     ),
-    provenance_sets: readTable("provenance_sets", RecordIdSchema),
-    artifacts: readTable(
+    provenance_sets: parseTable(
+      files.readSync(tableFile("provenance_sets")),
+      "provenance_sets",
+      RecordIdSchema,
+    ),
+    artifacts: parseTable(
+      files.readSync(tableFile("artifacts")),
       "artifacts",
       RecordIdSchema.extend({
         capture_status: CaptureStatusSchema,
         object_digest: z.string().nullable(),
       }) satisfies z.ZodType<Pick<ArtifactRow, "id" | "capture_status" | "object_digest">>,
     ),
-    provenance_entries: readTable(
+    provenance_entries: parseTable(
+      files.readSync(tableFile("provenance_entries")),
       "provenance_entries",
       RecordIdSchema.extend({
         artifact_id: z.string().nullable(),
       }) satisfies z.ZodType<Pick<ProvenanceEntryRow, "id" | "artifact_id">>,
     ),
-    conversations: readTable(
+    conversations: parseTable(
+      files.readSync(tableFile("conversations")),
       "conversations",
       RecordIdSchema satisfies z.ZodType<Pick<ConversationRow, "id">>,
     ),
-    clients: readTable("clients", RecordIdSchema),
-    client_connections: readTable("client_connections", RecordIdSchema),
-    tasks: readTable("tasks", RecordIdSchema),
-    executions: readTable("executions", RecordIdSchema),
-    events: readTable(
+    clients: parseTable(files.readSync(tableFile("clients")), "clients", RecordIdSchema),
+    client_connections: parseTable(
+      files.readSync(tableFile("client_connections")),
+      "client_connections",
+      RecordIdSchema,
+    ),
+    tasks: parseTable(files.readSync(tableFile("tasks")), "tasks", RecordIdSchema),
+    executions: parseTable(files.readSync(tableFile("executions")), "executions", RecordIdSchema),
+    events: parseTable(
+      files.readSync(tableFile("events")),
       "events",
       RecordIdSchema.extend({
         sequence: z.number(),
@@ -370,27 +384,35 @@ export const verifyExportSync = (dir: string): VerificationResult => {
         caused_by_event_id: z.string().nullable(),
       }) satisfies z.ZodType<Pick<EventRow, "id" | "sequence" | "task_id" | "caused_by_event_id">>,
     ),
-    commands: readTable("commands", RecordIdSchema),
-    tool_calls: readTable(
+    commands: parseTable(files.readSync(tableFile("commands")), "commands", RecordIdSchema),
+    tool_calls: parseTable(
+      files.readSync(tableFile("tool_calls")),
       "tool_calls",
       RecordIdSchema.extend({ task_id: z.string() }) satisfies z.ZodType<
         Pick<ToolCallRow, "id" | "task_id">
       >,
     ),
-    approvals: readTable(
+    approvals: parseTable(
+      files.readSync(tableFile("approvals")),
       "approvals",
       RecordIdSchema.extend({ tool_call_id: z.string() }) satisfies z.ZodType<
         Pick<ApprovalRow, "id" | "tool_call_id">
       >,
     ),
-    diagnostics: readTable("diagnostics", RecordIdSchema),
-    artifact_links: readTable(
+    diagnostics: parseTable(
+      files.readSync(tableFile("diagnostics")),
+      "diagnostics",
+      RecordIdSchema,
+    ),
+    artifact_links: parseTable(
+      files.readSync(tableFile("artifact_links")),
       "artifact_links",
       RecordIdSchema.extend({ artifact_id: z.string() }) satisfies z.ZodType<
         Pick<ArtifactLinkRow, "id" | "artifact_id">
       >,
     ),
-    artifact_dependencies: readTable(
+    artifact_dependencies: parseTable(
+      files.readSync(tableFile("artifact_dependencies")),
       "artifact_dependencies",
       z.object({
         parent_artifact_id: z.string(),
@@ -451,7 +473,7 @@ export const verifyExportSync = (dir: string): VerificationResult => {
     const name = `objects/sha256/${digest.slice(0, 2)}/${digest}`;
     const declaredUnavailable =
       manifest.objects.missing.includes(digest) || manifest.objects.corrupt.includes(digest);
-    const bytes = bytesOf(
+    const bytes = bytesOrProblem(
       files.readSync(name),
       declaredUnavailable ? null : `object bytes missing and not declared: ${digest}`,
     );
@@ -459,7 +481,9 @@ export const verifyExportSync = (dir: string): VerificationResult => {
     if (sha256Hex(bytes) !== digest) problems.push(`object corrupt: ${digest}`);
     checkedObjects++;
   }
-  const report = bytesOf(files.readSync("report.html"), "report.html missing")?.toString("utf8");
+  const report = bytesOrProblem(files.readSync("report.html"), "report.html missing")?.toString(
+    "utf8",
+  );
   if (report === "") problems.push("report.html missing");
   if (report) {
     if (/<script\b/i.test(report)) problems.push("report contains a script tag");
