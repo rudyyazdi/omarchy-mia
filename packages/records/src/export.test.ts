@@ -242,9 +242,10 @@ describe("verifyExport input validation", () => {
     "reports an unlisted file named %s",
     (name) => {
       writeFileSync(join(directory, name), "stray");
-      const result = verifyExport(directory);
-      expect(result.ok).toBe(false);
-      expect(result.problems).toContain(`unlisted file: ${name}`);
+      expect(verifyExport(directory)).toMatchObject({
+        ok: false,
+        problems: [`unlisted file: ${name}`],
+      });
     },
   );
 
