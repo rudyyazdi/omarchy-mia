@@ -20,11 +20,19 @@ export interface DeclaredArtifact {
 
 /** What the filesystem reported about a declared path; `resolvedPath` has every symlink followed. */
 export type PathFacts =
-  { exists: false } | { exists: true; resolvedPath: string; regularFile: boolean };
+  | { exists: false }
+  | { exists: true; resolvedPath: string; regularFile: boolean; byteSize: number };
 
-/** Output directories with every symlink followed, so containment compares resolved paths. */
+/**
+ * The largest file retained. The whole file is read synchronously inside the tool-result transaction,
+ * so this bounds how long one declaration can stall the server and how much it holds in memory.
+ */
+export const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
+
 export interface CapturePolicy {
+  /** Output directories with every symlink followed, so containment compares resolved paths. */
   resolvedOutputDirectories: readonly string[];
+  maxBytes: number;
 }
 
 export type NotRetained = {
@@ -32,7 +40,8 @@ export type NotRetained = {
   reason: string;
 };
 
-export type Eligibility = { status: "eligible"; resolvedPath: string } | NotRetained;
+export type Eligibility =
+  { status: "eligible"; resolvedPath: string; byteSize: number } | NotRetained;
 
 export type Capture = { status: Extract<CaptureStatus, "retained">; bytes: Buffer } | NotRetained;
 
@@ -73,7 +82,7 @@ export const checkDeclaredPath = (declared: DeclaredArtifact): NotRetained | nul
 const isInside = (path: string, directory: string): boolean =>
   path.startsWith(directory.endsWith(sep) ? directory : directory + sep);
 
-/** Admits only a regular file whose resolved path lies strictly inside an output directory. */
+/** Admits only a regular file within the size limit whose resolved path lies strictly inside an output directory. */
 export const decideEligibility = (facts: PathFacts, policy: CapturePolicy): Eligibility => {
   if (!facts.exists)
     return { status: "missing", reason: "declared file not found at collection time" };
@@ -86,7 +95,12 @@ export const decideEligibility = (facts: PathFacts, policy: CapturePolicy): Elig
     };
   if (!facts.regularFile)
     return { status: "failed", reason: "declared path is not a regular file" };
-  return { status: "eligible", resolvedPath: facts.resolvedPath };
+  if (facts.byteSize > policy.maxBytes)
+    return {
+      status: "failed",
+      reason: `declared file is ${facts.byteSize} bytes, over the ${policy.maxBytes}-byte limit`,
+    };
+  return { status: "eligible", resolvedPath: facts.resolvedPath, byteSize: facts.byteSize };
 };
 
 /** Retains the bytes unless the declaration carries a digest they do not match; an empty digest declares none. */
