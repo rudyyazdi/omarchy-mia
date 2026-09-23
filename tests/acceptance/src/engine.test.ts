@@ -453,6 +453,9 @@ describe("streaming and commands", () => {
     expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
     expect(taskStatus(taskId)).toBe("completed");
     expect(effortEvidence(taskId)).toMatchObject({ values: [], read_error: "timed out" });
+    const { turn: next } = await submit("and now?");
+    next.end();
+    await client.waitFor("task_finished", (event) => event.payload.task_id !== taskId);
   });
 
   it("records a turn whose evidence read is still held when shutdown stops waiting", async () => {
@@ -466,6 +469,23 @@ describe("streaming and commands", () => {
     expect(taskStatus(taskId)).toBe("completed");
     expect(effortEvidence(taskId)).toMatchObject({ read_error: "abandoned at shutdown" });
     expect(ts.logs).not.toContainEqual(expect.stringContaining("unrecorded"));
+  });
+
+  it("keeps the transcript of a turn that shutdown interrupts, read after shutdown began", async () => {
+    const { turn, taskId } = await submit("hello");
+    turn.init();
+    const closing = ts.server.close(new AbortController().signal);
+    expect(turn.interrupted).toBe(true);
+    turn.end(); // a no-op once the kill ended it
+    await closing;
+    expect(taskStatus(taskId)).toBe("interrupted");
+    expect(
+      rows(
+        `SELECT a.capture_status FROM artifacts a JOIN artifact_links l ON l.artifact_id = a.id
+         WHERE l.task_id = ? AND l.relation = 'runtime_transcript'`,
+        taskId,
+      ),
+    ).toEqual([{ capture_status: "retained" }]);
   });
 
   /** Ends a turn after `prepare` has set it up to lose its transcript; returns the transcript artifacts. */

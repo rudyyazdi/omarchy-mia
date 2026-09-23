@@ -36,7 +36,7 @@ export interface MiaServer {
 export const SHUTDOWN_TURN_WAIT_MS = 10_000;
 
 /**
- * How long a finished turn's evidence reads may take before the turn is recorded without that evidence. A
+ * The evidence read deadline an entry point should give `startServer`: how long a finished turn's evidence reads may take before the turn is recorded without that evidence. A
  * transcript on a healthy disk reads in milliseconds; only a file that never returns (a FIFO, a stale mount)
  * reaches this, and every submission is refused as busy until it does.
  */
@@ -59,8 +59,11 @@ export const startServer = async (input: {
   profile?: Profile;
   adapter?: TurnRunner;
   log?: (message: string) => void;
-  /** A fresh deadline for each turn's evidence reads; `EVIDENCE_READ_TIMEOUT_MS` unless a test controls it. */
-  evidenceReadDeadline?: () => AbortSignal;
+  /**
+   * A fresh deadline for each turn's evidence reads. An entry point passes
+   * `() => AbortSignal.timeout(EVIDENCE_READ_TIMEOUT_MS)`; a test passes a signal it aborts itself.
+   */
+  evidenceReadDeadline: () => AbortSignal;
   /**
    * The server process's environment: fills a profile's `${ENV}` placeholders, is what the runtime
    * inherits and is probed with at startup, and names the bridge's request log (`MIA_MCP_HTTP_LOG`).
@@ -91,8 +94,7 @@ export const startServer = async (input: {
         writer,
         adapter,
         identity,
-        evidenceReadDeadline:
-          input.evidenceReadDeadline ?? (() => AbortSignal.timeout(EVIDENCE_READ_TIMEOUT_MS)),
+        evidenceReadDeadline: input.evidenceReadDeadline,
         log,
       });
       const gateway = await startGateway({

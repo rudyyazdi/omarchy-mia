@@ -374,6 +374,11 @@ export type RuntimeFileRead =
   | { status: "read"; bytes: Buffer }
   | { status: "unreadable"; reason: string };
 
+/** How a turn-end read is bounded: once `signal` aborts, the read is abandoned. */
+export interface RuntimeFileReadOptions {
+  signal?: AbortSignal;
+}
+
 /** Why an abandoned read is unreadable: an `AbortSignal.timeout` deadline reads as `timed out`. */
 const abortReason = (reason: unknown): string =>
   reason instanceof DOMException && reason.name === "TimeoutError"
@@ -401,11 +406,11 @@ const readOrReport = async (
  *
  * When `signal` aborts the read is unreadable at once, even if the `open()` or `read()` under it is blocked (a
  * FIFO, a stale mount): `readFile`'s own signal is only checked between those calls. The abandoned read keeps
- * its descriptor until the blocked call returns, and then closes it.
+ * its descriptor, and a libuv worker thread, until the blocked call returns, and then closes the descriptor.
  */
 export const readRuntimeFile = async (
   path: string,
-  { signal }: { signal?: AbortSignal } = {},
+  { signal }: RuntimeFileReadOptions = {},
 ): Promise<RuntimeFileRead> => {
   const read = readOrReport(path, signal);
   if (!signal) return read;
@@ -435,7 +440,7 @@ const parseHookEvidence = (text: string): HookEvidence => {
 /** Evidence is best-effort: a malformed line is skipped, and an unreadable file is reported rather than thrown. */
 export const readHookEvidence = async (
   path: string,
-  options: { signal?: AbortSignal } = {},
+  options: RuntimeFileReadOptions = {},
 ): Promise<HookEvidence> =>
   match(await readRuntimeFile(path, options))
     .with({ status: "absent" }, () => parseHookEvidence(""))

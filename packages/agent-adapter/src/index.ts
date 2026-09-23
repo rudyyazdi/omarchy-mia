@@ -20,6 +20,7 @@ export {
 export type {
   HookEvidence,
   RuntimeFileRead,
+  RuntimeFileReadOptions,
   StaticCapabilities,
   TurnHandle,
   TurnOptions,
