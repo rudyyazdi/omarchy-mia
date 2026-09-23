@@ -965,7 +965,7 @@ describe("configuration and provenance", () => {
     expect(artifacts).toEqual([
       {
         capture_status: "failed",
-        capture_reason: expect.stringContaining("not retained: "),
+        capture_reason: expect.stringMatching(/^not retained: EEXIST: /),
         object_digest: null,
         external_locator: file,
       },
@@ -996,9 +996,12 @@ describe("configuration and provenance", () => {
   });
 
   it("records a tool result when not even its failed output can be recorded", async () => {
-    const { artifacts } = await completeLosingToolOutput(() =>
+    const { file, artifacts } = await completeLosingToolOutput(() =>
       failArtifactLinks("tool_result", "1"),
     );
     expect(artifacts).toEqual([]);
+    expect(ts.logs).toContain(
+      `tool output ${file} lost, not retained: simulated link failure; not recorded: simulated link failure`,
+    );
   });
 });

@@ -1602,7 +1602,10 @@ export class Engine {
     );
   }
 
-  /** Only a retained tool output becomes a task output and gets an artifact_registered event. */
+  /**
+   * Only a retained tool output becomes a task output and gets an artifact_registered event. It runs in a
+   * savepoint (retainBestEffort), so it writes rows only: `record`, never `emit` or a commit queue.
+   */
   private registerToolOutput(output: DeclaredOutput, capture: Capture): void {
     const { task, call, declared, eventId } = output;
     const { writer } = this.deps;
