@@ -5,9 +5,10 @@ import {
   decideEligibility,
   extractDeclaredArtifact,
   verifyContent,
+  type PathFacts,
 } from "./artifact-capture.ts";
 
-const policy = { resolvedOutputDirectories: ["/work/out"] };
+const policy = { resolvedOutputDirectories: ["/work/out"], maxBytes: 10 };
 
 describe("extractDeclaredArtifact", () => {
   it("finds a declaration in a bare string or in any text block", () => {
@@ -62,7 +63,7 @@ describe("decideEligibility", () => {
   it("admits a resolved path inside an output directory", () => {
     expect(
       decideEligibility(
-        { exists: true, resolvedPath: "/work/out/sub/a.txt", regularFile: true },
+        { exists: true, resolvedPath: "/work/out/sub/a.txt", regularFile: true, byteSize: 2 },
         policy,
       ),
     ).toEqual({
@@ -74,7 +75,9 @@ describe("decideEligibility", () => {
   it.each(["/etc/hostname", "/work/out-sibling/a.txt", "/work/out", "/work/a.txt"])(
     "excludes %s as external-only",
     (resolvedPath) => {
-      expect(decideEligibility({ exists: true, resolvedPath, regularFile: true }, policy)).toEqual({
+      expect(
+        decideEligibility({ exists: true, resolvedPath, regularFile: true, byteSize: 2 }, policy),
+      ).toEqual({
         status: "external_only",
         reason: "declared path resolves outside the configured output directories",
       });
@@ -84,8 +87,8 @@ describe("decideEligibility", () => {
   it("admits paths under an output directory of /", () => {
     expect(
       decideEligibility(
-        { exists: true, resolvedPath: "/a.txt", regularFile: true },
-        { resolvedOutputDirectories: ["/"] },
+        { exists: true, resolvedPath: "/a.txt", regularFile: true, byteSize: 2 },
+        { resolvedOutputDirectories: ["/"], maxBytes: 10 },
       ).status,
     ).toBe("eligible");
   });
@@ -93,17 +96,30 @@ describe("decideEligibility", () => {
   it("fails a path inside an output directory that is not a regular file", () => {
     expect(
       decideEligibility(
-        { exists: true, resolvedPath: "/work/out/fifo", regularFile: false },
+        { exists: true, resolvedPath: "/work/out/fifo", regularFile: false, byteSize: 0 },
         policy,
       ),
     ).toEqual({ status: "failed", reason: "declared path is not a regular file" });
   });
 
+  it("admits a file at the size limit and fails one above it", () => {
+    const facts = {
+      exists: true,
+      resolvedPath: "/work/out/a.bin",
+      regularFile: true,
+    } satisfies Partial<PathFacts>;
+    expect(decideEligibility({ ...facts, byteSize: 10 }, policy).status).toBe("eligible");
+    expect(decideEligibility({ ...facts, byteSize: 11 }, policy)).toEqual({
+      status: "failed",
+      reason: "declared file exceeds 10 bytes",
+    });
+  });
+
   it("excludes everything when no output directory exists", () => {
     expect(
       decideEligibility(
-        { exists: true, resolvedPath: "/work/out/a.txt", regularFile: true },
-        { resolvedOutputDirectories: [] },
+        { exists: true, resolvedPath: "/work/out/a.txt", regularFile: true, byteSize: 2 },
+        { resolvedOutputDirectories: [], maxBytes: 10 },
       ).status,
     ).toBe("external_only");
   });

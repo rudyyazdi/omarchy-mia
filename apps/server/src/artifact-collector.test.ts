@@ -5,11 +5,13 @@ import {
   readFileSync,
   realpathSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MAX_ARTIFACT_BYTES } from "./artifact-capture.ts";
 import { collectArtifact } from "./artifact-collector.ts";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -80,6 +82,15 @@ describe("collectArtifact", () => {
     writeFileSync(join(dirs.out, "a.txt"), "D1");
     const capture = collectArtifact({ path: join(dirs.out, "a.txt") }, [join(dirs.root, "none")]);
     expect(capture.status).toBe("external_only");
+  });
+
+  it("fails a file over the size limit without reading it", () => {
+    using dirs = workspace();
+    const large = join(dirs.out, "large.bin");
+    writeFileSync(large, "");
+    truncateSync(large, MAX_ARTIFACT_BYTES + 1); // sparse: no bytes written to disk
+    expect(collectArtifact({ path: large }, [dirs.out]).status).toBe("failed");
+    expect(readFileSync).not.toHaveBeenCalled();
   });
 
   // Opening a FIFO blocks until a writer appears, so reading one would hang the server.

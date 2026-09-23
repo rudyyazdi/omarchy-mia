@@ -3,6 +3,7 @@ import { errorMessage } from "@mia/protocol";
 import {
   checkDeclaredPath,
   decideEligibility,
+  MAX_ARTIFACT_BYTES,
   verifyContent,
   type Capture,
   type CapturePolicy,
@@ -14,7 +15,8 @@ import {
 const inspectPath = (path: string): PathFacts => {
   try {
     const resolvedPath = realpathSync(path);
-    return { exists: true, resolvedPath, regularFile: statSync(resolvedPath).isFile() };
+    const stats = statSync(resolvedPath);
+    return { exists: true, resolvedPath, regularFile: stats.isFile(), byteSize: stats.size };
   } catch {
     return { exists: false };
   }
@@ -26,6 +28,7 @@ const resolvePolicy = (outputDirectories: readonly string[]): CapturePolicy => (
     const facts = inspectPath(directory);
     return facts.exists ? [facts.resolvedPath] : [];
   }),
+  maxBytes: MAX_ARTIFACT_BYTES,
 });
 
 /**
