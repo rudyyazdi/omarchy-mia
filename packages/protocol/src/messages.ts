@@ -26,7 +26,7 @@ export const ConnectionStateSchema = z.enum([
 ]);
 export type ConnectionState = z.infer<typeof ConnectionStateSchema>;
 
-/** not_needed: no interruption; forced_kill: SIGKILL delivered and exit observed; unknown: kill sent, exit not observed in time. */
+/** not_needed: no process to kill (no interruption, or it came before the runtime spawned); forced_kill: SIGKILL delivered and exit observed; unknown: kill sent, exit not observed in time. */
 export const RuntimeCancellationSchema = z.enum(["not_needed", "forced_kill", "unknown"]);
 export type RuntimeCancellation = z.infer<typeof RuntimeCancellationSchema>;
 

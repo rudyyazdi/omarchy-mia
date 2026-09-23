@@ -1,8 +1,7 @@
-import { existsSync, mkdtempDisposableSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempDisposableSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { writeLaunchFiles } from "./adapter.ts";
 import { MCP_TOOL_TIMEOUT_MS, prepareLaunch } from "./launch.ts";
 
 /** A launch plan for a minimal config in `dir`, inheriting `env`; `configEnv` is the profile's own. */
@@ -64,7 +63,7 @@ describe("launch plan", () => {
     });
   });
 
-  it("writes nothing itself; writeLaunchFiles creates the owner-only files the invocation refers to", async () => {
+  it("writes nothing itself, and plans the directories and files its arguments refer to", () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-launch-"));
     const plan = planIn(directory.path, {});
     const runtimeDir = join(directory.path, "runtime");
@@ -72,23 +71,12 @@ describe("launch plan", () => {
     expect(existsSync(runtimeDir)).toBe(false);
     expect(existsSync(workingDirectory)).toBe(false);
 
-    await writeLaunchFiles(plan.setup);
     expect(plan.cwd).toBe(workingDirectory);
-    for (const created of [runtimeDir, workingDirectory]) {
-      expect(statSync(created).isDirectory()).toBe(true);
-      expect(statSync(created).mode & 0o077).toBe(0);
-    }
+    expect(plan.setup.directories).toEqual([runtimeDir, workingDirectory]);
     const argAfter = (flag: string): string => plan.args[plan.args.indexOf(flag) + 1] ?? "";
-    expect(argAfter("--mcp-config")).toBe(plan.files.mcpConfig);
-    expect(argAfter("--settings")).toBe(plan.files.settings);
-    expect(JSON.parse(readFileSync(plan.files.mcpConfig, "utf8"))).toEqual(
-      plan.description.mcp_config,
-    );
-    expect(JSON.parse(readFileSync(plan.files.settings, "utf8"))).toEqual(
-      plan.description.settings,
-    );
-    for (const file of [plan.files.mcpConfig, plan.files.settings])
-      expect(statSync(file).mode & 0o077).toBe(0);
+    const planned = new Map(plan.setup.files.map((file) => [file.path, JSON.parse(file.content)]));
+    expect(planned.get(argAfter("--mcp-config"))).toEqual(plan.description.mcp_config);
+    expect(planned.get(argAfter("--settings"))).toEqual(plan.description.settings);
   });
 
   it("turns on runtime debug logging only when the given environment sets MIA_RUNTIME_DEBUG", () => {

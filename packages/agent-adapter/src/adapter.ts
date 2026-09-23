@@ -426,11 +426,15 @@ export class ClaudeCodeAdapter {
   }
 }
 
-/** Creates the directories and files a launch plan's invocation refers to (see `prepareLaunch`), owner-only. */
+/**
+ * Creates the directories and files a launch plan's invocation refers to (see `prepareLaunch`), owner-only. It
+ * settles only after every write has: a conversation's turns share these file names, and a turn does not end before
+ * its writes do, so no write of an earlier turn can land over a later turn's settings.
+ */
 export const writeLaunchFiles = async (setup: LaunchSetup): Promise<void> => {
   for (const directory of setup.directories)
     await mkdir(directory, { recursive: true, mode: 0o700 });
-  await Promise.all(setup.files.map((file) => writeFile(file.path, file.content, { mode: 0o600 })));
+  for (const file of setup.files) await writeFile(file.path, file.content, { mode: 0o600 });
 };
 
 /** One line of the hook evidence file written by hook-capture.mjs: a JSON object of runtime-reported fields. */
