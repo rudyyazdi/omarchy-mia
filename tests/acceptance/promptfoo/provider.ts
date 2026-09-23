@@ -7,13 +7,7 @@ import { LiveCallBudget } from "@mia/agent-adapter";
 import { FixtureHarness } from "@mia/controlled-mcp";
 import { errorMessage } from "@mia/protocol";
 import { MiaClient } from "@mia/text-client";
-import {
-  parseScenarioName,
-  runScenario,
-  SCENARIOS,
-  type ScenarioContext,
-  type ScenarioName,
-} from "./scenarios.ts";
+import { readScenarioName, runScenario, scenarioFor, type ScenarioContext } from "./scenarios.ts";
 
 interface ProviderOptions {
   id?: string;
@@ -38,14 +32,10 @@ export default class MiaScenarioProvider {
     _prompt: string,
     context?: { vars?: Record<string, unknown> },
   ): Promise<{ output: string; error?: string; format?: string }> {
-    let scenarioName: ScenarioName;
-    try {
-      scenarioName = parseScenarioName(context?.vars?.scenario);
-    } catch (error) {
-      return { output: "", error: errorMessage(error) };
-    }
-    const scenario = SCENARIOS.find((candidate) => candidate.name === scenarioName);
-    if (!scenario) return { output: "", error: `scenario ${scenarioName} has no definition` };
+    const read = readScenarioName(context?.vars?.scenario);
+    if (!read.ok) return { output: "", error: read.error };
+    const scenarioName = read.name;
+    const scenario = scenarioFor(scenarioName);
     const urlVar = scenario.profile === "fixture-test" ? "MIA_URL_1" : "MIA_URL_2";
     const secretVar =
       scenario.profile === "fixture-test" ? "MIA_SECRET_FILE_1" : "MIA_SECRET_FILE_2";
@@ -86,7 +76,7 @@ export default class MiaScenarioProvider {
         },
         budget: (label) => budget.take(`live:${scenarioName}:${label}`, scenario.profile),
       };
-      const evidence = await runScenario(scenarioName, ctx);
+      const evidence = await runScenario(scenario, ctx);
       return {
         output: JSON.stringify({ ...evidence, prompt_version: this.promptVersion }),
         format: "json",

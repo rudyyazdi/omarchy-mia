@@ -13,6 +13,7 @@ export default defineConfig({
             "apps/*/src/**/*.test.ts",
             "fixtures/*/src/**/*.test.ts",
             "tools/*/src/**/*.test.ts",
+            "tests/acceptance/promptfoo/**/*.test.ts",
           ],
           testTimeout: 5_000,
           hookTimeout: 5_000,

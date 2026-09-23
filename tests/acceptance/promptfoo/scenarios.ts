@@ -30,11 +30,14 @@ export const ScenarioNameSchema = z.enum([
 ]);
 export type ScenarioName = z.infer<typeof ScenarioNameSchema>;
 
-/** Reads a promptfoo `vars.scenario` value; an unknown name is an error that names it. */
-export const parseScenarioName = (value: unknown): ScenarioName => {
+/** Reads a promptfoo `vars.scenario` value; an unknown name comes back as an error that names it. */
+export const readScenarioName = (
+  value: unknown,
+): { ok: true; name: ScenarioName } | { ok: false; error: string } => {
   const parsed = ScenarioNameSchema.safeParse(value);
-  if (!parsed.success) throw new Error(`unknown scenario ${String(value)}`);
-  return parsed.data;
+  return parsed.success
+    ? { ok: true, name: parsed.data }
+    : { ok: false, error: `unknown scenario ${JSON.stringify(value)}` };
 };
 
 const LedgerRefSchema = z.object({ tool: z.string(), call_id: z.string() });
@@ -400,12 +403,18 @@ export const SCENARIOS: Scenario[] = [
   }),
 ];
 
+/** The definition of a declared scenario; a unit test keeps every declared name defined exactly once. */
+export const scenarioFor = (name: ScenarioName): Scenario => {
+  const scenario = SCENARIOS.find((candidate) => candidate.name === name);
+  if (!scenario) throw new Error(`scenario ${name} has no definition`);
+  return scenario;
+};
+
 export const runScenario = async (
-  name: ScenarioName,
+  scenario: Scenario,
   ctx: ScenarioContext,
 ): Promise<ScenarioEvidence> => {
-  const scenario = SCENARIOS.find((candidate) => candidate.name === name);
-  if (!scenario) throw new Error(`unknown scenario ${name}`);
+  const name = scenario.name;
   await ctx.harness.reset();
   const ledgerBefore = await ctx.harness.state();
   const partial = await scenario.run(ctx);

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { match, P } from "ts-pattern";
+import { match } from "ts-pattern";
 import {
   readHookEvidence,
   type AdapterEvent,
@@ -157,16 +157,14 @@ const detailFor = (status: ToolCallStatus): string | undefined =>
     .with("blocked_gate", () => "not released: action gate closed")
     .with("invalidated", () => "never released: proposal or pending approval invalidated")
     .with(
-      P.union(
-        "proposed",
-        "awaiting_approval",
-        "permitted",
-        "denied",
-        "dispatched",
-        "completed",
-        "failed",
-        "cancelled",
-      ),
+      "proposed",
+      "awaiting_approval",
+      "permitted",
+      "denied",
+      "dispatched",
+      "completed",
+      "failed",
+      "cancelled",
       () => undefined,
     )
     .exhaustive();
