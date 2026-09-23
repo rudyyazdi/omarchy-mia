@@ -144,18 +144,18 @@ export const bindPermissionRequest = <Latest extends BindingKey & { status: Tool
   };
 };
 
-/** The task a resolved approval belongs to, as the rules that resolve one see it. */
+/** A task as the rules that may resolve one of its approvals see it. */
 export interface PendingTask {
   status: TaskStatus;
-  /** Pending approvals left once the one being resolved is gone. */
+  /** Pending approvals left besides the one being resolved, if any. */
   otherPending: number;
 }
 
 /**
  * A changed tool or arguments under the same runtime call id: a held earlier binding, and its pending
  * approval, can never release anything. Null when the earlier binding was already released or refused.
- * Invalidating the task's last pending approval resumes the task; a new revision that asks again sets it
- * back to awaiting_approval later in the same transaction.
+ * The task status that results: invalidating the task's last pending approval resumes it, and a new
+ * revision that asks again sets it back to awaiting_approval later in the same transaction.
  */
 export const supersedeBinding = (
   call: CallFacts & BindingKey & { approvalId: string | null },
@@ -259,17 +259,15 @@ export const decideApproval = <Call extends CallFacts>(input: {
   deciderClientId: string;
   /** The call the approval holds, if it is still pending for this task. */
   call: Call | undefined;
-  task: { status: TaskStatus; gateOpen: boolean; epoch: number };
+  task: PendingTask & { gateOpen: boolean; epoch: number };
   conversationEpoch: number;
-  /** Pending approvals left once this one is resolved. */
-  otherPending: number;
 }): ApprovalOutcome<Call> => {
   if (input.deciderClientId !== input.ownerClientId) return { kind: "not_owner" };
   const { call, task } = input;
   if (!call || call.status !== "awaiting_approval") return { kind: "not_pending" };
   const approve = input.decision === "approve";
   const release = approve && task.gateOpen && task.epoch === input.conversationEpoch;
-  const taskStatus = taskStatusAfterResolving(task.status, input.otherPending);
+  const taskStatus = taskStatusAfterResolving(task.status, task.otherPending);
   const change = ((): Omit<CallChange, "callId"> => {
     if (release) return { status: "dispatched", settle: { behavior: "allow" } };
     if (approve)

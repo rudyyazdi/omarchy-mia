@@ -273,8 +273,12 @@ describe("approval path", () => {
       (event) => event.payload.binding_revision === 2,
     );
     expect(requested2.payload.redacted_arguments).toEqual({ delta: 2 });
-    // Superseding resumed the task, and the new revision's ask, later in the same transaction, set it back.
+    // Superseding resumed the task, and the new revision's ask, later in the same transaction, set it back,
+    // in the records and in memory alike.
     expect(taskStatus(taskId)).toBe("awaiting_approval");
+    expect((await client.submitText("meanwhile")).error?.message).toContain(
+      `is awaiting_approval; approve or reject ${requested2.payload.approval_id}`,
+    );
     // the old approval id cannot authorise the new binding
     const stale = await decide(taskId, requested1.payload.approval_id, "approve");
     expect(stale.error?.code).toBe("invalid_state");
@@ -443,6 +447,7 @@ describe("approval path", () => {
     failNextCommit();
     expect((await turn.request("mcp__d1__change", { delta: 2 }, "toolu_1")).behavior).toBe("deny");
     expect(approvalStatuses()).toEqual(["pending"]);
+    expect(taskStatus(taskId)).toBe("awaiting_approval");
     const ack = await decide(taskId, requested.payload.approval_id, "approve");
     expect(ack.disposition).toBe("accepted");
     expect((await held).behavior).toBe("allow");
@@ -464,6 +469,16 @@ describe("approval path", () => {
     const { turn: next } = await submit("did it run?");
     expect(next.options.text).toContain("abandoned the approval prompt");
     next.end();
+  });
+
+  it("resumes the task when a request the policy allows supersedes its last pending approval", async () => {
+    const { turn, taskId, held } = await submitHeldCall("change");
+    expect((await turn.request("mcp__d1__read", { delta: 1 }, "toolu_1")).behavior).toBe("allow");
+    expect((await held).behavior).toBe("deny");
+    await expectResumed(taskId);
+    turn.toolResult("toolu_1", "read");
+    turn.end();
+    expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
   });
 
   it("resumes the task when a streamed new binding supersedes its last pending approval", async () => {

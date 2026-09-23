@@ -554,9 +554,13 @@ export class Engine {
       ownerClientId: task.clientId,
       deciderClientId: ctx.clientId,
       call,
-      task,
+      task: {
+        status: task.status,
+        gateOpen: task.gateOpen,
+        epoch: task.epoch,
+        otherPending: otherPending(task, call ? payload.approval_id : null),
+      },
       conversationEpoch: this.activeConversation.epoch,
-      otherPending: otherPending(task, call ? payload.approval_id : null),
     });
     return match(outcome)
       .with({ kind: "not_owner" }, () =>
@@ -1112,12 +1116,12 @@ export class Engine {
   }
 
   /**
-   * Record the task status a rule decided, and apply it once the transaction commits (inside tx). It compares
-   * against the committed status, so it runs before anything else in the transaction changes the task's status;
-   * a later change in the same transaction (a new revision asking for approval) is queued after it and wins.
+   * Record the task's status and apply it once the transaction commits (inside tx). It writes even an unchanged
+   * status: comparing against `task.status` would read the committed value, not one an earlier step of the same
+   * transaction set. The write and the queued change both keep transaction order, so the last one wins in the
+   * records and in memory alike (a superseded approval resumes the task, then the new revision's ask holds it).
    */
   private recordTaskStatus(task: TaskState, status: TaskStatus): void {
-    if (status === task.status) return;
     this.deps.writer.updateTask(task.id, { status });
     this.onCommit(() => {
       task.status = status;
@@ -1322,13 +1326,12 @@ export class Engine {
         );
         this.deps.catalog.update("approvals", approvalId, { requesting_event_id: requested.id });
         this.deps.writer.updateToolCall(call.id, { status: "awaiting_approval" });
-        this.deps.writer.updateTask(task.id, { status: "awaiting_approval" });
         this.onCommit(() => {
           call.status = "awaiting_approval";
           call.approvalId = approvalId;
           task.pendingApprovals.set(approvalId, call);
-          task.status = "awaiting_approval";
         });
+        this.recordTaskStatus(task, "awaiting_approval");
       })
       .exhaustive();
   }

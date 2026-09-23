@@ -32,9 +32,8 @@ const approval = (
   ownerClientId: "client-A",
   deciderClientId: "client-A",
   call: call("awaiting_approval"),
-  task: { status: "awaiting_approval", gateOpen: true, epoch: 1 },
+  task: { status: "awaiting_approval", gateOpen: true, epoch: 1, otherPending: 0 },
   conversationEpoch: 1,
-  otherPending: 0,
   ...overrides,
 });
 
@@ -66,7 +65,13 @@ describe("decideApproval", () => {
   });
 
   it("keeps the task awaiting approval while other approvals are pending", () => {
-    expect(decideApproval(approval({ otherPending: 1 }))).toMatchObject({
+    expect(
+      decideApproval(
+        approval({
+          task: { status: "awaiting_approval", gateOpen: true, epoch: 1, otherPending: 1 },
+        }),
+      ),
+    ).toMatchObject({
       taskStatus: "awaiting_approval",
     });
   });
@@ -82,7 +87,7 @@ describe("decideApproval", () => {
 
   it("blocks an approval after the gate closed or the epoch moved on", () => {
     const closed = decideApproval(
-      approval({ task: { status: "interrupting", gateOpen: false, epoch: 1 } }),
+      approval({ task: { status: "interrupting", gateOpen: false, epoch: 1, otherPending: 0 } }),
     );
     const stale = decideApproval(approval({ conversationEpoch: 2 }));
     for (const outcome of [closed, stale])
@@ -99,7 +104,7 @@ describe("decideApproval", () => {
       decideApproval(
         approval({
           call: call("invalidated"),
-          task: { status: "interrupting", gateOpen: false, epoch: 1 },
+          task: { status: "interrupting", gateOpen: false, epoch: 1, otherPending: 0 },
           conversationEpoch: 2,
         }),
       ),
