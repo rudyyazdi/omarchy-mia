@@ -40,6 +40,7 @@ import type { Profile } from "./config.ts";
 import { createConversationProvenance } from "./provenance.ts";
 import {
   bindPermissionRequest,
+  bindStreamProposal,
   classifyActions,
   classifyTask,
   decideAbandonment,
@@ -943,8 +944,12 @@ export class Engine {
               opts,
             );
             const last = task.calls.get(proposed.runtimeCallId)?.at(-1);
-            if (last && last.digest === digest) {
-              this.deps.writer.updateToolCall(last.id, { proposalEventId: proposal.id });
+            const binding = bindStreamProposal(last, {
+              toolIdentity: proposed.toolIdentity,
+              digest,
+            });
+            if (binding.kind === "attach") {
+              this.deps.writer.updateToolCall(binding.call.id, { proposalEventId: proposal.id });
               return;
             }
             if (last) this.supersede(task, last);

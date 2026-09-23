@@ -79,32 +79,49 @@ const detailFor = (status: ToolCallStatus): string | undefined =>
 
 // ---------------------------------------------------------------- binding
 
+/** What binds a report to a revision: the tool and its canonical argument digest. */
+interface Binding {
+  toolIdentity: string;
+  digest: string;
+}
+
+/** A report is the same call as the latest revision under its runtime call id only if both tool and arguments match. */
+const sameBinding = (latest: Binding, report: Binding): boolean =>
+  latest.toolIdentity === report.toolIdentity && latest.digest === report.digest;
+
+/**
+ * How a complete stream proposal binds to its runtime call id. The same binding attaches the proposal to the
+ * latest revision whatever its status: the permission request can arrive before its stream line, so a matching
+ * proposal for a call already released or refused is still that call's announcement. Anything else proposes a
+ * new revision, superseding the latest one if it is still held.
+ */
+export type StreamBinding<Latest> = { kind: "attach"; call: Latest } | { kind: "propose" };
+
+export const bindStreamProposal = <Latest extends Binding>(
+  latest: Latest | undefined,
+  report: Binding,
+): StreamBinding<Latest> =>
+  latest && sameBinding(latest, report) ? { kind: "attach", call: latest } : { kind: "propose" };
+
 /**
  * How a permission request binds to its runtime call id. It reuses the latest revision while that is still
  * only proposed with the same tool and arguments (the stream announced the call before the runtime asked).
  * A request identical to a revision already awaiting approval is a duplicate: it is refused without a second
  * approval, so a call never has two pending approvals and the first request stays held until the user
- * decides. Anything else (no revision yet, changed arguments, or a revision already released or refused)
- * proposes a new revision. Denying assumes the runtime still honours the first prompt: a runtime that gives
- * up on a prompt aborts it, which abandons the held call, so its retry proposes afresh instead.
+ * decides. Anything else (no revision yet, a changed tool or arguments, or a revision already released or
+ * refused) proposes a new revision. Denying assumes the runtime still honours the first prompt: a runtime that
+ * gives up on a prompt aborts it, which abandons the held call, so its retry proposes afresh instead.
  */
 export type PermissionBinding<Latest> =
   | { kind: "reuse"; call: Latest }
   | { kind: "propose" }
   | { kind: "duplicate"; detail: string; settle: PermissionDecision };
 
-export const bindPermissionRequest = <
-  Latest extends { status: ToolCallStatus; toolIdentity: string; digest: string },
->(
+export const bindPermissionRequest = <Latest extends Binding & { status: ToolCallStatus }>(
   latest: Latest | undefined,
-  request: { toolIdentity: string; digest: string },
+  request: Binding,
 ): PermissionBinding<Latest> => {
-  if (
-    !latest ||
-    !isHeld(latest.status) ||
-    latest.digest !== request.digest ||
-    latest.toolIdentity !== request.toolIdentity
-  )
+  if (!latest || !isHeld(latest.status) || !sameBinding(latest, request))
     return { kind: "propose" };
   if (latest.status === "proposed") return { kind: "reuse", call: latest };
   return {
@@ -118,14 +135,14 @@ export const bindPermissionRequest = <
 };
 
 /**
- * Changed arguments under the same runtime call id: a held earlier binding, and its pending approval, can
- * never release anything. Null when the earlier binding was already released or refused.
+ * A changed tool or arguments under the same runtime call id: a held earlier binding, and its pending
+ * approval, can never release anything. Null when the earlier binding was already released or refused.
  */
 export const supersedeBinding = (
   call: CallFacts & { approvalId: string | null },
 ): { approval: ApprovalChange | null; call: CallChange } | null => {
   if (!isHeld(call.status)) return null;
-  const reason = "arguments changed";
+  const reason = "tool or arguments changed";
   return {
     approval: call.approvalId
       ? { approvalId: call.approvalId, callId: call.id, status: "invalidated", reason }
@@ -136,7 +153,7 @@ export const supersedeBinding = (
       detail: "superseded by a new binding revision",
       settle: {
         behavior: "deny",
-        message: "Mia invalidated the earlier approval: the arguments changed.",
+        message: "Mia invalidated the earlier approval: the call's tool or arguments changed.",
       },
     },
   };

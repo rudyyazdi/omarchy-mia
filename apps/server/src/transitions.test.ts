@@ -4,6 +4,7 @@ import type { TaskStatus, ToolCallStatus } from "@mia/protocol";
 import type { ToolCallPolicy } from "@mia/records";
 import {
   bindPermissionRequest,
+  bindStreamProposal,
   classifyActions,
   classifyTask,
   decideAbandonment,
@@ -229,6 +230,24 @@ describe("binding", () => {
     });
     expect(bindPermissionRequest(held, { ...same, digest: "d2" })).toEqual({ kind: "propose" });
     expect(bindPermissionRequest(held, { ...same, toolIdentity: "mcp__d1__read" })).toEqual({
+      kind: "propose",
+    });
+  });
+
+  it("attaches a stream proposal to the latest revision only when tool and arguments both match", () => {
+    expect(bindStreamProposal(latest, same)).toEqual({ kind: "attach", call: latest });
+    expect(bindStreamProposal(held, same)).toEqual({ kind: "attach", call: held });
+    expect(bindStreamProposal(latest, { ...same, digest: "d2" })).toEqual({ kind: "propose" });
+    expect(bindStreamProposal(held, { ...same, toolIdentity: "mcp__d1__read" })).toEqual({
+      kind: "propose",
+    });
+    expect(bindStreamProposal(undefined, same)).toEqual({ kind: "propose" });
+  });
+
+  it("attaches a matching stream proposal to a call already released, since the request can come first", () => {
+    const released: typeof latest = { ...latest, status: "dispatched" };
+    expect(bindStreamProposal(released, same)).toEqual({ kind: "attach", call: released });
+    expect(bindStreamProposal(released, { ...same, toolIdentity: "mcp__d1__read" })).toEqual({
       kind: "propose",
     });
   });
