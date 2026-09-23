@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { match } from "ts-pattern";
-import { z } from "zod";
 import {
   readHookEvidence,
   type AdapterEvent,
@@ -17,7 +16,6 @@ import {
   canonicalDigest,
   errorMessage,
   redactValue,
-  sha256Hex,
   type ApprovalStatus,
   type ClientDiagnostics,
   type Decision,
@@ -37,6 +35,8 @@ import {
   type RecordWriter,
   type ToolCallPolicy,
 } from "@mia/records";
+import { extractDeclaredArtifact } from "./artifact-capture.ts";
+import { collectArtifact } from "./artifact-collector.ts";
 import type { Profile } from "./config.ts";
 import { createConversationProvenance } from "./provenance.ts";
 
@@ -217,39 +217,6 @@ const describeAction = (toolIdentity: string, args: unknown): string => {
   if (server !== undefined && tool !== undefined)
     return `Call tool "${tool}" on MCP server "${server}" with arguments ${argText}`;
   return `Call ${toolIdentity} with arguments ${argText}`;
-};
-
-const DeclaredArtifactSchema = z.object({
-  path: z.string(),
-  sha256: z.string().optional(),
-  name: z.string().optional(),
-  mime_type: z.string().optional(),
-});
-const ArtifactDeclarationSchema = z.object({ artifact: DeclaredArtifactSchema });
-type DeclaredArtifact = z.infer<typeof DeclaredArtifactSchema>;
-
-/** Text blocks of a tool result: a bare string, or the `text` of every block that carries one. */
-const resultTexts = (content: unknown): string[] => {
-  if (typeof content === "string") return [content];
-  if (!Array.isArray(content)) return [];
-  return content.flatMap((block: unknown) => {
-    const text = typeof block === "object" && block !== null && "text" in block ? block.text : null;
-    return typeof text === "string" ? [text] : [];
-  });
-};
-
-export const extractDeclaredArtifact = (content: unknown): DeclaredArtifact | null => {
-  for (const text of resultTexts(content)) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      continue; // not JSON
-    }
-    const declaration = ArtifactDeclarationSchema.safeParse(parsed);
-    if (declaration.success) return declaration.data.artifact;
-  }
-  return null;
 };
 
 /**
@@ -1477,7 +1444,7 @@ export class Engine {
     }
   }
 
-  /** A tool result may declare a generated file as {"artifact": {...}}; only files inside the configured output directories are retained. */
+  /** Records a declared tool output whatever its capture status; only a retained one becomes a task output. */
   private collectArtifacts(
     task: TaskState,
     call: ToolCallState,
@@ -1486,34 +1453,7 @@ export class Engine {
     const declared = extractDeclaredArtifact(result.content);
     if (!declared) return;
     const { writer } = this.deps;
-    let capture:
-      | { status: "retained"; bytes: Buffer }
-      | { status: "external_only" | "missing" | "failed"; reason: string };
-    if (!existsSync(declared.path))
-      capture = { status: "missing", reason: "declared file not found at collection time" };
-    else {
-      const real = realpathSync(declared.path);
-      if (
-        !this.deps.profile.runtime.outputDirectories.some((dir) =>
-          real.startsWith(realpathSync(dir) + sep),
-        )
-      )
-        capture = {
-          status: "external_only",
-          reason: "declared path resolves outside the configured output directories",
-        };
-      else {
-        const bytes = readFileSync(real);
-        const digest = sha256Hex(bytes);
-        capture =
-          declared.sha256 && declared.sha256 !== digest
-            ? {
-                status: "failed",
-                reason: `declared sha256 ${declared.sha256} does not match file ${digest}`,
-              }
-            : { status: "retained", bytes };
-      }
-    }
+    const capture = collectArtifact(declared, this.deps.profile.runtime.outputDirectories);
     const conversationId = this.activeConversation.id;
     const art = writer.registerArtifact({
       kind: "tool_output",
