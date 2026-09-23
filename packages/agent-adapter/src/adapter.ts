@@ -119,6 +119,7 @@ export const probeStaticCapabilities = (
   let version: string | null = null;
   const flags: Record<string, boolean> = {};
   if (resolved) {
+    // eslint-disable-next-line no-restricted-syntax -- runs before serving: startServer probes the runtime before it listens
     const versionProbe = spawnSync(resolved, ["--version"], {
       encoding: "utf8",
       timeout: 20_000,
@@ -130,6 +131,7 @@ export const probeStaticCapabilities = (
         `"${resolved} --version" failed: ${versionProbe.stderr?.trim() || versionProbe.error?.message || "unknown"}`,
       );
     const help =
+      // eslint-disable-next-line no-restricted-syntax -- runs before serving
       spawnSync(resolved, ["--help"], { encoding: "utf8", timeout: 20_000, env: launchEnv })
         .stdout ?? "";
     for (const flag of REQUIRED_FLAGS) {
@@ -143,6 +145,7 @@ export const probeStaticCapabilities = (
   }
   let credential: StaticCapabilities["credential_source"] = "none_detected";
   if (env.ANTHROPIC_API_KEY) credential = "ANTHROPIC_API_KEY";
+  // eslint-disable-next-line no-restricted-syntax -- runs before serving
   else if (existsSync(join(env.HOME ?? "", ".claude", ".credentials.json")))
     credential = "claude_credentials_file";
   if (credential === "none_detected")

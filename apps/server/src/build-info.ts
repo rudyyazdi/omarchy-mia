@@ -15,6 +15,7 @@ export interface BuildInfo {
 }
 
 const git = (args: string[], cwd: string): string | null => {
+  // eslint-disable-next-line no-restricted-syntax -- runs before serving: startServer collects build info before it listens
   const result = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 20_000 });
   return result.status === 0 ? result.stdout : null;
 };
@@ -22,6 +23,7 @@ const git = (args: string[], cwd: string): string | null => {
 /** The `version` field of a package.json, when the file is readable and carries one. */
 const packageVersion = (packageJsonPath: string): string | undefined => {
   try {
+    // eslint-disable-next-line no-restricted-syntax -- runs before serving
     const parsed: unknown = JSON.parse(readFileSync(packageJsonPath, "utf8"));
     if (
       typeof parsed === "object" &&
@@ -62,6 +64,7 @@ export const collectBuildInfo = (name: string, sourceRoot: string): BuildInfo =>
       .filter(Boolean)
       .map((file) => {
         try {
+          // eslint-disable-next-line no-restricted-syntax -- runs before serving
           return `${sha256Hex(readFileSync(resolve(root, file)))}  ${file}`;
         } catch {
           return `unreadable  ${file}`;

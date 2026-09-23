@@ -243,11 +243,13 @@ export const runTextClient = async (
   deadlines: TextClientDeadlines,
 ): Promise<void> => {
   const { url, secretFile } = resolveConnection(options);
+  // eslint-disable-next-line no-restricted-syntax -- runs before connecting
   if (!existsSync(secretFile))
     throw new Error(
       `secret file ${secretFile} not found; start the server first (it creates the secret)`,
     );
   const commit =
+    // eslint-disable-next-line no-restricted-syntax -- runs before connecting
     spawnSync("git", ["rev-parse", "--short", "HEAD"], { encoding: "utf8" }).stdout?.trim() || null;
   const client = new MiaClient({
     url,

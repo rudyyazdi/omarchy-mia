@@ -94,11 +94,13 @@ export const createConversationProvenance = (input: {
   // Mia-owned agent instructions.
   let promptDigest: string | null = null;
   let promptVersion: string | null = null;
+  // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
   if (existsSync(profile.runtime.agentPromptFile)) {
     promptVersion = basename(profile.runtime.agentPromptFile).replace(/\.md$/, "");
     // The digest the object was stored under, so the engine can hand the runtime that very object.
     promptDigest =
       add("agent_prompt", {
+        // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
         bytes: readFileSync(profile.runtime.agentPromptFile),
         version: promptVersion,
         mime: "text/markdown",
@@ -166,7 +168,9 @@ export const createConversationProvenance = (input: {
 
   // Architecture document revision.
   let architectureRevision: string | null = null;
+  // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
   if (existsSync(profile.architectureDocument)) {
+    // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
     const bytes = readFileSync(profile.architectureDocument);
     architectureRevision = sha256Hex(bytes);
     add("architecture", {

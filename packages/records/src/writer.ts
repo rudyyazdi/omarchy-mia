@@ -386,6 +386,7 @@ export class RecordWriter {
       this.catalog.paths.conversations,
       `${startedAt.replace(/[:.]/g, "-")}_${id}`,
     );
+    // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     this.catalog.insert("conversations", {
       id,

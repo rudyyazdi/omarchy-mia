@@ -58,13 +58,16 @@ export class Catalog {
     this.paths = catalogPaths(root);
     if (!options.readonly) {
       for (const dir of [root, this.paths.objects, this.paths.conversations, this.paths.staging]) {
+        // eslint-disable-next-line no-restricted-syntax -- runs before serving: the catalog opens at startup
         mkdirSync(dir, { recursive: true, mode: 0o700 });
         try {
+          // eslint-disable-next-line no-restricted-syntax -- runs before serving
           chmodSync(dir, 0o700);
         } catch {
           /* best effort */
         }
       }
+      // eslint-disable-next-line no-restricted-syntax -- runs before serving
     } else if (!existsSync(this.paths.database)) {
       throw new Error(`no catalog at ${this.paths.database}`);
     }
@@ -76,6 +79,7 @@ export class Catalog {
       this.db.exec("PRAGMA synchronous = FULL");
       this.migrate();
       try {
+        // eslint-disable-next-line no-restricted-syntax -- runs before serving
         chmodSync(this.paths.database, 0o600);
       } catch {
         /* best effort */

@@ -13,7 +13,9 @@ const DEFAULT_SEARCH_PATH = "/usr/bin:/bin";
 
 const isExecutableFile = (candidate: string): boolean => {
   try {
+    // eslint-disable-next-line no-restricted-syntax -- runs before serving: only the startup probe resolves the executable
     accessSync(candidate, constants.X_OK);
+    // eslint-disable-next-line no-restricted-syntax -- runs before serving
     return statSync(candidate).isFile();
   } catch {
     return false;

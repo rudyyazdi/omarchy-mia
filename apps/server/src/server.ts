@@ -85,6 +85,7 @@ export const startServer = async (input: {
     runtime: probeStaticCapabilities(profile.runtime, input.env),
     build: collectBuildInfo("mia-server", SOURCE_ROOT),
   };
+  // eslint-disable-next-line no-restricted-syntax -- runs before serving
   mkdirSync(profile.stateDirectory, { recursive: true, mode: 0o700 });
   // Acquire in order; on any throw release what is already held, in reverse, before rethrowing.
   const catalog = new Catalog(profile.stateDirectory);

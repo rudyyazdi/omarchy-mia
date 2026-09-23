@@ -149,6 +149,24 @@ const SOURCE_RESTRICTED_SYNTAX = [
   },
 ];
 
+// Enforces AGENTS.md, Node: synchronous I/O stalls every connection, so it runs only before a process starts
+// serving. Lint cannot tell when a call runs, so each one that runs before serving says so in a bypass. The
+// SQLite catalog (`new DatabaseSync`, statement calls) is the documented exception and matches no selector.
+const NO_SYNC_IO = {
+  selector: "CallExpression[callee.name=/Sync$/], CallExpression[callee.property.name=/Sync$/]",
+  message: `Synchronous I/O stalls every connection; use node:fs/promises or an async child process. A call that runs before serving takes a bypass that says so (\`-- runs before serving\`). ${BYPASS_NOTE}`,
+};
+
+// The workspaces that serve: the server, the libraries it runs, and the text client. Left out is code that never
+// runs while anything serves: the one-shot debug CLI, probe and exports, the live-call budget only the probe and
+// the live lane take, and tests with their fixtures.
+const SERVING_FILES = ["packages/**/*.ts", "apps/server/**/*.ts", "apps/text-client/**/*.ts"];
+const NOT_SERVING_FILES = [
+  "**/*.test.ts",
+  "packages/records/src/export*.ts",
+  "packages/agent-adapter/src/budget.ts",
+];
+
 // Enforces AGENTS.md, Node: only the file a process starts from reads the environment, installs
 // signal handlers or exits; every other module takes what it needs as an argument.
 const PROCESS_ENTRY_ONLY = [
@@ -257,6 +275,11 @@ export default tseslint.config(
     files: ["packages/**/*.ts", "apps/**/*.ts", "fixtures/**/*.ts", "tools/**/*.ts"],
     ignores: ["**/*.test.ts"],
     rules: { "no-restricted-syntax": ["error", ...SOURCE_RESTRICTED_SYNTAX] },
+  },
+  {
+    files: SERVING_FILES,
+    ignores: NOT_SERVING_FILES,
+    rules: { "no-restricted-syntax": ["error", ...SOURCE_RESTRICTED_SYNTAX, NO_SYNC_IO] },
   },
   {
     // Workspace entry points. Each repeats its list above because a later no-restricted-syntax
