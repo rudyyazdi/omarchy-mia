@@ -38,16 +38,21 @@ export interface GatewayHandle {
 
 /** Load or create the local client secret (0600, outside Git). Never logged. */
 export const loadOrCreateSecret = (path: string): string => {
+  // eslint-disable-next-line no-restricted-syntax -- runs before serving: startGateway loads the secret before it listens, and no runtime can reach the bridge yet
   if (existsSync(path)) {
+    // eslint-disable-next-line no-restricted-syntax -- runs before serving
     const secret = readFileSync(path, "utf8").trim();
     if (secret.length < 32)
       throw new Error(`secret file ${path} is too short; delete it to regenerate`);
     registerSecret(secret);
     return secret;
   }
+  // eslint-disable-next-line no-restricted-syntax -- runs before serving
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const secret = randomBytes(32).toString("hex");
+  // eslint-disable-next-line no-restricted-syntax -- runs before serving
   writeFileSync(path, secret + "\n", { mode: 0o600 });
+  // eslint-disable-next-line no-restricted-syntax -- runs before serving
   chmodSync(path, 0o600);
   registerSecret(secret);
   return secret;

@@ -79,6 +79,7 @@ export const loadProfile = (path: string, env: NodeJS.ProcessEnv): Profile => {
   const absolute = resolve(path);
   let raw: string;
   try {
+    // eslint-disable-next-line no-restricted-syntax -- runs before serving: a profile loads at startup
     raw = readFileSync(absolute, "utf8");
   } catch (error) {
     throw new ConfigurationError(`cannot read profile ${absolute}: ${errorMessage(error)}`);

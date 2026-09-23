@@ -36,7 +36,9 @@ export class LiveCallBudget {
   }
 
   used(): number {
+    // eslint-disable-next-line no-restricted-syntax -- only the probe and the live lane take the budget, never a server
     if (!existsSync(this.file)) return 0;
+    // eslint-disable-next-line no-restricted-syntax -- only the probe and the live lane take the budget, never a server
     return readFileSync(this.file, "utf8")
       .split("\n")
       .filter((line) => line.trim()).length;
@@ -47,7 +49,9 @@ export class LiveCallBudget {
     const used = this.used();
     if (used >= this.cap)
       throw new Error(`live call cap reached (${used}/${this.cap}); refusing to start "${label}"`);
+    // eslint-disable-next-line no-restricted-syntax -- only the probe and the live lane take the budget, never a server
     mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 });
+    // eslint-disable-next-line no-restricted-syntax -- only the probe and the live lane take the budget, never a server
     appendFileSync(
       this.file,
       JSON.stringify({ at: new Date().toISOString(), label, model }) + "\n",
