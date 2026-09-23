@@ -54,6 +54,20 @@ const submitHeldCall = async (
   return { turn, taskId, held, requested };
 };
 
+const taskStatus = (taskId: string): string =>
+  must(rows<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId)[0], "task row")
+    .status;
+
+/** The task is running again, in the records and in memory: a new submission is told to wait, not to decide. */
+const expectResumed = async (taskId: string): Promise<void> => {
+  expect(taskStatus(taskId)).toBe("running");
+  const busy = await client.submitText("another");
+  expect(busy.error).toMatchObject({
+    code: "busy",
+    message: expect.stringContaining("is running; wait for it to finish or interrupt it"),
+  });
+};
+
 const decide = (taskId: string, approvalId: string, decision: "approve" | "reject") =>
   client.decide({ taskId: taskId, approvalId: approvalId, decision: decision });
 
@@ -115,9 +129,7 @@ describe("streaming and commands", () => {
     expect(conflict.disposition).toBe("rejected");
     expect(conflict.error?.code).toBe("duplicate_command_conflict");
     expect(rows("SELECT id FROM tasks")).toHaveLength(1);
-    expect(
-      must(rows<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId)[0]).status,
-    ).toBe("completed");
+    expect(taskStatus(taskId)).toBe("completed");
   });
 
   it("rejects unsupported protocol versions, invalid JSON, oversized text and busy submissions", async () => {
@@ -164,9 +176,7 @@ describe("streaming and commands", () => {
     turn.end();
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("completed");
-    expect(
-      must(rows<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId)[0]).status,
-    ).toBe("completed");
+    expect(taskStatus(taskId)).toBe("completed");
     const execution = must(
       rows<{ effort_evidence: string }>(
         "SELECT effort_evidence FROM executions WHERE task_id = ?",
@@ -263,6 +273,12 @@ describe("approval path", () => {
       (event) => event.payload.binding_revision === 2,
     );
     expect(requested2.payload.redacted_arguments).toEqual({ delta: 2 });
+    // Superseding resumed the task, and the new revision's ask, later in the same transaction, set it back,
+    // in the records and in memory alike.
+    expect(taskStatus(taskId)).toBe("awaiting_approval");
+    expect((await client.submitText("meanwhile")).error?.message).toContain(
+      `is awaiting_approval; approve or reject ${requested2.payload.approval_id}`,
+    );
     // the old approval id cannot authorise the new binding
     const stale = await decide(taskId, requested1.payload.approval_id, "approve");
     expect(stale.error?.code).toBe("invalid_state");
@@ -431,6 +447,7 @@ describe("approval path", () => {
     failNextCommit();
     expect((await turn.request("mcp__d1__change", { delta: 2 }, "toolu_1")).behavior).toBe("deny");
     expect(approvalStatuses()).toEqual(["pending"]);
+    expect(taskStatus(taskId)).toBe("awaiting_approval");
     const ack = await decide(taskId, requested.payload.approval_id, "approve");
     expect(ack.disposition).toBe("accepted");
     expect((await held).behavior).toBe("allow");
@@ -438,11 +455,12 @@ describe("approval path", () => {
     await client.waitFor("task_finished");
   });
 
-  it("expires an approval whose prompt the runtime abandoned and tells the next turn", async () => {
-    const { turn, held } = await submitHeldCall("change");
+  it("expires an approval whose prompt the runtime abandoned, resumes the task, and tells the next turn", async () => {
+    const { turn, taskId, held } = await submitHeldCall("change");
     must(turn.pendingAbandons[0], "held prompt").abort();
     expect((await held).behavior).toBe("deny");
     expect(approvalStatuses()).toEqual(["expired"]);
+    await expectResumed(taskId);
     turn.end();
     expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
     expect(must(rows<{ status: string }>("SELECT status FROM tool_calls")[0]).status).toBe(
@@ -451,6 +469,26 @@ describe("approval path", () => {
     const { turn: next } = await submit("did it run?");
     expect(next.options.text).toContain("abandoned the approval prompt");
     next.end();
+  });
+
+  it("resumes the task when a request the policy allows supersedes its last pending approval", async () => {
+    const { turn, taskId, held } = await submitHeldCall("change");
+    expect((await turn.request("mcp__d1__read", { delta: 1 }, "toolu_1")).behavior).toBe("allow");
+    expect((await held).behavior).toBe("deny");
+    await expectResumed(taskId);
+    turn.toolResult("toolu_1", "read");
+    turn.end();
+    expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
+  });
+
+  it("resumes the task when a streamed new binding supersedes its last pending approval", async () => {
+    const { turn, taskId, held } = await submitHeldCall("change");
+    turn.propose("toolu_1", "mcp__d1__change", { delta: 2 });
+    expect((await held).behavior).toBe("deny");
+    expect(approvalStatuses()).toEqual(["invalidated"]);
+    await expectResumed(taskId);
+    turn.end();
+    expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
   });
 
   it("treats disconnection as no decision and keeps the pending record", async () => {
