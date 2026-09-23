@@ -4,12 +4,20 @@
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
-import { FixtureHarness, type FixtureState, type SlowMode } from "@mia/controlled-mcp";
+import {
+  FixtureHarness,
+  LedgerKindSchema,
+  type FixtureState,
+  type LedgerKind,
+  type SlowMode,
+} from "@mia/controlled-mcp";
 import { describeAck, MiaClient, type AckPayload } from "@mia/text-client";
 import {
+  DecisionSchema,
+  ErrorCodeSchema,
+  ErrorDispositionSchema,
   ServerEventTypeSchema,
   TaskStatusSchema,
-  type Decision,
   type ServerEvent,
   type TaskStatus,
 } from "@mia/protocol";
@@ -76,18 +84,43 @@ const acknowledgedWithin = (ctx: ScenarioContext) => ({ signal: ctx.within(ACK_T
 
 const LedgerRefSchema = z.object({ tool: z.string(), call_id: z.string() });
 
+/** How the server acknowledged a decision the scenario sent; a refusal always names its error code. */
+const DecisionAckSchema = z.discriminatedUnion("disposition", [
+  z.object({ disposition: z.literal("accepted"), after_reconnect: z.boolean() }),
+  z.object({
+    disposition: ErrorDispositionSchema,
+    code: ErrorCodeSchema,
+    after_reconnect: z.boolean(),
+  }),
+]);
+type DecisionAck = z.infer<typeof DecisionAckSchema>;
+
+/** The ack as evidence; exported so a unit test pins the mapping the assertion relies on. */
+export const decisionAckOf = (ack: AckPayload, afterReconnect: boolean): DecisionAck =>
+  ack.disposition === "accepted"
+    ? { disposition: "accepted", after_reconnect: afterReconnect }
+    : { disposition: ack.disposition, code: ack.error.code, after_reconnect: afterReconnect };
+
+/** What a decider may do with an approval request: decide it, or send nothing. */
+const DeciderChoiceSchema = z.union([DecisionSchema, z.literal("ignore")]);
+type DeciderChoice = z.infer<typeof DeciderChoiceSchema>;
+
+/** The two server profiles the live lane starts; `provider.ts` picks a server by it. */
+const ScenarioProfileSchema = z.enum(["fixture-test", "fixture-test-interrupt"]);
+
 /** Evidence one scenario produces; also what the promptfoo assertion parses back from the provider's JSON output. */
 export const ScenarioEvidenceSchema = z.object({
   scenario: ScenarioNameSchema,
-  profile: z.string(),
+  profile: ScenarioProfileSchema,
   conversation_id: z.string(),
   task_ids: z.array(z.string()),
   decisions: z.array(
     z.object({
       approval_id: z.string(),
       tool: z.string(),
-      // eslint-disable-next-line no-restricted-syntax -- the decider's choice, or how the ack answered it (`ack:rejected:invalid_state`)
-      decision: z.string(),
+      /** The decider's choice; `ignore` sends nothing, so it has no ack. */
+      decision: DeciderChoiceSchema,
+      ack: DecisionAckSchema.optional(),
       ledger_commits_at_request: z.number(),
     }),
   ),
@@ -97,7 +130,7 @@ export const ScenarioEvidenceSchema = z.object({
     commits: z.array(LedgerRefSchema),
     returned: z.array(LedgerRefSchema),
     entered: z.array(LedgerRefSchema),
-    kinds: z.record(z.string(), z.number()),
+    kinds: z.partialRecord(LedgerKindSchema, z.number()),
   }),
   events: z.array(
     z.object({
@@ -115,7 +148,7 @@ export type ScenarioEvidence = z.infer<typeof ScenarioEvidenceSchema>;
 
 export interface Scenario {
   name: ScenarioName;
-  profile: "fixture-test" | "fixture-test-interrupt";
+  profile: z.infer<typeof ScenarioProfileSchema>;
   run(
     ctx: ScenarioContext,
   ): Promise<
@@ -126,11 +159,7 @@ export interface Scenario {
   >;
 }
 
-type Decider = (request: {
-  tool: string;
-  approval_id: string;
-  index: number;
-}) => Decision | "ignore";
+type Decider = (request: { tool: string; approval_id: string; index: number }) => DeciderChoice;
 
 /** Commits are the fixture's own count of executed actions; model prose never establishes one. */
 const commitCount = (state: FixtureState): number =>
@@ -171,12 +200,14 @@ const runTask = async (
       approval_id: event.payload.approval_id,
       index: index++,
     });
-    decisions.push({
+    // Recorded before deciding, so decisions stay in request order; the ack is added once it arrives.
+    const recorded: ScenarioEvidence["decisions"][number] = {
       approval_id: event.payload.approval_id,
       tool: event.payload.tool_identity,
       decision: choice,
       ledger_commits_at_request: commitCount(state),
-    });
+    };
+    decisions.push(recorded);
     if (choice === "ignore") return;
     const decided = await client.decide({
       taskId: taskId,
@@ -184,13 +215,7 @@ const runTask = async (
       decision: choice,
       ...acknowledgedWithin(ctx),
     });
-    if (decided.disposition !== "accepted")
-      decisions.push({
-        approval_id: event.payload.approval_id,
-        tool: event.payload.tool_identity,
-        decision: `ack:${decided.disposition}:${decided.error.code}`,
-        ledger_commits_at_request: -1,
-      });
+    recorded.ack = decisionAckOf(decided, false);
   };
   // A failed decision fails the wait below instead of going unhandled.
   const decisionFailed = Promise.withResolvers<never>();
@@ -375,7 +400,8 @@ export const SCENARIOS: Scenario[] = [
           {
             approval_id: approvalId,
             tool: requested.payload.tool_identity,
-            decision: `reject-after-reconnect:${decided.disposition}`,
+            decision: "reject",
+            ack: decisionAckOf(decided, true),
             ledger_commits_at_request: commitsAtRequest,
           },
         ],
@@ -464,7 +490,7 @@ export const runScenario = async (
   const ledgerBefore = await ctx.harness.state();
   const partial = await scenario.run(ctx);
   const after = await ctx.harness.state();
-  const kinds: Record<string, number> = {};
+  const kinds: Partial<Record<LedgerKind, number>> = {};
   for (const entry of after.ledger) kinds[entry.kind] = (kinds[entry.kind] ?? 0) + 1;
   const eventsSource = ctx.client.events;
   return {

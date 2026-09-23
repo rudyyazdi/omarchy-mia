@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { match } from "ts-pattern";
 import { z } from "zod";
 import { errorMessage, redactString, type RuntimeCancellation } from "@mia/protocol";
+import type { ExecutionStatus } from "@mia/records";
 import type { ApprovalBridge, PermissionHandler } from "./bridge.ts";
 import type { RuntimeConfig } from "./config.ts";
 import { withinDeadline } from "./deadline.ts";
@@ -30,7 +31,8 @@ interface RuntimeExit {
 }
 
 export interface TurnResult {
-  status: "completed" | "failed" | "killed";
+  /** How the runtime process ended; the engine derives the execution's terminal status from it. */
+  status: Exclude<ExecutionStatus, "running">;
   summary: TurnSummary | null;
   exit: RuntimeExit | null;
   error: string | null;

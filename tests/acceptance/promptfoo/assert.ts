@@ -53,6 +53,19 @@ const assertScenario = (output: string, context: { vars: Record<string, unknown>
     evidence.events.findIndex((event) => matches(event, type, pred));
   const has = (type: ServerEventType, pred?: PayloadPredicate) =>
     evidence.events.some((event) => matches(event, type, pred));
+  /** A decision the scenario sent that the server did not accept (or never answered) did not take effect. */
+  const unaccepted = () =>
+    evidence.decisions.flatMap((decision) =>
+      decision.decision === "ignore" || decision.ack?.disposition === "accepted"
+        ? []
+        : [
+            `${decision.decision} ${decision.approval_id} ${decision.ack ? `${decision.ack.disposition}:${decision.ack.code}` : "unanswered"}`,
+          ],
+    );
+  const requireAccepted = () => {
+    const refused = unaccepted();
+    if (refused.length > 0) problems.push(`decisions not accepted: ${refused.join(", ")}`);
+  };
   const slowEntered = () =>
     evidence.ledger_after.entered.filter((entry) => entry.tool === "slow").length;
 
@@ -73,6 +86,7 @@ const assertScenario = (output: string, context: { vars: Record<string, unknown>
       if (commits.length !== 0) problems.push("unexpected commits");
     })
     .with("approve-reject", () => {
+      requireAccepted();
       // Two tasks in one conversation: the first approval must see zero commits; the second (rejected) must see exactly the one
       // commit from the approved task and nothing more, i.e. nothing committed while any approval was pending.
       const seen = evidence.decisions.map((decision) => decision.ledger_commits_at_request);
@@ -90,6 +104,7 @@ const assertScenario = (output: string, context: { vars: Record<string, unknown>
         );
     })
     .with("every-call", () => {
+      requireAccepted();
       const ids = new Set(
         approvals.map((approval) =>
           isRecord(approval.payload) ? approval.payload.approval_id : undefined,
@@ -112,7 +127,10 @@ const assertScenario = (output: string, context: { vars: Record<string, unknown>
       if (commits.length !== 0) problems.push(`commits after disconnect: ${commits.length}`);
       if (
         !evidence.decisions.some(
-          (decision) => decision.decision === "reject-after-reconnect:accepted",
+          (decision) =>
+            decision.decision === "reject" &&
+            decision.ack?.after_reconnect === true &&
+            decision.ack.disposition === "accepted",
         )
       )
         problems.push("pending approval was not retained/decidable after reconnect");
@@ -158,6 +176,7 @@ const assertScenario = (output: string, context: { vars: Record<string, unknown>
         problems.push(`expected one commit, got ${commitsOf("change")}`);
     })
     .with("artifact-export", () => {
+      requireAccepted();
       if (commitsOf("artifact") !== 1)
         problems.push(`expected one artifact commit, got ${commitsOf("artifact")}`);
       if (
