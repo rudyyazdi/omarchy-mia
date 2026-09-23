@@ -101,6 +101,19 @@ const failDelivery = (type: string): void => {
 const approvalStatuses = (): string[] =>
   rows<{ status: string }>("SELECT status FROM approvals").map((row) => row.status);
 
+/** End a turn whose one call's prompt was abandoned: the call ends invalidated, and the next turn is told it never ran. */
+const expectAbandonedAtTurnEnd = async (turn: ScriptedTurn): Promise<void> => {
+  turn.end();
+  expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
+  expect(must(rows<{ status: string }>("SELECT status FROM tool_calls")[0]).status).toBe(
+    "invalidated",
+  );
+  expect(approvalStatuses()).toEqual(["expired"]);
+  const { turn: next } = await submit("did it run?");
+  expect(next.options.text).toContain("abandoned the approval prompt");
+  next.end();
+};
+
 describe("streaming and commands", () => {
   it("streams deltas in order before completion and deduplicates command ids", async () => {
     const { turn, taskId } = await submit("hello", "cmd-1");
@@ -461,14 +474,22 @@ describe("approval path", () => {
     expect((await held).behavior).toBe("deny");
     expect(approvalStatuses()).toEqual(["expired"]);
     await expectResumed(taskId);
-    turn.end();
-    expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
-    expect(must(rows<{ status: string }>("SELECT status FROM tool_calls")[0]).status).toBe(
-      "invalidated",
-    );
-    const { turn: next } = await submit("did it run?");
-    expect(next.options.text).toContain("abandoned the approval prompt");
-    next.end();
+    await expectAbandonedAtTurnEnd(turn);
+  });
+
+  it("refuses a later decision on an approval whose abandonment could not be recorded", async () => {
+    const { turn, taskId, held, requested } = await submitHeldCall("change");
+    failNextCommit();
+    must(turn.pendingAbandons[0], "held prompt").abort();
+    expect((await held).behavior).toBe("deny");
+    expect(approvalStatuses()).toEqual(["pending"]);
+    const late = await decide(taskId, requested.payload.approval_id, "approve");
+    expect(late.error).toMatchObject({
+      code: "invalid_state",
+      message: expect.stringContaining("can no longer be decided; its call was not released"),
+    });
+    expect(rows("SELECT id FROM events WHERE type = 'tool_dispatched'")).toHaveLength(0);
+    await expectAbandonedAtTurnEnd(turn);
   });
 
   it("resumes the task when a request the policy allows supersedes its last pending approval", async () => {

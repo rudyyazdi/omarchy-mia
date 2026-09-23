@@ -571,6 +571,13 @@ export class Engine {
           "SELECT status FROM approvals WHERE id = ?",
           payload.approval_id,
         );
+        // A row still pending here lost its in-memory hold without the records saying so (its abandonment
+        // could not be recorded): the call was refused and can no longer be released.
+        if (known?.status === "pending")
+          return fail(
+            "invalid_state",
+            `approval ${payload.approval_id} can no longer be decided; its call was not released`,
+          );
         if (known)
           return fail(
             "invalid_state",
@@ -1365,6 +1372,11 @@ export class Engine {
         });
       } catch (error) {
         this.deps.log(`could not record abandoned approval: ${String(error)}`);
+        // The runtime is denied below whatever the records say, so no later decision may release this call:
+        // it leaves the pending approvals (a decision finds it not pending) but stays held, so finishTurn
+        // records it invalidated and expires its approval. Until then the catalog still says pending.
+        task.pendingApprovals.delete(expire.approval.approvalId);
+        task.abandoned.push(call);
       }
     }
     resolve(settle);
@@ -1391,8 +1403,10 @@ export class Engine {
             status: action.status,
             detail: action.detail,
           });
-        for (const call of task.pendingApprovals.values())
-          if (call.approvalId)
+        // Every call still awaiting approval, not only the pending ones: one whose abandonment failed to
+        // record left the pending approvals but still has a pending row.
+        for (const call of calls)
+          if (call.status === "awaiting_approval" && call.approvalId)
             writer.updateApproval(call.approvalId, { status: "expired", reason: "task ended" });
         const retain = (artifact: {
           kind: ArtifactKind;
