@@ -8,6 +8,7 @@ import {
   type RuntimeEvent,
   type PermissionDecision,
   type PermissionRequest,
+  type TurnOptions,
 } from "@mia/agent-adapter";
 import { REDACTED } from "@mia/protocol";
 import { FixtureHarness, startFixture, type FixtureHandle } from "@mia/controlled-mcp";
@@ -43,6 +44,19 @@ const adapter = () => {
   return new ClaudeCodeAdapter(profile.runtime, bridge, FAKE_RUNTIME_ENV);
 };
 
+/** A first turn in a fresh runtime directory, with the given handlers. */
+const turnOptions = (
+  text: string,
+  handlers: Pick<TurnOptions, "permissionHandler" | "onEvent">,
+): TurnOptions => ({
+  text,
+  runtimeConversationId: `sess-${Math.random().toString(36).slice(2)}`,
+  firstTurn: true,
+  runtimeDir: join(dir, "runtime", Math.random().toString(36).slice(2)),
+  turnIndex: 1,
+  ...handlers,
+});
+
 const run = async (
   text: string,
   decide: (request: PermissionRequest) => PermissionDecision,
@@ -50,18 +64,15 @@ const run = async (
 ) => {
   const events: RuntimeEvent[] = [];
   const requests: PermissionRequest[] = [];
-  const handle = adapter().submitTurn({
-    text,
-    runtimeConversationId: `sess-${Math.random().toString(36).slice(2)}`,
-    firstTurn: true,
-    runtimeDir: join(dir, "runtime", Math.random().toString(36).slice(2)),
-    turnIndex: 1,
-    permissionHandler: async (request) => {
-      requests.push(request);
-      return decide(request);
-    },
-    onEvent: (event) => events.push(event),
-  });
+  const handle = adapter().submitTurn(
+    turnOptions(text, {
+      permissionHandler: async (request) => {
+        requests.push(request);
+        return decide(request);
+      },
+      onEvent: (event) => events.push(event),
+    }),
+  );
   if (during) await during(handle);
   const result = await handle.result;
   return { result, events, requests };
@@ -90,6 +101,10 @@ describe("real adapter against a fake runtime process", () => {
         "runtime_exit",
       ]),
     );
+    // Every stdout line is handled and retained before the turn ends.
+    expect(events.at(-1)?.type).toBe("runtime_exit");
+    const transcript = readFileSync(result.streamLogPath, "utf8").trimEnd().split("\n");
+    expect(JSON.parse(transcript.at(-1) ?? "")).toMatchObject({ type: "result" });
     expect(requests.map((request) => [request.toolName, request.toolUseId])).toEqual([
       ["mcp__d1__read", "toolu_fake_read_1"],
       ["mcp__d1__change", "toolu_fake_change_1"],
@@ -151,6 +166,28 @@ describe("real adapter against a fake runtime process", () => {
     const transcript = readFileSync(result.streamLogPath, "utf8");
     expect(transcript).toContain(`"api_key":"${REDACTED}"`);
     expect(transcript).not.toContain("fake-short-credential");
+  });
+
+  it("reports an event handler that throws and still ends the turn, as failed", async () => {
+    await harness.reset();
+    const events: RuntimeEvent[] = [];
+    const handle = adapter().submitTurn(
+      turnOptions("SLOW", {
+        permissionHandler: async () => ({ behavior: "allow" }),
+        onEvent: (event) => {
+          if (event.type === "runtime_init") throw new Error("handler failed");
+          events.push(event);
+        },
+      }),
+    );
+    const result = await handle.result;
+    expect(result.status).toBe("failed");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "runtime_stderr",
+        text: expect.stringContaining("[mia] stopped reading runtime output"),
+      }),
+    );
   });
 
   it("reports a runtime crash as a failed turn with no result message", async () => {

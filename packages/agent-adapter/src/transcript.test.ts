@@ -11,8 +11,24 @@ beforeEach(async () => {
 });
 afterEach(async () => rm(dir, { recursive: true, force: true }));
 
+/** Starts `retainStdout` on a stream the test writes to, collecting handled lines and reported failures. */
+const start = (file: string) => {
+  const stdout = new PassThrough();
+  const handled: string[] = [];
+  const read = retainStdout({
+    stdout,
+    file,
+    handleLine: (line) => {
+      handled.push(line);
+      return line;
+    },
+    reportFailure: () => undefined,
+  });
+  return { stdout, handled, read };
+};
+
 /** Runs `retainStdout` over `chunks`, retaining each line upper-cased and skipping lines that read `skip`. */
-const retain = async (file: string, chunks: string[]) => {
+const retain = async (file: string, chunks: (string | Buffer)[]) => {
   const stdout = new PassThrough();
   const handled: string[] = [];
   const failures: unknown[] = [];
@@ -39,6 +55,13 @@ describe("retainStdout", () => {
     expect(await readFile(file, "utf8")).toBe("ONE\nTWO\nTHREE\n");
     expect((await stat(file)).mode & 0o777).toBe(0o600);
     expect(failures).toEqual([]);
+  });
+
+  it("hands over a character whose bytes are split across chunks whole", async () => {
+    const file = join(dir, "turn.stream.jsonl");
+    const { handled } = await retain(file, [Buffer.from([0xe2, 0x82]), Buffer.from([0xac, 0x0a])]);
+    expect(handled).toEqual(["€"]);
+    expect(await readFile(file, "utf8")).toBe("€\n");
   });
 
   it("appends to a transcript that already exists", async () => {
@@ -78,6 +101,36 @@ describe("retainStdout", () => {
     });
     stdout.write("one\n");
     await expect(read).rejects.toThrow("handler failed");
+    expect(stdout.destroyed).toBe(true);
+  });
+
+  it("rejects when stdout fails", async () => {
+    const file = join(dir, "turn.stream.jsonl");
+    const { stdout, handled, read } = start(file);
+    stdout.write("one\n");
+    stdout.destroy(new Error("stdout failed"));
+    await expect(read).rejects.toThrow("stdout failed");
+    expect(handled).toEqual(["one"]);
+  });
+
+  it("stops reading once its signal aborts", async () => {
+    const controller = new AbortController();
+    const stdout = new PassThrough();
+    const handled: string[] = [];
+    const read = retainStdout({
+      stdout,
+      file: join(dir, "turn.stream.jsonl"),
+      handleLine: (line) => {
+        handled.push(line);
+        controller.abort();
+        return line;
+      },
+      reportFailure: () => undefined,
+      signal: controller.signal,
+    });
+    stdout.write("one\n");
+    await expect(read).rejects.toMatchObject({ name: "AbortError" });
+    expect(handled).toEqual(["one"]);
     expect(stdout.destroyed).toBe(true);
   });
 });
