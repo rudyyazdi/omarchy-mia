@@ -486,6 +486,7 @@ describe("configuration and provenance", () => {
       toolu_1: { path: "/etc/hostname", name: "external" },
       toolu_2: { path: join(outDir, "folder"), name: "directory" },
       toolu_3: { path: join(outDir, "absent.txt"), name: "absent" },
+      toolu_4: { path: "outputs/absent.txt", name: "relative" },
     };
     const { turn, taskId } = await submit("artifacts");
     turn.init();
@@ -512,13 +513,18 @@ describe("configuration and provenance", () => {
         capture_status: "external_only",
         capture_reason: expect.any(String),
       },
+      {
+        logical_name: "relative",
+        capture_status: "failed",
+        capture_reason: "declared path must be absolute",
+      },
     ]);
     const relations = rows<{ relation: string }>(
       "SELECT l.relation FROM artifact_links l JOIN artifacts a ON a.id = l.artifact_id WHERE a.kind = 'tool_output' AND l.tool_call_id IS NOT NULL",
     );
-    expect(relations).toEqual(Array.from({ length: 3 }, () => ({ relation: "tool_result" })));
+    expect(relations).toEqual(Array.from({ length: 4 }, () => ({ relation: "tool_result" })));
     expect(rows("SELECT id FROM artifact_links WHERE relation = 'task_output'")).toHaveLength(0);
     expect(rows("SELECT id FROM events WHERE type = 'artifact_registered'")).toHaveLength(0);
-    expect(rows("SELECT id FROM events WHERE type = 'tool_result'")).toHaveLength(3);
+    expect(rows("SELECT id FROM events WHERE type = 'tool_result'")).toHaveLength(4);
   });
 });
