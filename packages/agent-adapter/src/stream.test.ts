@@ -62,7 +62,7 @@ describe("runtime stream framing", () => {
       ok: false,
       reason: "invalid_json",
       raw: "{",
-      error: expect.stringContaining("invalid JSON:"),
+      error: "invalid JSON",
     });
   });
 });
@@ -111,9 +111,51 @@ describe("redactLine", () => {
     expect(redacted(line)).toBe(expected);
   });
 
-  it("redacts a line that is not JSON by value", () => {
+  it.each([
+    ['{"type":"assistant","api_key":"short', `{"type":"assistant","api_key":"${REDACTED}`],
+    [
+      '{"type":"assistant","api_key":"short","text":"kept',
+      `{"type":"assistant","api_key":"${REDACTED}","text":"kept`,
+    ],
+    ['{"type":"assistant","password":123456', `{"type":"assistant","password":"${REDACTED}"`],
+    [
+      '{"type":"assistant","nested":{"token":{"value":"x"},"text":"kept',
+      `{"type":"assistant","nested":{"token":"${REDACTED}","text":"kept`,
+    ],
+    [
+      '{"type":"result","usage":{"input_tokens":1200',
+      '{"type":"result","usage":{"input_tokens":1200',
+    ],
+  ])("redacts a line cut short by key: %s", (line, expected) => {
+    expect(parseStreamLine(line)?.ok).toBe(false);
+    expect(redacted(line)).toBe(expected);
+  });
+
+  it("leaks no sensitive value at any point the line is cut", () => {
+    const line = JSON.stringify({
+      type: "assistant",
+      api_key: 'leak-a "quoted\\ "password": x',
+      nested: { password: 918273645, text: "kept" },
+      credentials: { value: "leak-b", list: ["leak-c", { "}": "leak-d" }] },
+      tokens: ["leak-e"],
+      usage: { input_tokens: 1200 },
+    });
+    const leaks = ["leak", "9182", "quoted"];
+    for (const cut of Array.from({ length: line.length }, (_, index) => index + 1)) {
+      const parsed = parseStreamLine(line.slice(0, cut));
+      if (!parsed) continue;
+      const retained = [redactLine(parsed), parsed.ok ? "" : parsed.error].join("\n");
+      for (const leak of leaks) expect(retained, line.slice(0, cut)).not.toContain(leak);
+    }
+  });
+
+  it("keeps the input out of the parse error of a line that is not JSON", () => {
+    expect(parseStreamLine('{"password":hunter2xyz}')).toMatchObject({ error: "invalid JSON" });
+  });
+
+  it("redacts a line that is not JSON by key and by value", () => {
     expect(redacted('{"api_key":"short" sk-ant-abcdefghijkl')).toBe(
-      `{"api_key":"short" ${REDACTED}`,
+      `{"api_key":"${REDACTED}" ${REDACTED}`,
     );
   });
 });
