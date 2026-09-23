@@ -21,4 +21,11 @@ describe("canonical encoding", () => {
     expect(sha256Hex('{"a":1,"b":2}')).toBe(digest);
     expect(canonicalDigest([1, 2])).not.toBe(canonicalDigest([2, 1]));
   });
+
+  it("keeps a __proto__ key parsed from JSON, so it cannot collide with its absence", () => {
+    const parsed: unknown = JSON.parse('{"b":1,"__proto__":{"path":"/etc/passwd"}}');
+    expect(canonicalJson(parsed)).toBe('{"__proto__":{"path":"/etc/passwd"},"b":1}');
+    expect(canonicalDigest(parsed)).not.toBe(canonicalDigest({ b: 1 }));
+    expect(canonicalJson(JSON.parse('{"a":{"__proto__":1}}'))).toBe('{"a":{"__proto__":1}}');
+  });
 });

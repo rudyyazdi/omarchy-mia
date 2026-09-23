@@ -3,14 +3,14 @@ import { isRecord } from "./value.ts";
 
 const sortValue = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(sortValue);
-  if (isRecord(value)) {
-    const out: Record<string, unknown> = {};
-    for (const key of Object.keys(value).sort()) {
-      const entry = value[key];
-      if (entry !== undefined) out[key] = sortValue(entry);
-    }
-    return out;
-  }
+  // fromEntries defines own properties: assigning a "__proto__" key would set the copy's prototype
+  // and drop the key, so two argument sets differing only under it would share one digest.
+  if (isRecord(value))
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .flatMap((key) => (value[key] === undefined ? [] : [[key, sortValue(value[key])]])),
+    );
   if (typeof value === "number" && !Number.isFinite(value)) return null;
   return value;
 };
