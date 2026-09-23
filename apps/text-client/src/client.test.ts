@@ -291,6 +291,18 @@ describe("client ids", () => {
     expect(makeClient(undefined, clientId).clientId).toBe(clientId);
   });
 
+  it("sends a message_id of the longest length the protocol carries", () =>
+    withConnectedClient(async (client, socket) => {
+      const messageId = "x".repeat(LIMITS.maxIdChars);
+      const sent = once(socket, "message");
+      const pending = client.send("start_conversation", {}, { messageId });
+      const [data] = await sent;
+      expect(JSON.parse(String(data)).message_id).toBe(messageId);
+      // The fixture's `event_<command id>` would itself be too long to carry.
+      socket.send(JSON.stringify({ ...ackEvent(messageId), message_id: "event_longest" }));
+      await expect(pending).resolves.toMatchObject({ command_id: messageId });
+    }));
+
   it.each(UNCARRIABLE_IDS)(
     "rejects a send with %s message_id at once and writes nothing to the socket",
     (_, messageId) =>

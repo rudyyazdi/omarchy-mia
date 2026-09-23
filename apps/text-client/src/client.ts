@@ -63,7 +63,8 @@ const isEventOf =
  * reply marked `duplicate` instead of running it again. The server keys that on `clientId`, which an instance
  * keeps across `connect()` calls; a new instance (after a restart, say) without an explicit `clientId` gets
  * a fresh one, so dedupe does not survive it. An abort while an operation is still waiting rejects it with
- * the signal's reason.
+ * the signal's reason. An id the protocol cannot carry is the caller's mistake: the constructor throws on such a
+ * `clientId`, and `send` rejects such a `messageId` before it checks the connection or the signal.
  */
 export class MiaClient extends EventEmitter {
   readonly clientId: string;
