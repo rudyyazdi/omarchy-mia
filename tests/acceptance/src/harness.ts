@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach } from "vitest";
 import type { Profile } from "@mia/agent-adapter";
@@ -23,8 +23,14 @@ export interface TestServer {
 
 /** A test's own timeout bounds its waits; connecting gets a shorter deadline so a dead server fails fast. */
 const CONNECT_TIMEOUT_MS = 10_000;
+/** How long closing waits for a turn the test left running; a scripted turn that survives interruption never ends. */
+const TEARDOWN_TURN_WAIT_MS = 3_000;
 
 export const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
+/** The fake Claude Code executable the real adapter launches in offline tests. */
+export const FAKE_RUNTIME = resolve(REPO_ROOT, "tests/fake-claude/bin.sh");
+/** What the fake's shell wrapper needs to find `node`; the test process's env is not read. */
+export const FAKE_RUNTIME_ENV = { PATH: dirname(process.execPath) };
 
 /** Narrow an optional value the test has already established must exist; throws with a readable message otherwise. */
 export const must = <T>(value: T | null | undefined, what = "value"): T => {
@@ -89,18 +95,23 @@ export const testProfile = (
   };
 };
 
+/**
+ * Start a server over a fresh directory. Without an adapter it runs the real one, which launches
+ * `overrides.executable` with `env`.
+ */
 export const startTestServer = async (
-  adapter: TurnRunner,
+  adapter: TurnRunner | undefined,
   overrides: Partial<Profile["runtime"]> = {},
+  env: NodeJS.ProcessEnv = {},
 ): Promise<TestServer> => {
   const dir = mkdtempSync(join(tmpdir(), "mia-acceptance-"));
   const profile = testProfile(dir, overrides);
   const logs: string[] = [];
   const server = await startServer({
     profile,
-    adapter,
+    ...(adapter ? { adapter } : {}),
     log: (message) => logs.push(message),
-    env: {},
+    env,
   });
   const clients: MiaClient[] = [];
   return {
@@ -122,9 +133,11 @@ export const startTestServer = async (
     catalog: () => new Catalog(profile.stateDirectory, { readonly: true }),
     close: async () => {
       for (const client of clients) client.close();
-      await Promise.race([server.engine.waitForIdle(), sleep(3_000)]);
-      await server.close();
-      rmSync(dir, { recursive: true, force: true });
+      try {
+        await server.close(AbortSignal.timeout(TEARDOWN_TURN_WAIT_MS));
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     },
   };
 };

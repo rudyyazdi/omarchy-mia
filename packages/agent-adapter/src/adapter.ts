@@ -1,12 +1,12 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 import { match } from "ts-pattern";
 import { z } from "zod";
 import { errorMessage, redactString } from "@mia/protocol";
 import type { ApprovalBridge, PermissionHandler } from "./bridge.ts";
 import type { RuntimeConfig } from "./config.ts";
+import { withinDeadline } from "./deadline.ts";
 import { prepareLaunch, type LaunchPlan } from "./launch.ts";
 import { ClaudeTranslator } from "./claude-translate.ts";
 import type { RuntimeEvent, RuntimeInit, TurnSummary } from "./runtime-events.ts";
@@ -278,7 +278,8 @@ export class ClaudeCodeAdapter {
     /** Settles (with no value) once a pending interrupt() has recorded its outcome. */
     const interruptSettled = Promise.withResolvers<undefined>();
     const done: Promise<TurnResult> = exited.then(async (exit) => {
-      if (interrupted) await Promise.race([interruptSettled.promise, sleep(INTERRUPT_SETTLE_MS)]);
+      if (interrupted)
+        await withinDeadline(interruptSettled.promise, INTERRUPT_SETTLE_MS, undefined);
       this.bridge.setHandler(null);
       emit({ type: "runtime_exit", code: exit.code, signal: exit.signal, at: now() });
       let status: TurnResult["status"];
@@ -325,10 +326,11 @@ export class ClaudeCodeAdapter {
       } catch {
         child.kill("SIGKILL");
       }
-      const outcome = await Promise.race([
+      const outcome = await withinDeadline(
         exited.then(() => "exited" as const),
-        sleep(EXIT_WAIT_MS, "timeout" as const),
-      ]);
+        EXIT_WAIT_MS,
+        "timeout" as const,
+      );
       runtimeCancellation = outcome === "exited" ? "forced_kill" : "unknown";
       if (outcome === "timeout") {
         // Do not let a stuck process hold the task in "interrupting" forever: finish the turn and report uncertainty.

@@ -117,12 +117,11 @@ const countRows = (table: string): number => rows(`SELECT 1 FROM ${table}`).leng
 
 /** Make every delivery of one event type to the client throw, as a failing socket would. */
 const failDelivery = (type: string): void => {
-  const engine = ts.server.engine;
-  const send = engine.send;
-  engine.send = (connectionId, event) => {
+  const { engine, gateway } = ts.server;
+  engine.attachDelivery((connectionId, event) => {
     if (event.type === type) throw new Error("simulated socket failure");
-    send(connectionId, event);
-  };
+    gateway.send(connectionId, event);
+  });
 };
 
 /** Approval statuses in catalog order: how these tests show that nothing was authorised. */
@@ -914,6 +913,23 @@ describe("interruption path", () => {
     expect(rows("SELECT id FROM events WHERE type = 'tool_dispatched'")).toHaveLength(0);
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("interrupted");
+  });
+
+  it("kills the runtime at shutdown even when the interruption cannot be recorded", async () => {
+    const { turn } = await submitHeldCall("change");
+    failNextCommit();
+    const closing = ts.server.close(new AbortController().signal);
+    try {
+      expect(turn.interrupted).toBe(true);
+    } finally {
+      turn.end(); // a no-op once the kill ended it; otherwise it lets the waiting shutdown finish
+      await closing;
+    }
+    expect(ts.logs).toContainEqual(
+      expect.stringContaining(
+        "interruption not recorded: simulated commit failure; killing the runtime anyway",
+      ),
+    );
   });
 
   it("closes the gate once an interruption commits, even when delivering it fails", async () => {

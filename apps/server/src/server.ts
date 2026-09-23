@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { ApprovalBridge, ClaudeCodeAdapter, loadProfile, type Profile } from "@mia/agent-adapter";
+import { errorMessage } from "@mia/protocol";
 import { Catalog, RecordWriter } from "@mia/records";
 import { Engine, type TurnRunner } from "./engine.ts";
 import { startGateway, type GatewayHandle } from "./gateway.ts";
@@ -11,8 +12,20 @@ export interface MiaServer {
   engine: Engine;
   catalog: Catalog;
   bridge: ApprovalBridge;
-  close(): Promise<void>;
+  /**
+   * Shut down: stop accepting commands, interrupt the active turn and wait for it until `turnWait` aborts,
+   * close the gateway and the bridge, then close the catalog. Every step runs even when an earlier one fails,
+   * and the returned promise rejects with all their errors only after the last. Memoised: a second call (a
+   * SIGTERM after a SIGINT) awaits the first run and sees its outcome; its own `turnWait` is not used.
+   */
+  close(turnWait: AbortSignal): Promise<void>;
 }
+
+/**
+ * The turn wait an entry point should give `close`: longer than the adapter takes to kill a runtime and
+ * observe its exit, so a killed turn is normally recorded before the catalog closes.
+ */
+export const SHUTDOWN_TURN_WAIT_MS = 10_000;
 
 export const SOURCE_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 
@@ -66,15 +79,30 @@ export const startServer = async (input: {
         writer,
         log,
       });
-      engine.send = gateway.send;
       log(
         `listening on ${gateway.url} (profile ${profile.profile}, model ${profile.runtime.model}, effort ${profile.runtime.effort})`,
       );
       let shutdownStarted: Promise<void> | null = null;
-      const shutdown = async () => {
-        await gateway.close();
-        await bridge.close();
-        catalog.close();
+      const shutdown = async (turnWait: AbortSignal) => {
+        const errors: unknown[] = [];
+        const step = async (release: () => Promise<void> | void) => {
+          try {
+            await release();
+          } catch (error) {
+            errors.push(error);
+          }
+        };
+        // In this order: the turn must finish before the catalog that records it closes, and the gateway
+        // closes after the turn so the interruption still reaches the client.
+        await step(() => engine.shutdown(turnWait));
+        await step(() => gateway.close());
+        await step(() => bridge.close());
+        await step(() => catalog.close());
+        if (errors.length > 0)
+          throw new AggregateError(
+            errors,
+            `shutdown failed: ${errors.map((error) => errorMessage(error)).join("; ")}`,
+          );
       };
       return {
         profile,
@@ -83,7 +111,7 @@ export const startServer = async (input: {
         catalog,
         bridge,
         // Memoised: SIGINT then SIGTERM must await the one shutdown, not release these resources twice.
-        close: () => (shutdownStarted ??= shutdown()),
+        close: (turnWait) => (shutdownStarted ??= shutdown(turnWait)),
       };
     } catch (error) {
       await bridge.close();

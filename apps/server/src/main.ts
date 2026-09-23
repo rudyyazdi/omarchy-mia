@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { errorMessage } from "@mia/protocol";
-import { startServer } from "./server.ts";
+import { SHUTDOWN_TURN_WAIT_MS, startServer } from "./server.ts";
 
 const program = new Command()
   .name("mia-server")
@@ -13,10 +13,10 @@ const { config } = program.opts<{ config: string }>();
 try {
   const server = await startServer({ profilePath: config, env: process.env });
   const shutdown = () => {
-    server.close().then(
+    server.close(AbortSignal.timeout(SHUTDOWN_TURN_WAIT_MS)).then(
       () => process.exit(0),
       (error: unknown) => {
-        console.error(`mia-server: shutdown failed: ${errorMessage(error)}`);
+        console.error(`mia-server: ${errorMessage(error)}`);
         process.exit(1);
       },
     );
