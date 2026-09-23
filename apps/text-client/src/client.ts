@@ -52,6 +52,8 @@ export class MiaClient extends EventEmitter {
     string,
     { acknowledge: (ack: AckPayload) => void; abandon: () => void }
   >();
+  // Like an ack, an awaited event cannot arrive on a closed socket: each entry rejects its `waitFor`.
+  private pendingWaits = new Set<() => void>();
   readonly recentInteractionIds: string[] = [];
   readonly recentErrors: { at: string; message: string }[] = [];
   connectionState: ClientDiagnostics["connection_state"] = "disconnected";
@@ -103,6 +105,8 @@ export class MiaClient extends EventEmitter {
       // No ack can arrive on a closed socket, so its waiters fail now rather than at their deadline.
       for (const waiter of this.pendingAcks.values()) waiter.abandon();
       this.pendingAcks.clear();
+      for (const abandon of this.pendingWaits) abandon();
+      this.pendingWaits.clear();
       this.emit("disconnected", { code, reason: reason.toString() });
     });
     socket.on("error", (error) => this.pushError(error.message));
@@ -270,7 +274,10 @@ export class MiaClient extends EventEmitter {
     );
   }
 
-  /** Wait for the next event of a type that satisfies the predicate. */
+  /**
+   * Wait for the next event of a type that satisfies the predicate. An event already received resolves at once, even
+   * after the connection closed; otherwise the wait rejects when the connection closes.
+   */
   waitFor<T extends ServerEventType>(
     type: T,
     predicate: (event: ServerEventOf<T>) => boolean = () => true,
@@ -282,16 +289,23 @@ export class MiaClient extends EventEmitter {
     );
     if (existing) return Promise.resolve(existing);
     if (signal?.aborted) return Promise.reject(signal.reason);
+    const closed = new Error(`connection closed while waiting for ${type}`);
+    // A client that has not connected yet keeps waiting: its events may still come.
+    const state = this.socket?.readyState;
+    if (state === WebSocket.CLOSING || state === WebSocket.CLOSED) return Promise.reject(closed);
     const channel = type === "error" ? "server_error" : type;
     const { promise, resolve, reject } = Promise.withResolvers<ServerEventOf<T>>();
     const onAbort = () => reject(signal?.reason);
+    const abandon = () => reject(closed);
     const handler = (event: ServerEvent) => {
       if (isWanted(event) && predicate(event)) resolve(event);
     };
     signal?.addEventListener("abort", onAbort, { once: true });
+    this.pendingWaits.add(abandon);
     this.on(channel, handler);
     return promise.finally(() => {
       signal?.removeEventListener("abort", onAbort);
+      this.pendingWaits.delete(abandon);
       this.off(channel, handler);
     });
   }
