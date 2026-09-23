@@ -100,9 +100,15 @@ export const startMcpHttpServer = async (
   const requestLog =
     logFile === undefined || logFile === ""
       ? undefined
-      : createRequestLog({ file: logFile, reportFailure: reportLogFailure });
-  const log = (entry: Record<string, unknown>) =>
-    requestLog?.write({ at: new Date().toISOString(), port: boundPort, ...entry });
+      : createRequestLog({
+          file: logFile,
+          reportFailure: reportLogFailure,
+          stamp: () => ({ at: new Date().toISOString(), port: boundPort }),
+        });
+  const log = (entry: Record<string, unknown>) => requestLog?.write(entry);
+  // Logged responses whose close line is not written yet, so close() can wait for them before
+  // closing the log. One entry per response in progress: bounded by what the server is serving.
+  const openResponses = new Set<ServerResponse>();
 
   const handleRequest = async (
     req: IncomingMessage,
@@ -174,15 +180,17 @@ export const startMcpHttpServer = async (
       res.on("finish", () =>
         log({ ev: "finish", req: reqNo, status: res.statusCode, ms: Date.now() - startedAt }),
       );
-      res.on("close", () =>
+      openResponses.add(res);
+      res.on("close", () => {
+        openResponses.delete(res);
         log({
           ev: "close",
           req: reqNo,
           status: res.statusCode,
           finished: res.writableFinished,
           ms: Date.now() - startedAt,
-        }),
-      );
+        });
+      });
       // A kept-alive socket outlives its request: remove the listener with the response, or
       // every request on the connection adds one more.
       const onSocketError = (socketError: Error) =>
@@ -244,8 +252,9 @@ export const startMcpHttpServer = async (
       const closed = once(httpServer, "close");
       httpServer.closeAllConnections();
       httpServer.close();
-      await closed;
-      // After the server, so the last responses' close lines are written too.
+      // The server closes before the destroyed sockets do, so wait for the responses they carried:
+      // a request cut off by shutdown still gets its close line.
+      await Promise.all([closed, ...[...openResponses].map((res) => once(res, "close"))]);
       await requestLog?.close();
     },
   };

@@ -1,11 +1,12 @@
 import { subscribe, unsubscribe } from "node:diagnostics_channel";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { Agent, request } from "node:http";
 import { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readLogEntries } from "./log-fixture.ts";
 import {
   McpServer,
   startMcpHttpServer,
@@ -85,10 +86,11 @@ const holdRequest = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { nam
  * resolves with the request's context once the tool is running; `contexts` has every request's.
  * The server is also stored in `handle`, so `afterEach` closes it even when the test fails.
  */
-const startHoldingServer = async () => {
+const startHoldingServer = async (options: { logFile?: string } = {}) => {
   const entered = Promise.withResolvers<McpRequestContext>();
   const contexts: McpRequestContext[] = [];
   const started = await startMcpHttpServer({
+    logFile: options.logFile,
     createServer: (ctx) => {
       contexts.push(ctx);
       const server = new McpServer({ name: "mcp-http-test", version: "0" });
@@ -181,16 +183,28 @@ describe("MCP HTTP server", () => {
     await handle.close();
     handle = undefined;
 
-    const entries: unknown[] = (await readFile(logFile, "utf8"))
-      .trimEnd()
-      .split("\n")
-      .map((line) => JSON.parse(line));
-    expect(entries).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ ev: "request", req: 1, rpc_method: "initialize" }),
-        expect.objectContaining({ ev: "finish", req: 1, status: 200 }),
-        expect.objectContaining({ ev: "close", req: 1, finished: true }),
-      ]),
+    const entries: unknown[] = await readLogEntries(logFile);
+    expect(entries).toEqual([
+      expect.objectContaining({ ev: "request", req: 1, rpc_method: "initialize" }),
+      expect.objectContaining({ ev: "finish", req: 1, status: 200 }),
+      expect.objectContaining({ ev: "close", req: 1, finished: true }),
+    ]);
+  });
+
+  it("writes the close line of a request that shutdown cuts off", async () => {
+    const logFile = join(dir, "requests.jsonl");
+    const { handle: server, entered } = await startHoldingServer({ logFile });
+
+    const call = post(server.url, holdRequest).then((response) => response.text());
+    const refused = expect(call).rejects.toThrow();
+    const ctx = await entered;
+    await server.close();
+    handle = undefined;
+    await refused;
+
+    const entries: unknown[] = await readLogEntries(logFile);
+    expect(entries).toContainEqual(
+      expect.objectContaining({ ev: "close", req: ctx.requestId, finished: false }),
     );
   });
 
@@ -286,10 +300,7 @@ describe("MCP HTTP server", () => {
     expect(oversized.status).toBe(413);
     await oversized.body?.cancel();
 
-    const entries: unknown[] = (await readFile(logFile, "utf8"))
-      .trimEnd()
-      .split("\n")
-      .map((line) => JSON.parse(line));
+    const entries: unknown[] = await readLogEntries(logFile);
     expect(entries).toContainEqual(
       expect.objectContaining({
         ev: "request",
