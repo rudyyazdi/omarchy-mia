@@ -3,6 +3,7 @@ import {
   mkdirSync,
   mkdtempDisposableSync,
   readFileSync,
+  realpathSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -13,10 +14,14 @@ import { collectArtifact } from "./artifact-collector.ts";
 
 vi.mock("node:fs", async (importOriginal) => {
   const filesystem = await importOriginal<typeof import("node:fs")>();
-  return { ...filesystem, readFileSync: vi.fn(filesystem.readFileSync) };
+  return {
+    ...filesystem,
+    readFileSync: vi.fn(filesystem.readFileSync),
+    realpathSync: vi.fn(filesystem.realpathSync),
+  };
 });
 
-afterEach(() => vi.mocked(readFileSync).mockClear());
+afterEach(() => vi.clearAllMocks());
 
 const workspace = (): { root: string; out: string; [Symbol.dispose]: () => void } => {
   const directory = mkdtempDisposableSync(join(tmpdir(), "mia-artifacts-"));
@@ -51,6 +56,16 @@ describe("collectArtifact", () => {
     symlinkSync(secret, join(dirs.out, "escape.txt"));
     for (const path of [secret, join(dirs.out, "escape.txt")])
       expect(collectArtifact({ path }, [dirs.out]).status).toBe("external_only");
+    expect(readFileSync).not.toHaveBeenCalled();
+  });
+
+  it("refuses a relative path without touching the filesystem", () => {
+    using dirs = workspace();
+    expect(collectArtifact({ path: "out/a.txt" }, [dirs.out])).toEqual({
+      status: "failed",
+      reason: "declared path must be absolute",
+    });
+    expect(realpathSync).not.toHaveBeenCalled();
     expect(readFileSync).not.toHaveBeenCalled();
   });
 

@@ -1,4 +1,4 @@
-import { sep } from "node:path";
+import { isAbsolute, sep } from "node:path";
 import { z } from "zod";
 import { sha256Hex } from "@mia/protocol";
 import type { CaptureStatus } from "@mia/records";
@@ -62,6 +62,13 @@ export const extractDeclaredArtifact = (content: unknown): DeclaredArtifact | nu
   }
   return null;
 };
+
+/**
+ * A relative path would resolve against the server's working directory, not the one the tool ran in,
+ * so it names no particular file and is refused before any filesystem lookup.
+ */
+export const checkDeclaredPath = (declared: DeclaredArtifact): NotRetained | null =>
+  isAbsolute(declared.path) ? null : { status: "failed", reason: "declared path must be absolute" };
 
 const isInside = (path: string, directory: string): boolean =>
   path.startsWith(directory.endsWith(sep) ? directory : directory + sep);

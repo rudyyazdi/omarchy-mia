@@ -1,6 +1,7 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { errorMessage } from "@mia/protocol";
 import {
+  checkDeclaredPath,
   decideEligibility,
   verifyContent,
   type Capture,
@@ -36,6 +37,8 @@ export const collectArtifact = (
   declared: DeclaredArtifact,
   outputDirectories: readonly string[],
 ): Capture => {
+  const refused = checkDeclaredPath(declared);
+  if (refused) return refused;
   const eligibility = decideEligibility(
     inspectPath(declared.path),
     resolvePolicy(outputDirectories),
