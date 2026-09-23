@@ -12,13 +12,26 @@ import { startFixture } from "@mia/controlled-mcp";
 import { errorMessage, isRecord } from "@mia/protocol";
 import { Catalog, exportConversation, snapshotConversation, verifyExport } from "@mia/records";
 import { loadProfile, startServer, type MiaServer } from "@mia/server";
-import { readScenarioName, type ScenarioName } from "./scenarios.ts";
+import {
+  readScenarioList,
+  readScenarioName,
+  ScenarioNameSchema,
+  type ScenarioName,
+} from "./scenarios.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
-const program = new Command()
+const program: Command = new Command()
   .name("live")
   .option("--repeat <N>", "promptfoo repeat count", "2")
-  .option("--scenarios <names>", "comma-separated scenario names to run")
+  // Checked before anything starts: promptfoo would silently match none.
+  .option(
+    "--scenarios <names>",
+    "comma-separated scenario names to run",
+    (value: string): ScenarioName[] => {
+      const read = readScenarioList(value);
+      return read.ok ? read.names : program.error(`--scenarios: ${read.error}`, { exitCode: 2 });
+    },
+  )
   .option(
     "--agent-prompt <path>",
     "agent prompt file, relative to the repo root",
@@ -29,16 +42,12 @@ const program = new Command()
 program.parse();
 const values = program.opts<{
   repeat: string;
-  scenarios?: string;
+  scenarios?: ScenarioName[];
   agentPrompt: string;
   model: string;
   out?: string;
 }>();
-/** Named scenarios are checked before anything starts: promptfoo would silently match none. */
-const scenarios = values.scenarios?.split(",").map((value) => {
-  const read = readScenarioName(value);
-  return read.ok ? read.name : program.error(read.error, { exitCode: 2 });
-});
+const requested = values.scenarios ?? ScenarioNameSchema.options;
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const outDir = resolve(values.out ?? join(REPO_ROOT, ".mia-state", "live", stamp));
 mkdirSync(outDir, { recursive: true, mode: 0o700 });
@@ -92,11 +101,14 @@ const LedgerSummarySchema = z.looseObject({
 const writeLiveResults = ({
   rows,
   summary,
+  problems,
   promptVersion,
   outDirAbs,
 }: {
   rows: LiveRow[];
   summary: Record<string, unknown>;
+  /** Run-level failures that no row shows; listed so the committed record cannot look clean. */
+  problems: string[];
   promptVersion: string;
   outDirAbs: string;
 }): void => {
@@ -109,6 +121,9 @@ const writeLiveResults = ({
     `# Live acceptance results (${promptVersion}, ${summary.model})`,
     "",
     `Generated ${summary.generated_at} from \`${relativeOutDir}\` (private evidence directory). ${rows.filter((row) => row.pass).length}/${rows.length} rows passed. Lane L = live runtime; ledger evidence from the controlled fixture. "reported effort: unverified" means the turn used no tool, so the PreToolUse hook produced no effort evidence.`,
+    ...(problems.length > 0
+      ? ["", ...problems.map((problem) => `- **Run problem:** ${problem}`)]
+      : []),
     "",
     "| scenario | repeat | pass | conversation | reported model | reported effort | runtime | ledger commits | reason |",
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
@@ -192,7 +207,7 @@ const args = [
   values.repeat,
   "--no-progress-bar",
 ];
-if (scenarios) args.push("--filter-pattern", `^(${scenarios.join("|")})$`);
+if (values.scenarios) args.push("--filter-pattern", `^(${values.scenarios.join("|")})$`);
 log(`promptfoo ${args.join(" ")}`);
 const { promise: promptfooExited, resolve: resolveExit } = Promise.withResolvers<number>();
 const child = spawn(join(REPO_ROOT, "node_modules/.bin/promptfoo"), args, {
@@ -238,11 +253,12 @@ if (existsSync(resultsPath)) {
     new Catalog(server2.profile.stateDirectory, { readonly: true }),
   ];
   const repeatCounters: Partial<Record<ScenarioName, number>> = {};
-  for (const result of results) {
+  for (const [index, result] of results.entries()) {
     const read = readScenarioName(result.testCase?.vars?.scenario ?? result.vars?.scenario);
     if (!read.ok) {
-      unreadResults.push(read.error);
-      log(`skipping a result: ${read.error}`);
+      const problem = `result ${index} (${result.testCase?.description ?? "?"}): ${read.error}`;
+      unreadResults.push(problem);
+      log(`skipping ${problem}`);
       continue;
     }
     const scenario = read.name;
@@ -341,6 +357,8 @@ if (existsSync(resultsPath)) {
   }
   for (const catalog of catalogs) catalog.close();
 }
+/** Requested scenarios that produced no row: a filter or config mismatch must not pass as "all passed". */
+const missingScenarios = requested.filter((name) => !rows.some((row) => row.scenario === name));
 const summary = {
   generated_at: new Date().toISOString(),
   out_dir: outDir,
@@ -349,13 +367,24 @@ const summary = {
   repeat: Number(values.repeat),
   promptfoo_exit: exitCode,
   unread_results: unreadResults,
+  missing_scenarios: missingScenarios,
   rows,
 };
-writeLiveResults({ rows, summary, promptVersion, outDirAbs: outDir });
+writeLiveResults({
+  rows,
+  summary,
+  problems: [
+    ...unreadResults.map((problem) => `skipped ${problem}`),
+    ...missingScenarios.map((name) => `scenario ${name} was requested but produced no result`),
+  ],
+  promptVersion,
+  outDirAbs: outDir,
+});
 log(
   `wrote docs/D1/acceptance/live-results-${promptVersion}.md and ${join(outDir, "acceptance-live.json")}`,
 );
 await server1.close();
 await server2.close();
 await fixture.close();
-process.exit(exitCode === 0 && unreadResults.length === 0 && rows.every((row) => row.pass) ? 0 : 1);
+const clean = unreadResults.length === 0 && missingScenarios.length === 0;
+process.exit(exitCode === 0 && clean && rows.every((row) => row.pass) ? 0 : 1);
