@@ -243,7 +243,10 @@ export class Engine {
     return result;
   }
 
-  /** Queue a state change for when the transaction in progress commits (inside tx). */
+  /**
+   * Queue a state change for when the transaction in progress commits (inside tx). It must not throw: it runs
+   * after the commit, where a throw would read as a persistence failure and skip the queued effects.
+   */
   private onCommit(apply: () => void): void {
     this.queued.state.push(apply);
   }
@@ -334,6 +337,8 @@ export class Engine {
       client: this.activeClientId,
     };
     try {
+      // Unlike task transitions, this sets state inside the transaction, because `record` reads the active
+      // conversation; the catch below restores it.
       return this.tx(() => {
         const provenance = createConversationProvenance({
           writer,
@@ -1092,20 +1097,24 @@ export class Engine {
     const opts = this.taskOpts(task);
     const runtimeCallId = req.toolUseId;
     if (!runtimeCallId) {
-      this.tx(() =>
-        this.emit(
-          {
-            type: "error",
-            payload: {
-              code: "runtime_failure",
-              message: `permission request for ${req.toolName} carried no runtime call id; rejected`,
-              conversation_id: conversation.id,
-              task_id: task.id,
+      try {
+        this.tx(() =>
+          this.emit(
+            {
+              type: "error",
+              payload: {
+                code: "runtime_failure",
+                message: `permission request for ${req.toolName} carried no runtime call id; rejected`,
+                conversation_id: conversation.id,
+                task_id: task.id,
+              },
             },
-          },
-          opts,
-        ),
-      );
+            opts,
+          ),
+        );
+      } catch (error) {
+        this.deps.log(`could not record an unbindable permission request: ${errorMessage(error)}`);
+      }
       return {
         behavior: "deny",
         message: "Mia cannot bind this call to a runtime call id; rejected.",

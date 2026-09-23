@@ -120,7 +120,7 @@ export type PermissionRule =
   | { kind: "ask" }
   | {
       kind: "deny";
-      status: "denied" | "blocked_gate";
+      status: Extract<ToolCallStatus, "denied" | "blocked_gate">;
       detail: string;
       message: string;
       /** Tell the runtime to stop the turn, not just skip the call. */
@@ -176,7 +176,7 @@ export type ApprovalOutcome<Call extends CallFacts = CallFacts> =
   | { kind: "not_pending" }
   | {
       kind: "decided";
-      approval: "approved" | "rejected";
+      approval: Extract<ApprovalStatus, "approved" | "rejected">;
       /** Released only when approved while the gate is open in the task's own epoch. */
       release: boolean;
       call: Call;

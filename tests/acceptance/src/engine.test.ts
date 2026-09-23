@@ -73,6 +73,16 @@ const failNextCommit = (): void => {
   };
 };
 
+/** Make every delivery of one event type to the client throw, as a failing socket would. */
+const failDelivery = (type: string): void => {
+  const engine = ts.server.engine;
+  const send = engine.send;
+  engine.send = (connectionId, event) => {
+    if (event.type === type) throw new Error("simulated socket failure");
+    send(connectionId, event);
+  };
+};
+
 /** Approval statuses in catalog order: how these tests show that nothing was authorised. */
 const approvalStatuses = (): string[] =>
   rows<{ status: string }>("SELECT status FROM approvals").map((row) => row.status);
@@ -293,12 +303,7 @@ describe("approval path", () => {
 
   it("releases a committed decision even when delivering it to the client fails", async () => {
     const { turn, taskId, held, requested } = await submitHeldCall("change");
-    const engine = ts.server.engine;
-    const send = engine.send;
-    engine.send = (connectionId, event) => {
-      if (event.type === "approval_resolved") throw new Error("simulated socket failure");
-      send(connectionId, event);
-    };
+    failDelivery("approval_resolved");
     const dispatched = client.waitFor(
       "tool_call",
       (event) => event.payload.status === "dispatched",
@@ -324,6 +329,33 @@ describe("approval path", () => {
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("completed");
     expect(rows("SELECT id FROM tool_calls")).toHaveLength(0);
+  });
+
+  it("keeps the earlier approval pending when a changed binding cannot be recorded", async () => {
+    const { turn, taskId, held, requested } = await submitHeldCall("change");
+    failNextCommit();
+    expect((await turn.request("mcp__d1__change", { delta: 2 }, "toolu_1")).behavior).toBe("deny");
+    expect(approvalStatuses()).toEqual(["pending"]);
+    const ack = await decide(taskId, requested.payload.approval_id, "approve");
+    expect(ack.disposition).toBe("accepted");
+    expect((await held).behavior).toBe("allow");
+    turn.end();
+    await client.waitFor("task_finished");
+  });
+
+  it("expires an approval whose prompt the runtime abandoned and tells the next turn", async () => {
+    const { turn, held } = await submitHeldCall("change");
+    must(turn.pendingAbandons[0], "held prompt").abort();
+    expect((await held).behavior).toBe("deny");
+    expect(approvalStatuses()).toEqual(["expired"]);
+    turn.end();
+    expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
+    expect(must(rows<{ status: string }>("SELECT status FROM tool_calls")[0]).status).toBe(
+      "invalidated",
+    );
+    const { turn: next } = await submit("did it run?");
+    expect(next.options.text).toContain("abandoned the approval prompt");
+    next.end();
   });
 
   it("treats disconnection as no decision and keeps the pending record", async () => {
@@ -380,6 +412,16 @@ describe("interruption path", () => {
     expect(rows("SELECT id FROM events WHERE type = 'tool_dispatched'")).toHaveLength(0);
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("interrupted");
+  });
+
+  it("closes the gate once an interruption commits, even when delivering it fails", async () => {
+    const { taskId, held } = await submitHeldCall("change");
+    failDelivery("interruption_requested");
+    const ack = await client.interrupt(taskId);
+    expect(ack.disposition).toBe("accepted");
+    expect((await held).behavior).toBe("deny");
+    expect(approvalStatuses()).toEqual(["invalidated"]);
+    expect((await client.waitFor("task_finished")).payload.status).toBe("interrupted");
   });
 
   it("release before interruption: the action is reported in flight with unknown outcome, and the next turn carries a note", async () => {
