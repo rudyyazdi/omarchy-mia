@@ -117,6 +117,16 @@ describe("probe evidence readings", () => {
     });
   });
 
+  it("says why effort is missing when the hook evidence could not be read", () => {
+    const record = step({
+      hook_evidence: [],
+      hook_evidence_read_error: "EACCES: permission denied",
+    });
+    expect(streamApproveChecks(record).effort_evidence).toBe(
+      "hook evidence unreadable: EACCES: permission denied",
+    );
+  });
+
   it("wants two distinct change requests and a forbidden tool that neither reached the bridge nor ran", () => {
     const change = (id: string) => ({
       request: { tool_name: "mcp__d1__change", tool_use_id: id },

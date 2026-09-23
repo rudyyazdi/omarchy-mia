@@ -35,4 +35,15 @@ describe("readHookEvidence", () => {
       readError: expect.stringContaining("EISDIR"),
     });
   });
+
+  it("reports a path it cannot reach instead of treating it as absent", () => {
+    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-hooks-"));
+    const notADirectory = join(directory.path, "runtime");
+    writeFileSync(notADirectory, "");
+    expect(readHookEvidence(join(notADirectory, "hook-evidence.jsonl"))).toEqual({
+      records: [],
+      malformedLines: 0,
+      readError: expect.stringContaining("ENOTDIR"),
+    });
+  });
 });

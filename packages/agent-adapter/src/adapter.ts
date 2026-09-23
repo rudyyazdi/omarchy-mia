@@ -335,7 +335,7 @@ export interface HookEvidence {
   records: Record<string, unknown>[];
   /** Lines that were not a JSON object, such as the truncated last line of a turn killed mid-write. */
   malformedLines: number;
-  /** Why an existing file could not be read (EACCES, EISDIR, EIO), in which case there are no records; else null. */
+  /** Why the file could not be read for a reason other than being absent, in which case there are no records; else null. */
   readError: string | null;
 }
 
@@ -354,11 +354,12 @@ const parseHookLine = (line: string): Record<string, unknown> | null => {
  */
 export const readHookEvidence = (path: string): HookEvidence => {
   const evidence: HookEvidence = { records: [], malformedLines: 0, readError: null };
-  if (!existsSync(path)) return evidence;
   let text: string;
   try {
     text = readFileSync(path, "utf8");
   } catch (error) {
+    // Only a missing file means the hook never wrote; any other failure (EACCES, ENOTDIR) is reported.
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return evidence;
     return { ...evidence, readError: errorMessage(error) };
   }
   for (const line of text.split("\n")) {

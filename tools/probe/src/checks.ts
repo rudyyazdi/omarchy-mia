@@ -45,6 +45,13 @@ export const firstEvent = <T extends RuntimeEvent["type"]>(
 
 export type StepChecks = StepRecord["checks"];
 
+/** The efforts the hook reported, else why there are none. */
+const effortEvidenceOf = (efforts: (string | undefined)[], readError: string | null): string => {
+  if (efforts.length > 0) return JSON.stringify(efforts);
+  if (readError !== null) return `hook evidence unreadable: ${readError}`;
+  return "no hook evidence captured";
+};
+
 /** Streaming order, bridge routing, call-id binding, one commit, and which effort won. */
 export const streamApproveChecks = (step: StepRecord): StepChecks => {
   const ledger = step.ledger_after?.ledger ?? [];
@@ -68,7 +75,7 @@ export const streamApproveChecks = (step: StepRecord): StepChecks => {
       ),
     ),
     exactly_one_commit: ledger.filter((entry) => entry.kind === "committed").length === 1,
-    effort_evidence: efforts.length > 0 ? JSON.stringify(efforts) : "no hook evidence captured",
+    effort_evidence: effortEvidenceOf(efforts, step.hook_evidence_read_error),
     effort_flag_beats_settings_layer:
       efforts.length > 0 && efforts.every((effort) => effort === "medium"),
     init_model: step.turn?.init?.model ?? "no init",
