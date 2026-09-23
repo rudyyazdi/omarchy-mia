@@ -353,13 +353,15 @@ describe("approval path", () => {
     turn.end();
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("completed");
-    const calls = rows<{ runtime_call_id: string; status: string }>(
-      "SELECT runtime_call_id, status FROM tool_calls ORDER BY created_at",
+    // The refused call's error result stays linked to it, as its result, not as an unmatched one.
+    const calls = rows<{ runtime_call_id: string; status: string; has_result: number }>(
+      "SELECT runtime_call_id, status, result_event_id IS NOT NULL AS has_result FROM tool_calls ORDER BY created_at",
     );
     expect(calls).toEqual([
-      { runtime_call_id: "toolu_1", status: "completed" },
-      { runtime_call_id: "toolu_2", status: "denied" },
+      { runtime_call_id: "toolu_1", status: "completed", has_result: 1 },
+      { runtime_call_id: "toolu_2", status: "denied", has_result: 1 },
     ]);
+    expect(rows("SELECT id FROM events WHERE type = 'tool_result_unmatched'")).toHaveLength(0);
   });
 
   it("invalidates an approval when arguments change under the same runtime call id", async () => {
@@ -474,6 +476,21 @@ describe("approval path", () => {
       { tool_identity: "mcp__d1__read", status: "completed", has_result: 1 },
       { tool_identity: "mcp__d1__change", status: "invalidated", has_result: 0 },
     ]);
+  });
+
+  it("never settles a call Mia never released: a result for a streamed-only call is unmatched", async () => {
+    const { turn } = await submit("change");
+    turn.init();
+    turn.propose("toolu_1", "mcp__d1__change", { delta: 1 });
+    turn.toolResult("toolu_1", "ran anyway");
+    turn.end();
+    await client.waitFor("task_finished");
+    expect(
+      rows<{ status: string; has_result: number }>(
+        "SELECT status, result_event_id IS NOT NULL AS has_result FROM tool_calls",
+      ),
+    ).toEqual([{ status: "invalidated", has_result: 0 }]);
+    expect(rows("SELECT id FROM events WHERE type = 'tool_result_unmatched'")).toHaveLength(1);
   });
 
   it("refuses a repeated request for a call already awaiting approval and keeps one approval", async () => {

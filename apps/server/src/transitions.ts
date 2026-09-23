@@ -397,12 +397,17 @@ export const decideAbandonment = (input: {
 const isReleased = (status: ToolCallStatus): boolean =>
   status === "permitted" || status === "dispatched";
 
+/** Refused before release: Mia answered its prompt, if any, without letting it run. */
+const isRefused = (status: ToolCallStatus): boolean =>
+  status === "denied" || status === "blocked_gate" || status === "invalidated";
+
 /**
  * Which revision under a runtime call id a tool result binds to. The runtime can only have run a revision Mia
  * released, so the latest released one takes the result, even when a later revision (a stream line with another
- * binding) is still held. With none released, the latest refused or settled revision takes it and keeps its
- * status: that is a refused call's error result, or a repeated one. A held revision never takes a result, so it
- * is never recorded as having run; with nothing else, the result is unmatched.
+ * binding) is still held. With none released, the latest refused revision takes it and keeps its status: that
+ * is the runtime's error result for a refused prompt. A held revision never takes a result, so it is never
+ * recorded as having run, and a settled one keeps the result it already has; with nothing else, the result is
+ * unmatched.
  */
 export type ResultBinding<Call> = { kind: "bind"; call: Call } | { kind: "unmatched" };
 
@@ -411,7 +416,7 @@ export const bindToolResult = <Call extends { status: ToolCallStatus }>(
 ): ResultBinding<Call> => {
   const call =
     revisions.findLast((revision) => isReleased(revision.status)) ??
-    revisions.findLast((revision) => !isHeld(revision.status));
+    revisions.findLast((revision) => isRefused(revision.status));
   return call ? { kind: "bind", call } : { kind: "unmatched" };
 };
 
@@ -431,7 +436,7 @@ export const classifyActions = (
 ): InterruptionAction[] =>
   calls.map((call) => {
     const status = ((): ToolCallStatus => {
-      if (call.status === "dispatched") return "unknown";
+      if (isReleased(call.status)) return "unknown";
       if (isHeld(call.status)) return interrupted ? "blocked_gate" : "invalidated";
       return call.status;
     })();

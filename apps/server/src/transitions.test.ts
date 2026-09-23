@@ -388,15 +388,25 @@ describe("completion", () => {
     );
   });
 
-  it("binds a result with nothing released to the latest refused or settled revision", () => {
-    const refused = call("denied", "rev1");
-    expect(bindToolResult([refused, call("proposed", "rev2")])).toEqual({
-      kind: "bind",
-      call: refused,
-    });
-    const settled = call("completed", "rev1");
-    expect(bindToolResult([settled])).toEqual({ kind: "bind", call: settled });
-  });
+  it.each<ToolCallStatus>(["denied", "blocked_gate", "invalidated"])(
+    "binds a result with nothing released to the latest %s revision",
+    (status) => {
+      const refused = call(status, "rev1");
+      expect(bindToolResult([refused, call("proposed", "rev2")])).toEqual({
+        kind: "bind",
+        call: refused,
+      });
+    },
+  );
+
+  it.each<ToolCallStatus>(["completed", "failed"])(
+    "leaves a repeated result unmatched rather than replacing a %s call's result",
+    (status) => {
+      expect(bindToolResult([call(status, "rev1"), call("proposed", "rev2")])).toEqual({
+        kind: "unmatched",
+      });
+    },
+  );
 
   it("leaves a result unmatched when every revision is still held, or there is none", () => {
     expect(bindToolResult([call("proposed", "rev1"), call("awaiting_approval", "rev2")])).toEqual({
@@ -406,16 +416,23 @@ describe("completion", () => {
   });
 
   it("classifies a released call without a result as unknown and a held one as never run", () => {
-    const calls = [call("dispatched", "a"), call("awaiting_approval", "b"), call("completed", "c")];
+    const calls = [
+      call("dispatched", "a"),
+      call("awaiting_approval", "b"),
+      call("completed", "c"),
+      call("permitted", "d"),
+    ];
     expect(classifyActions(calls, true).map((action) => action.status)).toEqual([
       "unknown",
       "blocked_gate",
       "completed",
+      "unknown",
     ]);
     expect(classifyActions(calls, false).map((action) => action.status)).toEqual([
       "unknown",
       "invalidated",
       "completed",
+      "unknown",
     ]);
     expect(calls[0]?.status).toBe("dispatched");
   });
