@@ -61,7 +61,12 @@ export class ProbeContext {
     const fixture = await startFixture({ dir: fixtureDir, mcpLogFile: env.MIA_MCP_HTTP_LOG });
     const harness = new FixtureHarness(fixture.harnessUrl);
     const bridge = new ApprovalBridge({ logFile: env.MIA_MCP_HTTP_LOG });
-    await bridge.start();
+    try {
+      await bridge.start();
+    } catch (error) {
+      await fixture.close();
+      throw error;
+    }
     return new ProbeContext(
       options,
       { out, examples, fixture: fixtureDir },
@@ -111,9 +116,13 @@ export class ProbeContext {
     }
   }
 
+  /** Closes the bridge and the fixture, the fixture even when closing the bridge fails. */
   async close(): Promise<void> {
-    await this.services.bridge.close();
-    await this.services.fixture.close();
+    try {
+      await this.services.bridge.close();
+    } finally {
+      await this.services.fixture.close();
+    }
   }
 
   wants(name: string): boolean {

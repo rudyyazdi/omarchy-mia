@@ -81,6 +81,11 @@ const RESTRICTED_SYNTAX = [
     message: `Use an arrow function. ${BYPASS_NOTE}`,
   },
   { selector: "SwitchStatement", message: `Use match() from ts-pattern. ${BYPASS_NOTE}` },
+  {
+    // Importing the module would hide process.env and friends from no-restricted-properties.
+    selector: "ImportDeclaration[source.value=/^(node:)?process$/]",
+    message: `Use the \`process\` global instead of importing it. ${BYPASS_NOTE}`,
+  },
 ];
 
 // Source files outside tests: everything above, plus the rules that only apply to shipped code.
@@ -94,14 +99,31 @@ const SOURCE_RESTRICTED_SYNTAX = [
 
 // Enforces AGENTS.md, Node: only the file a process starts from reads the environment, installs
 // signal handlers or exits; every other module takes what it needs as an argument.
-const PROCESS_ENTRY_ONLY = ["env", "exit", "on", "once"].map((property) => ({
-  object: "process",
-  property,
-  message: `Only the file a process starts from (a main.ts, or a module a host loads as a plugin) uses process.${property}; take the value as an argument or return it to the entry point. ${BYPASS_NOTE}`,
-}));
+const PROCESS_ENTRY_ONLY = [
+  ...[
+    "env",
+    "exit",
+    "exitCode",
+    "on",
+    "once",
+    "addListener",
+    "prependListener",
+    "prependOnceListener",
+  ].map((property) => ({
+    object: "process",
+    property,
+    message: `Only the file a process starts from (a main.ts, or a module a host loads as a plugin) uses process.${property}; take the value as an argument or return it to the entry point. ${BYPASS_NOTE}`,
+  })),
+  {
+    object: "globalThis",
+    property: "process",
+    message: `Use the \`process\` global, which the process-entry rule checks. ${BYPASS_NOTE}`,
+  },
+];
 
 // The files a process starts from other than a main.ts: the runtime's hook script, the promptfoo
-// provider plugin and the live-lane runner script.
+// provider plugin and the live-lane runner script (to become a main.ts: #110). The override below
+// turns no-restricted-properties off for them, which only carries PROCESS_ENTRY_ONLY.
 const PROCESS_ENTRY_FILES = [
   "**/main.ts",
   "packages/agent-adapter/src/hook-capture.mjs",

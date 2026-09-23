@@ -88,31 +88,37 @@ const REQUIRED_FLAGS = [
   "--resume",
 ];
 
-/** The environment variables the static probe reads to detect a runtime credential. */
-type CredentialEnv = Readonly<Partial<Record<"ANTHROPIC_API_KEY" | "HOME", string>>>;
-
-/** Static checks: nothing here contacts a model. `env` is the environment the runtime will inherit. */
+/**
+ * Static checks: nothing here contacts a model. `env` is the environment a launch passes on (see
+ * `LaunchInput.env`): the executable is looked up on its PATH and run with it, and the credential
+ * is detected from it.
+ */
 export const probeStaticCapabilities = (
   config: RuntimeConfig,
-  env: CredentialEnv,
+  env: NodeJS.ProcessEnv,
 ): StaticCapabilities => {
   const errors: string[] = [];
   const which = spawnSync("sh", ["-c", `command -v ${JSON.stringify(config.executable)}`], {
     encoding: "utf8",
+    env,
   });
   const resolved = which.status === 0 ? which.stdout.trim() : null;
   if (!resolved) errors.push(`runtime executable "${config.executable}" not found on PATH`);
   let version: string | null = null;
   const flags: Record<string, boolean> = {};
   if (resolved) {
-    const versionProbe = spawnSync(resolved, ["--version"], { encoding: "utf8", timeout: 20_000 });
+    const versionProbe = spawnSync(resolved, ["--version"], {
+      encoding: "utf8",
+      timeout: 20_000,
+      env,
+    });
     version = versionProbe.status === 0 ? versionProbe.stdout.trim() : null;
     if (!version)
       errors.push(
         `"${resolved} --version" failed: ${versionProbe.stderr?.trim() || versionProbe.error?.message || "unknown"}`,
       );
     const help =
-      spawnSync(resolved, ["--help"], { encoding: "utf8", timeout: 20_000 }).stdout ?? "";
+      spawnSync(resolved, ["--help"], { encoding: "utf8", timeout: 20_000, env }).stdout ?? "";
     for (const flag of REQUIRED_FLAGS) {
       // help abbreviates paired flags as --append-system-prompt[-file]
       const abbreviated = flag.replace(/-file$/, "[-file]");

@@ -168,7 +168,8 @@ const startProfile = async (name: string, index: number): Promise<MiaServer> => 
   const logs: string[] = [];
   const server = await startServer({
     profile,
-    env,
+    // The runtime inherits the runner's own environment, not the promptfoo one built above.
+    env: process.env,
     log: (message) => logs.push(`${new Date().toISOString()} ${message}`),
   });
   process.on("exit", () =>
