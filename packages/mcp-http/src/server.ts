@@ -33,7 +33,8 @@ export interface McpHttpServerHandle {
   close(): Promise<void>;
 }
 
-const endWithError = (res: ServerResponse, error: unknown): void => {
+/** Answers a failed request with a 500 JSON error, or just ends it if the headers already went out. */
+export const endWithError = (res: ServerResponse, error: unknown): void => {
   if (res.headersSent) {
     res.end();
     return;

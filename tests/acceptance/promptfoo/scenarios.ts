@@ -146,7 +146,7 @@ const runTask = async (
   const taskId = taskIdOf(ack);
   const decisions: ScenarioEvidence["decisions"] = [];
   let index = 0;
-  const onApproval = async (event: ServerEvent) => {
+  const decide = async (event: ServerEvent) => {
     if (event.type !== "approval_requested" || event.payload.task_id !== taskId) return;
     const state = await ctx.harness.state();
     const choice = task.decide({
@@ -174,13 +174,18 @@ const runTask = async (
         ledger_commits_at_request: -1,
       });
   };
+  // The client ignores a listener's result, so the listener stays synchronous and hands a failed
+  // decision to the wait below; an async listener's rejection would go unhandled and exit.
+  const decisionFailed = Promise.withResolvers<never>();
+  const onApproval = (event: ServerEvent) => {
+    decide(event).catch(decisionFailed.reject);
+  };
   client.on("approval_requested", onApproval);
   const duringPromise = task.during ? task.during(taskId) : Promise.resolve();
-  const finished = await client.waitFor(
-    "task_finished",
-    (event) => event.payload.task_id === taskId,
-    600_000,
-  );
+  const finished = await Promise.race([
+    client.waitFor("task_finished", (event) => event.payload.task_id === taskId, 600_000),
+    decisionFailed.promise,
+  ]);
   await duringPromise;
   client.off("approval_requested", onApproval);
   const transcript = client.events

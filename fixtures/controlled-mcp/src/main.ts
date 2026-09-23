@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { errorMessage } from "@mia/protocol";
 import { startFixture } from "./fixture.ts";
 
 const program = new Command()
@@ -24,9 +25,16 @@ const handle = await startFixture({
 console.log(
   JSON.stringify({ mcp_url: handle.mcpUrl, harness_url: handle.harnessUrl, dir: values.dir }),
 );
-const shutdown = async () => {
-  await handle.close();
-  process.exit(0);
+// Signal handlers ignore their result, so this one owns the failure rather than leaving an
+// unhandled rejection to exit the process.
+const shutdown = () => {
+  handle.close().then(
+    () => process.exit(0),
+    (error: unknown) => {
+      console.error(`fixture: shutdown failed: ${errorMessage(error)}`);
+      process.exit(1);
+    },
+  );
 };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

@@ -12,9 +12,16 @@ const { config } = program.opts<{ config: string }>();
 
 try {
   const server = await startServer({ profilePath: config });
-  const shutdown = async () => {
-    await server.close();
-    process.exit(0);
+  // Signal handlers ignore their result, so this one owns the failure rather than leaving an
+  // unhandled rejection to exit the process.
+  const shutdown = () => {
+    server.close().then(
+      () => process.exit(0),
+      (error: unknown) => {
+        console.error(`mia-server: shutdown failed: ${errorMessage(error)}`);
+        process.exit(1);
+      },
+    );
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
