@@ -112,7 +112,10 @@ const assertScenario = (output: string, context: { vars: Record<string, unknown>
       if (commits.length !== 0) problems.push(`commits after disconnect: ${commits.length}`);
       if (
         !evidence.decisions.some(
-          (decision) => decision.decision === "reject-after-reconnect:accepted",
+          (decision) =>
+            decision.decision === "reject" &&
+            decision.ack?.after_reconnect === true &&
+            decision.ack.disposition === "accepted",
         )
       )
         problems.push("pending approval was not retained/decidable after reconnect");

@@ -1,5 +1,6 @@
 export {
   ClientCommandSchema,
+  DecisionSchema,
   EffortSchema,
   EnvelopeHeadSchema,
   ErrorCodeSchema,
