@@ -13,14 +13,15 @@ export { prepareLaunch } from "./launch.ts";
 export {
   ADAPTER_VERSION,
   ClaudeCodeAdapter,
+  hookEvidenceFrom,
   probeStaticCapabilities,
-  readHookEvidence,
   readRuntimeFile,
 } from "./adapter.ts";
 export type {
   HookEvidence,
   RuntimeFileRead,
   RuntimeFileReadOptions,
+  RuntimeFileReader,
   StaticCapabilities,
   TurnHandle,
   TurnOptions,

@@ -4,10 +4,10 @@ import { join, resolve } from "node:path";
 import { match } from "ts-pattern";
 import {
   policyFor,
-  readHookEvidence,
-  readRuntimeFile,
+  hookEvidenceFrom,
   type HookEvidence,
   type RuntimeFileRead,
+  type RuntimeFileReader,
   type RuntimeEvent,
   type PermissionDecision,
   type PermissionRequest,
@@ -166,6 +166,8 @@ export interface EngineDeps {
    * when it aborts is recorded unreadable, so a read that never returns cannot keep the task from finishing.
    */
   evidenceReadDeadline: () => AbortSignal;
+  /** Reads the transcript and the hook evidence at turn end: `readRuntimeFile`, or a test's own. */
+  readEvidence: RuntimeFileReader;
   log: (message: string) => void;
 }
 
@@ -1481,10 +1483,11 @@ export class Engine {
     // Read before anything else is computed: a command handled while the reads are awaited (a decision)
     // changes the task, and the records must reflect it.
     const signal = AbortSignal.any([this.stopping.signal, this.deps.evidenceReadDeadline()]);
-    const [transcript, hookEvidence] = await Promise.all([
-      readRuntimeFile(result.streamLogPath, { signal }),
-      readHookEvidence(result.hookEvidencePath, { signal }),
+    const [transcript, hookRead] = await Promise.all([
+      this.deps.readEvidence(result.streamLogPath, { signal }),
+      this.deps.readEvidence(result.hookEvidencePath, { signal }),
     ]);
+    const hookEvidence = hookEvidenceFrom(hookRead);
     const conversation = this.conversation;
     if (!conversation) return;
     const opts = this.taskOpts(task);

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { prepareLaunch, readHookEvidence } from "@mia/agent-adapter";
+import { hookEvidenceFrom, prepareLaunch, readRuntimeFile } from "@mia/agent-adapter";
 import type { SlowMode } from "@mia/controlled-mcp";
 import {
   effortsOf,
@@ -196,7 +196,7 @@ export const effortControl = async (context: ProbeContext): Promise<void> => {
       return { stdout: output, exit: await exited };
     },
   );
-  const hooks = await readHookEvidence(plan.files.hookEvidence);
+  const hooks = hookEvidenceFrom(await readRuntimeFile(plan.files.hookEvidence));
   const control = {
     exit,
     efforts: effortsOf(hooks.records),

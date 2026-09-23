@@ -10,15 +10,17 @@ import type {
 } from "@mia/agent-adapter";
 import type { RuntimeCancellation } from "@mia/protocol";
 import type { TurnRunner } from "@mia/server";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { match } from "ts-pattern";
 
 /**
  * Scripted adapter substitute. The test drives each turn explicitly: emit runtime events, raise permission
  * requests exactly as the bridge would, and end the turn. Interruption behaves like SIGKILL by default
  * (pending prompts are abandoned, the turn ends as killed); `survivesInterrupt` keeps the runtime alive so
- * the action gate can be exercised after closure. `transcriptUnreadable` leaves a directory where the turn's
- * transcript belongs, so reading it fails.
+ * the action gate can be exercised after closure. `transcriptAs` can leave a directory or a FIFO where the
+ * turn's transcript belongs, so reading it fails.
  */
 export class ScriptedTurn {
   private readonly resolveResult: (result: TurnResult) => void;
@@ -27,7 +29,7 @@ export class ScriptedTurn {
   readonly decisions: { request: PermissionRequest; decision: PermissionDecision }[] = [];
   interrupted = false;
   survivesInterrupt = false;
-  transcriptUnreadable = false;
+  transcriptAs: "file" | "directory" | "fifo" = "file";
   private ended = false;
   private turnCounter = 0;
   /** Like the real adapter, the last reported init becomes the TurnResult's. */
@@ -107,12 +109,16 @@ export class ScriptedTurn {
       this.options.runtimeDir,
       `turn-${this.options.turnIndex}.stream.jsonl`,
     );
-    if (this.transcriptUnreadable) mkdirSync(streamLogPath);
-    else
-      writeFileSync(
-        streamLogPath,
-        JSON.stringify({ type: "scripted", turn: ++this.turnCounter }) + "\n",
-      );
+    match(this.transcriptAs)
+      .with("file", () =>
+        writeFileSync(
+          streamLogPath,
+          JSON.stringify({ type: "scripted", turn: ++this.turnCounter }) + "\n",
+        ),
+      )
+      .with("directory", () => mkdirSync(streamLogPath))
+      .with("fifo", () => execFileSync("mkfifo", [streamLogPath]))
+      .exhaustive();
     const exit = this.interrupted
       ? { code: null, signal: "SIGKILL" as const }
       : { code: status === "completed" ? 0 : 1, signal: null };

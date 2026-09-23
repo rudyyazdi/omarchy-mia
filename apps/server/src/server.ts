@@ -5,7 +5,9 @@ import {
   ClaudeCodeAdapter,
   loadProfile,
   probeStaticCapabilities,
+  readRuntimeFile,
   type Profile,
+  type RuntimeFileReader,
 } from "@mia/agent-adapter";
 import { errorMessage } from "@mia/protocol";
 import { Catalog, RecordWriter } from "@mia/records";
@@ -37,8 +39,8 @@ export const SHUTDOWN_TURN_WAIT_MS = 10_000;
 
 /**
  * The evidence read deadline an entry point should give `startServer`: how long a finished turn's evidence reads may take before the turn is recorded without that evidence. A
- * transcript on a healthy disk reads in milliseconds; only a file that never returns (a FIFO, a stale mount)
- * reaches this, and every submission is refused as busy until it does.
+ * transcript on a healthy disk reads in milliseconds; only a read that never returns (a regular file on a stale
+ * mount; a FIFO is refused without being read) reaches this, and every submission is refused as busy until it does.
  */
 export const EVIDENCE_READ_TIMEOUT_MS = 10_000;
 
@@ -64,6 +66,8 @@ export const startServer = async (input: {
    * `() => AbortSignal.timeout(EVIDENCE_READ_TIMEOUT_MS)`; a test passes a signal it aborts itself.
    */
   evidenceReadDeadline: () => AbortSignal;
+  /** Reads a finished turn's evidence; defaults to `readRuntimeFile`. A test injects one that holds a read. */
+  readEvidence?: RuntimeFileReader;
   /**
    * The server process's environment: fills a profile's `${ENV}` placeholders, is what the runtime
    * inherits and is probed with at startup, and names the bridge's request log (`MIA_MCP_HTTP_LOG`).
@@ -95,6 +99,7 @@ export const startServer = async (input: {
         adapter,
         identity,
         evidenceReadDeadline: input.evidenceReadDeadline,
+        readEvidence: input.readEvidence ?? readRuntimeFile,
         log,
       });
       const gateway = await startGateway({
