@@ -60,7 +60,7 @@ const createExport = (root: string) => {
       logicalName: "source.txt",
       bytes: Buffer.from("retained source"),
     });
-    writer.addDependency(artifact.artifactId, dependency.artifactId, "source");
+    writer.addDependency(artifact.artifactId, dependency.artifactId, "local_changes");
     writer.linkArtifact({
       conversationId: conversation.id,
       artifactId: artifact.artifactId,

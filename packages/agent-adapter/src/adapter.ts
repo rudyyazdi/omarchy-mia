@@ -3,7 +3,7 @@ import { existsSync, appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { match } from "ts-pattern";
 import { z } from "zod";
-import { errorMessage, redactString } from "@mia/protocol";
+import { errorMessage, redactString, type RuntimeCancellation } from "@mia/protocol";
 import type { ApprovalBridge, PermissionHandler } from "./bridge.ts";
 import type { RuntimeConfig } from "./config.ts";
 import { withinDeadline } from "./deadline.ts";
@@ -23,9 +23,6 @@ export interface TurnOptions {
   permissionHandler: PermissionHandler;
   onEvent: (event: RuntimeEvent) => void;
 }
-
-/** not_needed: no interruption; forced_kill: SIGKILL delivered and exit observed; unknown: kill sent, exit not observed in time. */
-export type RuntimeCancellation = "not_needed" | "forced_kill" | "unknown";
 
 interface RuntimeExit {
   code: number | null;

@@ -2,8 +2,16 @@ import { writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigurationError, validateRuntimeConfig } from "@mia/agent-adapter";
-import { LIMITS, PROTOCOL_VERSION } from "@mia/protocol";
-import { ObjectStore } from "@mia/records";
+import {
+  LIMITS,
+  PROTOCOL_VERSION,
+  type ApprovalStatus,
+  type Decision,
+  type ServerEventType,
+  type TaskStatus,
+  type ToolCallStatus,
+} from "@mia/protocol";
+import { ObjectStore, type CaptureStatus, type LinkRelation } from "@mia/records";
 import type { AckPayload, MiaClient } from "@mia/text-client";
 import { ScriptedRuntime, type ScriptedTurn } from "./scripted-runtime.ts";
 import {
@@ -57,8 +65,8 @@ const submitHeldCall = async (
   return { turn, taskId, held, requested };
 };
 
-const taskStatus = (taskId: string): string =>
-  must(rows<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId)[0], "task row")
+const taskStatus = (taskId: string): TaskStatus =>
+  must(rows<{ status: TaskStatus }>("SELECT status FROM tasks WHERE id = ?", taskId)[0], "task row")
     .status;
 
 /** The task is running again, in the records and in memory: a new submission is told to wait, not to decide. */
@@ -71,7 +79,7 @@ const expectResumed = async (taskId: string): Promise<void> => {
   });
 };
 
-const decide = (taskId: string, approvalId: string, decision: "approve" | "reject") =>
+const decide = (taskId: string, approvalId: string, decision: Decision) =>
   client.decide({ taskId: taskId, approvalId: approvalId, decision: decision });
 
 /**
@@ -98,7 +106,7 @@ const failObjectWrites = (): void => {
 };
 
 /** Make inserting an artifact link with `relation` fail, after the rows before it are written, when `when` holds. */
-const failArtifactLinks = (relation: string, when: string): void => {
+const failArtifactLinks = (relation: LinkRelation, when: string): void => {
   ts.server.catalog.db.exec(`CREATE TRIGGER fail_${relation}_link BEFORE INSERT ON artifact_links
     WHEN NEW.relation = '${relation}' AND ${when}
     BEGIN SELECT RAISE(ABORT, 'simulated link failure'); END`);
@@ -116,7 +124,7 @@ const writeOutputFile = (name: string, text: string): string => {
 const countRows = (table: string): number => rows(`SELECT 1 FROM ${table}`).length;
 
 /** Make every delivery of one event type to the client throw, as a failing socket would. */
-const failDelivery = (type: string): void => {
+const failDelivery = (type: ServerEventType): void => {
   const { engine, gateway } = ts.server;
   engine.attachDelivery((connectionId, event) => {
     if (event.type === type) throw new Error("simulated socket failure");
@@ -125,14 +133,14 @@ const failDelivery = (type: string): void => {
 };
 
 /** Approval statuses in catalog order: how these tests show that nothing was authorised. */
-const approvalStatuses = (): string[] =>
-  rows<{ status: string }>("SELECT status FROM approvals").map((row) => row.status);
+const approvalStatuses = (): ApprovalStatus[] =>
+  rows<{ status: ApprovalStatus }>("SELECT status FROM approvals").map((row) => row.status);
 
 /** End a turn whose one call's prompt was abandoned: the call ends invalidated, and the next turn is told it never ran. */
 const expectAbandonedAtTurnEnd = async (turn: ScriptedTurn): Promise<void> => {
   turn.end();
   expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
-  expect(must(rows<{ status: string }>("SELECT status FROM tool_calls")[0]).status).toBe(
+  expect(must(rows<{ status: ToolCallStatus }>("SELECT status FROM tool_calls")[0]).status).toBe(
     "invalidated",
   );
   expect(approvalStatuses()).toEqual(["expired"]);
@@ -352,7 +360,11 @@ describe("streaming and commands", () => {
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("completed");
     expect(taskStatus(taskId)).toBe("completed");
-    return rows<{ capture_status: string; capture_reason: string | null; object_digest: null }>(
+    return rows<{
+      capture_status: CaptureStatus;
+      capture_reason: string | null;
+      object_digest: null;
+    }>(
       `SELECT a.capture_status, a.capture_reason, a.object_digest FROM artifacts a
        JOIN artifact_links l ON l.artifact_id = a.id
        WHERE l.task_id = ? AND l.relation = 'runtime_transcript'`,
@@ -456,7 +468,7 @@ describe("approval path", () => {
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("completed");
     // The refused call's error result stays linked to it, as its result, not as an unmatched one.
-    const calls = rows<{ runtime_call_id: string; status: string; has_result: number }>(
+    const calls = rows<{ runtime_call_id: string; status: ToolCallStatus; has_result: number }>(
       "SELECT runtime_call_id, status, result_event_id IS NOT NULL AS has_result FROM tool_calls ORDER BY created_at",
     );
     expect(calls).toEqual([
@@ -497,7 +509,7 @@ describe("approval path", () => {
     expect((await second).behavior).toBe("allow");
     turn.end();
     await client.waitFor("task_finished");
-    const revisions = rows<{ binding_revision: number; status: string }>(
+    const revisions = rows<{ binding_revision: number; status: ToolCallStatus }>(
       "SELECT binding_revision, status FROM tool_calls WHERE runtime_call_id = 'toolu_1' ORDER BY binding_revision",
     );
     expect(revisions.map((row) => row.status)).toEqual(["invalidated", "unknown"]);
@@ -508,7 +520,7 @@ describe("approval path", () => {
     // The stream event commits synchronously, so the records show the new revision before any delivery.
     turn.propose("toolu_1", "mcp__d1__read", { delta: 1 });
     expect(
-      rows<{ binding_revision: number; tool_identity: string; status: string }>(
+      rows<{ binding_revision: number; tool_identity: string; status: ToolCallStatus }>(
         "SELECT binding_revision, tool_identity, status FROM tool_calls WHERE runtime_call_id = 'toolu_1' ORDER BY binding_revision",
       ),
     ).toEqual([
@@ -545,7 +557,7 @@ describe("approval path", () => {
       "stream line event",
     ).id;
     expect(
-      rows<{ binding_revision: number; status: string; streamed: number }>(
+      rows<{ binding_revision: number; status: ToolCallStatus; streamed: number }>(
         "SELECT binding_revision, status, proposal_event_id = ? AS streamed FROM tool_calls WHERE runtime_call_id = 'toolu_1' ORDER BY binding_revision",
         streamLine,
       ),
@@ -571,7 +583,7 @@ describe("approval path", () => {
     turn.end();
     await client.waitFor("task_finished");
     expect(
-      rows<{ tool_identity: string; status: string; has_result: number }>(
+      rows<{ tool_identity: string; status: ToolCallStatus; has_result: number }>(
         "SELECT tool_identity, status, result_event_id IS NOT NULL AS has_result FROM tool_calls WHERE runtime_call_id = 'toolu_1' ORDER BY binding_revision",
       ),
     ).toEqual([
@@ -588,7 +600,7 @@ describe("approval path", () => {
     turn.end();
     await client.waitFor("task_finished");
     expect(
-      rows<{ status: string; has_result: number }>(
+      rows<{ status: ToolCallStatus; has_result: number }>(
         "SELECT status, result_event_id IS NOT NULL AS has_result FROM tool_calls",
       ),
     ).toEqual([{ status: "invalidated", has_result: 0 }]);
@@ -620,7 +632,7 @@ describe("approval path", () => {
     expect(turn.decisions.map(({ decision }) => decision.behavior)).toEqual(["deny", "allow"]);
     expect(approvalStatuses()).toEqual(["approved"]);
     expect(
-      rows<{ status: string }>("SELECT status FROM tool_calls").map((row) => row.status),
+      rows<{ status: ToolCallStatus }>("SELECT status FROM tool_calls").map((row) => row.status),
     ).toEqual(["dispatched"]);
     turn.end();
     await client.waitFor("task_finished");
@@ -666,7 +678,7 @@ describe("approval path", () => {
     expect(errors).toContain("runtime_failure");
     turn.end();
     await client.waitFor("task_finished");
-    const statuses = rows<{ tool_identity: string; status: string }>(
+    const statuses = rows<{ tool_identity: string; status: ToolCallStatus }>(
       "SELECT tool_identity, status FROM tool_calls",
     );
     expect(statuses.find((row) => row.tool_identity === "mcp__d1__forbidden")?.status).toBe(
@@ -821,7 +833,7 @@ describe("approval path", () => {
       turn.toolResult("toolu_1", "changed");
       turn.end();
       expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
-      const calls = rows<{ status: string }>(
+      const calls = rows<{ status: ToolCallStatus }>(
         "SELECT status FROM tool_calls ORDER BY binding_revision",
       );
       expect(calls.map((call) => call.status)).toEqual(["invalidated", "completed"]);
@@ -832,9 +844,9 @@ describe("approval path", () => {
       const { taskId } = await abandonUnrecorded();
       expect((await client.interrupt(taskId)).disposition).toBe("accepted");
       expect((await client.waitFor("task_finished")).payload.status).toBe("interrupted");
-      expect(must(rows<{ status: string }>("SELECT status FROM tool_calls")[0]).status).toBe(
-        "invalidated",
-      );
+      expect(
+        must(rows<{ status: ToolCallStatus }>("SELECT status FROM tool_calls")[0]).status,
+      ).toBe("invalidated");
       expect(approvalStatuses()).toEqual(["expired"]);
     });
   });
@@ -992,7 +1004,7 @@ describe("interruption path", () => {
     expect(change.behavior).toBe("deny");
     expect(
       must(
-        rows<{ status: string }>(
+        rows<{ status: ToolCallStatus }>(
           "SELECT status FROM tool_calls WHERE runtime_call_id = 'toolu_2'",
         )[0],
       ).status,
@@ -1014,7 +1026,7 @@ describe("interruption path", () => {
     turn.end();
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("outcome_unknown");
-    expect(must(rows<{ status: string }>("SELECT status FROM tool_calls")[0]).status).toBe(
+    expect(must(rows<{ status: ToolCallStatus }>("SELECT status FROM tool_calls")[0]).status).toBe(
       "unknown",
     );
   });
@@ -1028,7 +1040,7 @@ describe("interruption path", () => {
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("outcome_unknown");
     expect(finished.payload.error).toContain("runtime crashed");
-    expect(must(rows<{ status: string }>("SELECT status FROM tool_calls")[0]).status).toBe(
+    expect(must(rows<{ status: ToolCallStatus }>("SELECT status FROM tool_calls")[0]).status).toBe(
       "unknown",
     );
     // The configured policy is unchanged by the unknown outcome: the model, not the harness, judges whether a repeat is
@@ -1085,7 +1097,7 @@ describe("configuration and provenance", () => {
     await client.waitFor("task_finished");
     const artifacts = rows<{
       logical_name: string;
-      capture_status: string;
+      capture_status: CaptureStatus;
       object_digest: string | null;
     }>(
       "SELECT logical_name, capture_status, object_digest FROM artifacts WHERE kind = 'tool_output'",
@@ -1130,7 +1142,11 @@ describe("configuration and provenance", () => {
     }
     turn.end();
     await client.waitFor("task_finished");
-    const captured = rows<{ logical_name: string; capture_status: string; capture_reason: string }>(
+    const captured = rows<{
+      logical_name: string;
+      capture_status: CaptureStatus;
+      capture_reason: string;
+    }>(
       "SELECT logical_name, capture_status, capture_reason FROM artifacts WHERE kind = 'tool_output' AND object_digest IS NULL AND external_locator = original_path ORDER BY logical_name",
     );
     expect(captured).toEqual([
@@ -1147,7 +1163,7 @@ describe("configuration and provenance", () => {
         capture_reason: "declared path must be absolute",
       },
     ]);
-    const relations = rows<{ relation: string }>(
+    const relations = rows<{ relation: LinkRelation }>(
       "SELECT l.relation FROM artifact_links l JOIN artifacts a ON a.id = l.artifact_id WHERE a.kind = 'tool_output' AND l.tool_call_id IS NOT NULL",
     );
     expect(relations).toEqual(Array.from({ length: 4 }, () => ({ relation: "tool_result" })));
@@ -1178,7 +1194,7 @@ describe("configuration and provenance", () => {
     expect(rows("SELECT 1 FROM events WHERE type = 'tool_result'")).toHaveLength(1);
     expect(rows("SELECT 1 FROM events WHERE type = 'artifact_registered'")).toHaveLength(0);
     const artifacts = rows<{
-      capture_status: string;
+      capture_status: CaptureStatus;
       capture_reason: string | null;
       object_digest: string | null;
       external_locator: string | null;

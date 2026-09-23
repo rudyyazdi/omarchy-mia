@@ -11,7 +11,7 @@ describe("report HTML safety", () => {
     };
     const snapshot = snapshotFixture(hostile);
     const report = renderReport(snapshot, {
-      objectStatus: { [hostile("object-digest")]: hostile("object-status") },
+      objectStatus: { [hostile("object-digest")]: "corrupt" },
     });
     // All row families are populated, so bypassing escaping in any of their cells leaks the marker.
     expect(report).not.toContain("<&");

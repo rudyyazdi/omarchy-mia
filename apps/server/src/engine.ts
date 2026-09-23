@@ -33,7 +33,15 @@ import {
   type ToolCallPolicy,
   type ToolCallStatus,
 } from "@mia/protocol";
-import { newId, nowIso, type ArtifactKind, type Catalog, type RecordWriter } from "@mia/records";
+import {
+  newId,
+  nowIso,
+  type ArtifactKind,
+  type Catalog,
+  type JournalEventType,
+  type LinkRelation,
+  type RecordWriter,
+} from "@mia/records";
 import {
   captureFields,
   extractDeclaredArtifact,
@@ -179,7 +187,7 @@ const RUNTIME_IDENTITY = "claude-code";
 interface TurnEvidence {
   kind: ArtifactKind;
   name: string;
-  relation: "runtime_transcript" | "task_output";
+  relation: Extract<LinkRelation, "runtime_transcript" | "task_output">;
   originalPath: string | null;
   content: Exclude<RuntimeFileRead, { status: "absent" }>;
 }
@@ -323,7 +331,7 @@ export class Engine {
 
   /** Persist evidence that has no client-facing schema (inside tx). */
   private record(
-    type: string,
+    type: JournalEventType,
     payload: unknown,
     opts: EventOpts = {},
   ): { id: string; sequence: number } {
@@ -800,7 +808,7 @@ export class Engine {
 
   heartbeat(
     ctx: CommandContext,
-    payload: { conversation_id: string | null; captured_at: string; connection_state: string },
+    payload: Extract<ClientCommand, { type: "heartbeat" }>["payload"],
   ): CommandResult {
     try {
       this.deps.writer.touchConnection(ctx.connectionId);

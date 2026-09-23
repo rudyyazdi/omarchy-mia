@@ -19,7 +19,6 @@ export {
 } from "./adapter.ts";
 export type {
   HookEvidence,
-  RuntimeCancellation,
   RuntimeFileRead,
   StaticCapabilities,
   TurnHandle,

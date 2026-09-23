@@ -70,7 +70,59 @@ const layerOverrides = LAYERS.flatMap((layer, index) =>
       ],
 );
 
+// Enforces AGENTS.md, Design: a domain vocabulary is a union declared once and imported, never retyped as
+// `string`. Lint sees only names, so a field that is meant to stay open (a value the runtime reports) takes a
+// bypass that says so; a union spelled out twice, and fields named `type`, are left to review.
+const VOCABULARY_WORDS = [
+  "status",
+  "kind",
+  "policy",
+  "role",
+  "disposition",
+  "mode",
+  "relation",
+  "decision",
+  "effort",
+  "integrity",
+  "cancellation",
+];
+const capitalized = (word) => word[0].toUpperCase() + word.slice(1);
+// snake_case (`status`, `capture_status`, `connection_state`) or camelCase (`captureStatus`, `connectionState`);
+// case-sensitive, so `estate` or `correlation` is not a vocabulary name.
+const VOCABULARY_NAME = `/(^|_)(${VOCABULARY_WORDS.join("|")})$|_state$|[a-z](${[...VOCABULARY_WORDS, "state"].map(capitalized).join("|")})$/`;
+const KEY = [`[key.name=${VOCABULARY_NAME}]`, `[key.value=${VOCABULARY_NAME}]`];
+const STRING_TYPE = [
+  "TSStringKeyword",
+  "TSUnionType > TSStringKeyword",
+  "TSArrayType > TSStringKeyword",
+];
+// `z.string()`, alone or followed by up to two chained calls such as `.max(32).optional()`.
+const Z_STRING = [
+  'CallExpression[callee.object.name="z"][callee.property.name="string"]',
+  'CallExpression[callee.object.callee.object.name="z"][callee.object.callee.property.name="string"]',
+  'CallExpression[callee.object.callee.object.callee.object.name="z"][callee.object.callee.object.callee.property.name="string"]',
+];
+const Z_ARRAY_OF_STRING = Z_STRING.map(
+  (call) => `CallExpression[callee.object.name="z"][callee.property.name="array"] > ${call}`,
+);
+const VOCABULARY_AS_STRING = {
+  selector: [
+    ...["TSPropertySignature", "PropertyDefinition"].flatMap((node) =>
+      KEY.flatMap((key) => STRING_TYPE.map((type) => `${node}${key} > TSTypeAnnotation > ${type}`)),
+    ),
+    ...STRING_TYPE.map(
+      (type) => `Identifier[name=${VOCABULARY_NAME}] > TSTypeAnnotation > ${type}`,
+    ),
+    `TSTypeAliasDeclaration[id.name=${VOCABULARY_NAME}] > TSStringKeyword`,
+    ...KEY.flatMap((key) =>
+      [...Z_STRING, ...Z_ARRAY_OF_STRING].map((call) => `Property${key} > ${call}`),
+    ),
+  ].join(", "),
+  message: `A domain vocabulary (status, kind, policy, mode, effort, ...) is a union declared once and imported, never \`string\`. ${BYPASS_NOTE}`,
+};
+
 const RESTRICTED_SYNTAX = [
+  VOCABULARY_AS_STRING,
   {
     selector: "FunctionDeclaration",
     message: `Use an arrow function assigned to a const. ${BYPASS_NOTE}`,

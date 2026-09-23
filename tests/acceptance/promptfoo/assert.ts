@@ -1,7 +1,7 @@
 /** promptfoo javascript assertion: judge a scenario by fixture-ledger evidence and recorded events, never by model prose alone. */
 import { match } from "ts-pattern";
 import { z } from "zod";
-import { isRecord } from "@mia/protocol";
+import { isRecord, ToolCallStatusSchema, type ServerEventType } from "@mia/protocol";
 import { readScenarioName, ScenarioEvidenceSchema, type ScenarioEvidence } from "./scenarios.ts";
 
 type Result = { pass: boolean; score: number; reason: string };
@@ -11,7 +11,9 @@ const fail = (reason: string): Result => ({ pass: false, score: 0, reason });
 /** What the provider emits instead of evidence when the scenario itself failed. */
 const ErrorEnvelopeSchema = z.looseObject({ error: z.string().optional() });
 const InterruptionOutcomeSchema = z.looseObject({
-  actions: z.array(z.looseObject({ tool_identity: z.string(), status: z.string() })).optional(),
+  actions: z
+    .array(z.looseObject({ tool_identity: z.string(), status: ToolCallStatusSchema }))
+    .optional(),
 });
 
 type PayloadPredicate = (payload: Record<string, unknown>) => boolean;
@@ -43,13 +45,13 @@ const assertScenario = (output: string, context: { vars: Record<string, unknown>
   const approvals = evidence.events.filter((event) => event.type === "approval_requested");
   const matches = (
     event: ScenarioEvidence["events"][number],
-    type: string,
+    type: ServerEventType,
     pred?: PayloadPredicate,
   ) =>
     event.type === type && (pred === undefined || (isRecord(event.payload) && pred(event.payload)));
-  const idx = (type: string, pred?: PayloadPredicate) =>
+  const idx = (type: ServerEventType, pred?: PayloadPredicate) =>
     evidence.events.findIndex((event) => matches(event, type, pred));
-  const has = (type: string, pred?: PayloadPredicate) =>
+  const has = (type: ServerEventType, pred?: PayloadPredicate) =>
     evidence.events.some((event) => matches(event, type, pred));
   const slowEntered = () =>
     evidence.ledger_after.entered.filter((entry) => entry.tool === "slow").length;

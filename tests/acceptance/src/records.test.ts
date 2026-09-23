@@ -329,7 +329,7 @@ describe("records, report and export", () => {
     const writer = new RecordWriter(catalog);
     const prov = writer.createProvenanceSet("t");
     const conv = writer.createConversation({ provenanceSetId: prov, runtimeConversationId: "rt" });
-    writer.appendEvent({ conversationId: conv.id, type: "x", payload: { a: 1 } });
+    writer.appendEvent({ conversationId: conv.id, type: "task_submitted", payload: { a: 1 } });
     const exportDir = join(dir, "out");
     exportConversation(catalog, conv.id, exportDir);
     catalog.close();

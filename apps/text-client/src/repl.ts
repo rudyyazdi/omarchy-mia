@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { clearLine, createInterface, cursorTo, type Interface } from "node:readline";
 import { match, P } from "ts-pattern";
 import { loadProfile } from "@mia/agent-adapter";
-import { errorMessage, type EventPayload, type ServerEventOf } from "@mia/protocol";
+import { errorMessage, type Decision, type EventPayload, type ServerEventOf } from "@mia/protocol";
 import { describeAck, MiaClient } from "./client.ts";
 
 /** Where to connect: read from a server profile (loaded by `loadProfile`, whose placeholders `env` fills), or given directly. */
@@ -173,7 +173,7 @@ const handleLine = async (session: Session, text: string, quit: () => void): Pro
   const out = (line: string) => session.terminal.out(line);
   const acknowledged = () => ({ signal: session.deadlines.ack() });
   const [cmd = "", ...rest] = text.startsWith("/") ? text.split(/\s+/) : [];
-  const decideApproval = async (decision: "approve" | "reject") => {
+  const decideApproval = async (decision: Decision) => {
     const id = rest[0];
     const pending = id ? session.pendingApprovals.get(id) : undefined;
     if (!id || !pending) {

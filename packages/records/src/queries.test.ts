@@ -27,7 +27,12 @@ describe("taskViews", () => {
         task_id: "other-task",
         payload: '{"text":"Other"}',
       }),
-      fixtureEvent({ id: "non-text", sequence: 3, type: "notice", payload: '{"text":"ignored"}' }),
+      fixtureEvent({
+        id: "non-text",
+        sequence: 3,
+        type: "tool_dispatched",
+        payload: '{"text":"ignored"}',
+      }),
       fixtureEvent({ id: "last", sequence: 4, payload: '{"text":"world"}' }),
       fixtureEvent({ id: "global", sequence: 5, task_id: null, payload: '{"text":"global"}' }),
     ];

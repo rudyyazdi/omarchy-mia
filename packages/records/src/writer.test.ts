@@ -6,6 +6,8 @@ import { Catalog } from "./catalog.ts";
 import type { CommandReply } from "./schema.ts";
 import { RecordWriter } from "./writer.ts";
 
+type CommandInput = Parameters<RecordWriter["recordCommand"]>[0];
+
 let dir: string;
 let catalog: Catalog;
 let writer: RecordWriter;
@@ -29,7 +31,11 @@ describe("record writer", () => {
     });
     expect(() =>
       catalog.transaction(() => {
-        writer.appendEvent({ conversationId: conv.id, type: "a", payload: { ok: true } });
+        writer.appendEvent({
+          conversationId: conv.id,
+          type: "task_submitted",
+          payload: { ok: true },
+        });
         writer.createTask({ conversationId: "conv_does_not_exist", text: "x", clientId: null });
       }),
     ).toThrow();
@@ -44,10 +50,14 @@ describe("record writer", () => {
     });
     const first = writer.appendEvent({
       conversationId: conv.id,
-      type: "x",
+      type: "task_submitted",
       payload: { api_key: "sk-ant-abcdefghijklmnop", text: "Bearer abcdefghijklmnopqrstuvwxyz" },
     });
-    const second = writer.appendEvent({ conversationId: conv.id, type: "y", payload: {} });
+    const second = writer.appendEvent({
+      conversationId: conv.id,
+      type: "runtime_exit",
+      payload: {},
+    });
     expect([first.sequence, second.sequence]).toEqual([1, 2]);
     const row = catalog.get<{ payload: string }>(
       "SELECT payload FROM events WHERE id = ?",
@@ -113,7 +123,7 @@ describe("record writer", () => {
     expect(() =>
       writer.createApproval({ toolCallId: call, executionEpoch: 1, requestingEventId: null }),
     ).toThrow();
-    const command = {
+    const command: CommandInput = {
       connectionId: "conn-1",
       clientId: "client-1",
       clientCommandId: "cmd-1",
@@ -127,7 +137,7 @@ describe("record writer", () => {
   });
 
   describe("commands", () => {
-    const command = (clientCommandId: string, connectionId = "conn-1") => ({
+    const command = (clientCommandId: string, connectionId = "conn-1"): CommandInput => ({
       connectionId,
       clientId: "client-1",
       clientCommandId,

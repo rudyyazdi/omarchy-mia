@@ -76,6 +76,25 @@ describe("decodeEnvelope rejections", () => {
     expect(decoded.message).toContain("payload.text");
   });
 
+  it("rejects a heartbeat whose connection_state is not a known connection state", () => {
+    const heartbeat = (reported: string) =>
+      decodeText(
+        envelope({
+          type: "heartbeat",
+          payload: {
+            conversation_id: null,
+            captured_at: "2026-01-01T00:00:00.000Z",
+            connection_state: reported,
+          },
+        }),
+      );
+    expect(heartbeat("connected")).toMatchObject({ ok: true });
+    const decoded = heartbeat("sleeping");
+    expect(decoded).toMatchObject({ ok: false, commandId: "cmd-1", code: "invalid_message" });
+    if (decoded.ok) return;
+    expect(decoded.message).toContain("payload.connection_state");
+  });
+
   it("rejects a command whose client_id differs from the one the connection is bound to", () => {
     expect(decodeText(envelope({ client_id: "client-B" }), "client-A")).toEqual({
       ok: false,

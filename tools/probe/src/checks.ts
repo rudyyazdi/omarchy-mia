@@ -18,6 +18,7 @@ export const rawRequestsOf = (step: StepRecord): { tool_name?: string; tool_use_
 /** Effort level per PreToolUse hook record: the hook's `effort` (object or string), else the env var it saw. */
 const HookEffort = z.looseObject({
   effort: z.union([z.looseObject({ level: z.string().optional() }), z.string()]).optional(),
+  // eslint-disable-next-line no-restricted-syntax -- the runtime's CLAUDE_EFFORT as the hook saw it, kept as reported
   env_claude_effort: z.string().nullish(),
 });
 export const effortsOf = (hooks: Record<string, unknown>[]): (string | undefined)[] =>

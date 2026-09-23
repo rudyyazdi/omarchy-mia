@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { prepareLaunch, readHookEvidence } from "@mia/agent-adapter";
+import type { SlowMode } from "@mia/controlled-mcp";
 import {
   effortsOf,
   followupChecks,
@@ -24,7 +25,7 @@ import type { StepRecord } from "./record.ts";
 const runInterruptStep = (
   context: ProbeContext,
   args: {
-    mode: "cancellable" | "uncancellable";
+    mode: SlowMode;
     sessionId: string;
     afterKill: (entered: { call_id: string }, step: StepRecord) => Promise<void>;
   },

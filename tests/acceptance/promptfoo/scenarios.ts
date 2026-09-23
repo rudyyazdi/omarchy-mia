@@ -4,9 +4,15 @@
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
-import { FixtureHarness, type FixtureState } from "@mia/controlled-mcp";
+import { FixtureHarness, type FixtureState, type SlowMode } from "@mia/controlled-mcp";
 import { describeAck, MiaClient, type AckPayload } from "@mia/text-client";
-import type { ServerEvent } from "@mia/protocol";
+import {
+  ServerEventTypeSchema,
+  TaskStatusSchema,
+  type Decision,
+  type ServerEvent,
+  type TaskStatus,
+} from "@mia/protocol";
 
 export interface ScenarioContext {
   client: MiaClient;
@@ -80,6 +86,7 @@ export const ScenarioEvidenceSchema = z.object({
     z.object({
       approval_id: z.string(),
       tool: z.string(),
+      // eslint-disable-next-line no-restricted-syntax -- the decider's choice, or how the ack answered it (`ack:rejected:invalid_state`)
       decision: z.string(),
       ledger_commits_at_request: z.number(),
     }),
@@ -94,14 +101,14 @@ export const ScenarioEvidenceSchema = z.object({
   }),
   events: z.array(
     z.object({
-      type: z.string(),
+      type: ServerEventTypeSchema,
       sequence: z.number().nullable(),
       payload: z.unknown().optional(),
     }),
   ),
   transcript: z.array(z.string()),
   notes: z.array(z.string()),
-  final_status: z.array(z.string()),
+  final_status: z.array(TaskStatusSchema),
   live: z.literal(true),
 });
 export type ScenarioEvidence = z.infer<typeof ScenarioEvidenceSchema>;
@@ -123,7 +130,7 @@ type Decider = (request: {
   tool: string;
   approval_id: string;
   index: number;
-}) => "approve" | "reject" | "ignore";
+}) => Decision | "ignore";
 
 /** Commits are the fixture's own count of executed actions; model prose never establishes one. */
 const commitCount = (state: FixtureState): number =>
@@ -147,7 +154,7 @@ const runTask = async (
 ): Promise<{
   taskId: string;
   transcript: string;
-  status: string;
+  status: TaskStatus;
   decisions: ScenarioEvidence["decisions"];
 }> => {
   const { client } = ctx;
@@ -273,7 +280,7 @@ const approveEverything: Decider = () => "approve";
 const approveSlowOnly: Decider = ({ tool }) => (tool === "mcp__d1__slow" ? "approve" : "reject");
 
 const CHANGE_ONCE = "Call d1.change with delta 1 exactly once. Do not retry a denial.";
-const slowThenChange = (mode: "cancellable" | "uncancellable"): string =>
+const slowThenChange = (mode: SlowMode): string =>
   `Call d1.slow with mode ${mode} exactly once, then call d1.change with delta 1 exactly once.`;
 
 /** Interrupt the moment the fixture reports the slow action entered: the shared part of both interruption scenarios. */

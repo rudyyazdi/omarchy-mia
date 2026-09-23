@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { BRIDGE_SERVER_NAME, BRIDGE_TOOL_IDENTITY } from "./bridge.ts";
+import type { Effort } from "@mia/protocol";
 import type { RuntimeConfig } from "./config.ts";
 
 export interface LaunchPlan {
@@ -12,7 +13,7 @@ export interface LaunchPlan {
   /** Redacted, retained description of what was launched (no secrets, no argv prompt). */
   description: {
     model: string;
-    effort: string;
+    effort: Effort;
     session_id: string;
     resume: boolean;
     builtin_tools: string[];

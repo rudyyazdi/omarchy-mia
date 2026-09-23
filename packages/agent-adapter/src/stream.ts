@@ -15,7 +15,11 @@ export const InitMessageSchema = base.extend({
   session_id: z.string(),
   model: z.string(),
   tools: z.array(z.string()),
-  mcp_servers: z.array(z.object({ name: z.string(), status: z.string() }).passthrough()),
+  mcp_servers: z.array(
+    // eslint-disable-next-line no-restricted-syntax -- the runtime's own server status, recorded as reported
+    z.object({ name: z.string(), status: z.string() }).passthrough(),
+  ),
+  // eslint-disable-next-line no-restricted-syntax -- the runtime's own permission mode, recorded as reported
   permissionMode: z.string().optional(),
   claude_code_version: z.string().optional(),
   cwd: z.string().optional(),
@@ -114,6 +118,10 @@ export const KnownMessageSchema = z.union([
   ResultMessageSchema,
 ]);
 export type KnownMessage = z.infer<typeof KnownMessageSchema>;
+/** A line of one of these types that fails its schema is malformed, not an unknown message to keep as "other". */
+const KNOWN_MESSAGE_TYPES = new Set<string>(
+  KnownMessageSchema.options.map((option) => option.shape.type.value),
+);
 /** Any other well-formed runtime message (e.g. rate_limit_event): retained as evidence, not acted on. */
 export type OtherMessage = { type: "other"; original_type: string; raw: unknown };
 export type RuntimeMessage = KnownMessage | OtherMessage;
@@ -143,8 +151,7 @@ export const parseStreamLine = (line: string): ParsedLine | null => {
   const parsed = KnownMessageSchema.safeParse(json);
   if (parsed.success) return { ok: true, message: parsed.data, json, raw: trimmed };
   const other = base.safeParse(json);
-  const knownTypes = new Set(["system", "assistant", "user", "stream_event", "result"]);
-  if (other.success && !knownTypes.has(other.data.type))
+  if (other.success && !KNOWN_MESSAGE_TYPES.has(other.data.type))
     return {
       ok: true,
       message: { type: "other", original_type: other.data.type, raw: json },
