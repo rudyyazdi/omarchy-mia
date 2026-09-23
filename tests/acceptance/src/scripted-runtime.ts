@@ -61,16 +61,6 @@ export class ScriptedTurn {
     };
   }
 
-  /** Report the runtime spawned, as the real adapter does once the process starts; a turn that never calls it never started. */
-  spawn(): void {
-    this.emit({
-      type: "runtime_started",
-      pid: 4242,
-      launch: this.launch,
-      at: new Date().toISOString(),
-    });
-  }
-
   text(text: string): void {
     this.emit({ type: "text_delta", text, at: new Date().toISOString() });
   }

@@ -151,9 +151,12 @@ interface ConversationState {
   turnCount: number;
   /**
    * A runtime has started this conversation's session, so the next turn resumes it instead of creating it. Set
-   * when a turn's runtime_started commits, not from the turn count: a turn whose runtime never spawned (a failed
-   * launch, or an interruption before spawn) leaves no session to resume. A runtime that exits after spawning but
-   * before it persists the session still sets it.
+   * when a turn's runtime_init commits, not from the turn count: a turn whose runtime never spawned (a failed
+   * launch, or an interruption before spawn) leaves no session to resume. Keyed off the init event rather than
+   * the spawn, so a runtime that exits before its init (rejecting its arguments or settings) leaves the session
+   * to be created again; one that exits after init but before it persists the session still sets it. Only a
+   * committed init sets it, as memory follows the records: if that commit fails, the next turn tries to create a
+   * session that exists and fails, and the turn after resumes once its init commits.
    */
   sessionStarted: boolean;
   epoch: number;
@@ -1021,15 +1024,13 @@ export class Engine {
         match(event)
           .with({ type: "runtime_started" }, (started) => {
             this.record("runtime_started", { pid: started.pid, launch: started.launch }, opts);
-            this.onCommit(() => {
-              conversation.sessionStarted = true;
-            });
           })
           .with({ type: "runtime_init" }, ({ init }) => {
             this.record("runtime_init", init.evidence, opts);
             this.deps.writer.updateExecution(task.executionId, { reportedModel: init.model });
             this.onCommit(() => {
               task.reportedModel = init.model;
+              conversation.sessionStarted = true;
             });
           })
           .with({ type: "text_delta" }, (delta) => {
