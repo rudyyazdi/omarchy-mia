@@ -1,7 +1,15 @@
 import { z } from "zod";
-import type { ApprovalStatus, TaskStatus, ToolCallPolicy, ToolCallStatus } from "@mia/protocol";
+import type {
+  AckDisposition,
+  ApprovalStatus,
+  ErrorCode,
+  ErrorDisposition,
+  TaskStatus,
+  ToolCallPolicy,
+  ToolCallStatus,
+} from "@mia/protocol";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /** Logical records from docs/D1/CONVERSATION-RECORDS.md. Foreign keys are enforced per connection (see catalog.ts). */
 export const SCHEMA_SQL = `
@@ -141,16 +149,21 @@ CREATE INDEX IF NOT EXISTS events_caused_by ON events(caused_by_event_id);
 CREATE TABLE IF NOT EXISTS commands (
   id TEXT PRIMARY KEY,
   conversation_id TEXT,
-  client_id TEXT NOT NULL,
+  client_id TEXT NOT NULL REFERENCES clients(id),
   client_connection_id TEXT NOT NULL REFERENCES client_connections(id),
   client_command_id TEXT NOT NULL,
   type TEXT NOT NULL,
   payload_digest TEXT NOT NULL,
-  disposition TEXT NOT NULL,
-  error TEXT,
+  disposition TEXT NOT NULL CHECK (disposition IN ('received','accepted','rejected','failed')),
+  error_code TEXT,
+  error_message TEXT,
+  result TEXT,
   result_event_id TEXT REFERENCES events(id),
   received_at TEXT NOT NULL,
-  UNIQUE(client_connection_id, client_command_id)
+  CHECK ((error_code IS NULL) = (error_message IS NULL)),
+  CHECK ((disposition IN ('rejected','failed')) = (error_code IS NOT NULL)),
+  CHECK (result IS NULL OR (disposition = 'accepted' AND json_valid(result))),
+  UNIQUE(client_id, client_command_id)
 );
 
 CREATE TABLE IF NOT EXISTS tool_calls (
@@ -265,8 +278,15 @@ export type ExportTable = (typeof EXPORT_TABLES)[number];
 export type ConversationStatus = "active" | "closed";
 export type ExecutionStatus = "running" | "completed" | "failed" | "killed";
 export type ClientKind = "text-client";
-/** Duplicate delivery is an acknowledgement, not a new persisted command outcome. */
-export type CommandDisposition = "accepted" | "rejected";
+/**
+ * `received` is the pending state between recording a command and finishing it; the others are the outcome
+ * its ack reported, stored so a duplicate gets the same reply.
+ */
+export type CommandDisposition = "received" | AckDisposition;
+/** The reply a finished command's ack carried: what a duplicate of it is answered with. */
+export type CommandReply =
+  | { disposition: "accepted"; result: Record<string, unknown> | null }
+  | { disposition: ErrorDisposition; error: { code: ErrorCode; message: string } };
 export type ArtifactKind = "snapshot" | "tool_output" | "runtime_transcript" | "effort_evidence";
 export type ProvenanceRole =
   | "agent_prompt"
@@ -416,7 +436,10 @@ export interface CommandRow {
   type: string;
   payload_digest: string;
   disposition: CommandDisposition;
-  error: string | null;
+  error_code: ErrorCode | null;
+  error_message: string | null;
+  /** JSON object; only an accepted command has one. */
+  result: string | null;
   result_event_id: string | null;
   received_at: string;
 }

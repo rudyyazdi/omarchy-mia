@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Catalog } from "./catalog.ts";
+import type { CommandReply } from "./schema.ts";
 import { RecordWriter } from "./writer.ts";
 
 let dir: string;
@@ -112,22 +113,116 @@ describe("record writer", () => {
     expect(() =>
       writer.createApproval({ toolCallId: call, executionEpoch: 1, requestingEventId: null }),
     ).toThrow();
-    const first = writer.recordCommand({
+    const command = {
       connectionId: "conn-1",
       clientId: "client-1",
       clientCommandId: "cmd-1",
       type: "submit_text",
       payload: { text: "a" },
+    };
+    expect(writer.recordCommand(command).kind).toBe("new");
+    expect(writer.recordCommand({ ...command, payload: { text: "b" } })).toEqual({
+      kind: "conflict",
     });
-    expect(first.duplicate).toBe(false);
-    const dup = writer.recordCommand({
-      connectionId: "conn-1",
+  });
+
+  describe("commands", () => {
+    const command = (clientCommandId: string, connectionId = "conn-1") => ({
+      connectionId,
       clientId: "client-1",
-      clientCommandId: "cmd-1",
-      type: "submit_text",
-      payload: { text: "b" },
+      clientCommandId,
+      type: "start_conversation",
+      payload: {},
     });
-    expect(dup.duplicate).toBe(true);
-    if (dup.duplicate) expect(dup.sameDigest).toBe(false);
+    const recordNew = (clientCommandId: string): string => {
+      const recorded = writer.recordCommand(command(clientCommandId));
+      if (recorded.kind !== "new") throw new Error(`expected ${clientCommandId} to be new`);
+      return recorded.commandId;
+    };
+
+    beforeEach(() => {
+      writer.ensureClient("client-1", "text-client");
+      writer.openConnection({ connectionId: "conn-1", clientId: "client-1", build: {} });
+      writer.openConnection({ connectionId: "conn-2", clientId: "client-1", build: {} });
+    });
+
+    it("answers a message_id resent on another connection of the same client with its stored reply", () => {
+      const replies: CommandReply[] = [
+        { disposition: "accepted", result: { conversation_id: "conv_1" } },
+        { disposition: "accepted", result: null },
+        { disposition: "rejected", error: { code: "busy", message: "a task is running" } },
+        { disposition: "failed", error: { code: "internal", message: "broke after recording" } },
+      ];
+      for (const [index, reply] of replies.entries()) {
+        writer.finishCommand(recordNew(`cmd-${index}`), reply);
+        expect(writer.recordCommand(command(`cmd-${index}`, "conn-2"))).toEqual({
+          kind: "duplicate",
+          reply,
+        });
+      }
+    });
+
+    it("reports a command that was recorded but never finished as unfinished", () => {
+      const commandId = recordNew("cmd-1");
+      expect(writer.recordCommand(command("cmd-1", "conn-2"))).toEqual({
+        kind: "unfinished",
+        commandId,
+      });
+    });
+
+    it("treats a reused message_id with another command type as a conflict", () => {
+      recordNew("cmd-1");
+      expect(writer.recordCommand({ ...command("cmd-1"), type: "heartbeat" })).toEqual({
+        kind: "conflict",
+      });
+    });
+
+    it("reports a command whose stored reply cannot be read back as unfinished", () => {
+      const commandId = recordNew("cmd-1");
+      catalog.db
+        .prepare("UPDATE commands SET disposition = 'accepted', result = '[1]' WHERE id = ?")
+        .run(commandId);
+      expect(writer.recordCommand(command("cmd-1"))).toEqual({ kind: "unfinished", commandId });
+    });
+
+    it("redacts the stored reply", () => {
+      const secret = "sk-ant-abcdefghijklmnop";
+      writer.finishCommand(recordNew("cmd-1"), {
+        disposition: "rejected",
+        error: { code: "invalid_state", message: `bad key ${secret}` },
+      });
+      writer.finishCommand(recordNew("cmd-2"), {
+        disposition: "accepted",
+        result: { api_key: secret },
+      });
+      expect(
+        JSON.stringify(catalog.all("SELECT error_message, result FROM commands")),
+      ).not.toContain(secret);
+    });
+
+    it("refuses a row whose outcome and error disagree", () => {
+      const commandId = recordNew("cmd-1");
+      const update = (sql: string) => () => catalog.db.prepare(sql).run(commandId);
+      expect(update("UPDATE commands SET disposition = 'failed' WHERE id = ?")).toThrow(/CHECK/);
+      expect(
+        update(
+          "UPDATE commands SET disposition = 'accepted', error_code = 'busy', error_message = 'x' WHERE id = ?",
+        ),
+      ).toThrow(/CHECK/);
+      expect(
+        update(
+          "UPDATE commands SET disposition = 'rejected', result = '{}', error_code = 'busy', error_message = 'x' WHERE id = ?",
+        ),
+      ).toThrow(/CHECK/);
+    });
+
+    it("keeps message_ids of different clients apart", () => {
+      recordNew("cmd-1");
+      writer.ensureClient("client-2", "text-client");
+      writer.openConnection({ connectionId: "conn-3", clientId: "client-2", build: {} });
+      expect(
+        writer.recordCommand({ ...command("cmd-1", "conn-3"), clientId: "client-2" }).kind,
+      ).toBe("new");
+    });
   });
 });

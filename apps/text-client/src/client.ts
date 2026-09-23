@@ -35,8 +35,11 @@ const isEventOf =
 
 /**
  * Programmatic Mia client used by the terminal UI, the acceptance harness and the promptfoo provider.
- * Every command gets a unique message_id; resends reuse it (the server deduplicates). An abort while an
- * operation is still waiting rejects it with the signal's reason.
+ * Every command gets a unique message_id; a resend reuses it, and the server answers it with the original
+ * reply marked `duplicate` instead of running it again. The server keys that on `clientId`, which an instance
+ * keeps across `connect()` calls; a new instance (after a restart, say) without an explicit `clientId` gets
+ * a fresh one, so dedupe does not survive it. An abort while an operation is still waiting rejects it with
+ * the signal's reason.
  */
 export class MiaClient extends EventEmitter {
   readonly clientId: string;
@@ -213,8 +216,10 @@ export class MiaClient extends EventEmitter {
 
   async startConversation({ signal }: Cancellable = {}): Promise<string> {
     const ack = await this.send("start_conversation", {}, { signal });
-    if (ack.disposition === "rejected")
-      throw new Error(`start_conversation rejected: ${ack.error?.code}: ${ack.error?.message}`);
+    if (ack.disposition !== "accepted")
+      throw new Error(
+        `start_conversation ${ack.disposition}: ${ack.error?.code}: ${ack.error?.message}`,
+      );
     const fromResult = ack.result?.conversation_id;
     const id = typeof fromResult === "string" ? fromResult : this.conversationId;
     if (!id) throw new Error("server did not return a conversation id");

@@ -1,6 +1,7 @@
 export { emptySnapshotTables } from "./schema.ts";
 export type {
   ArtifactKind,
+  CommandReply,
   CaptureStatus,
   ExecutionStatus,
   ProvenanceEntryRow,
@@ -9,6 +10,7 @@ export type {
 export { Catalog, defaultStateDir, newId, nowIso } from "./catalog.ts";
 export { ObjectStore } from "./objects.ts";
 export { RecordWriter } from "./writer.ts";
+export type { RecordedCommand } from "./writer.ts";
 export { diagnosticsViews, listConversations, snapshotConversation, taskViews } from "./queries.ts";
 export type {
   ConversationSnapshot,

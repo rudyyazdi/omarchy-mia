@@ -3,7 +3,8 @@ import { createServer, type Socket } from "node:net";
 import { describe, expect, it } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
 import { ackEvent } from "./ack-fixture.ts";
-import { MiaClient } from "./client.ts";
+import { ClientCommandSchema } from "@mia/protocol";
+import { MiaClient, type AckPayload } from "./client.ts";
 
 const makeClient = (url = "ws://127.0.0.1:1") =>
   new MiaClient({
@@ -125,6 +126,32 @@ describe("client cancellation", () => {
       await expect(first).rejects.toBe(reason);
       socket.send(JSON.stringify(ackEvent("same_id")));
       await expect(second).resolves.toMatchObject({ disposition: "accepted" });
+    }));
+
+  it("starts a conversation from an accepted ack, including a duplicate one, and refuses a failed one", () =>
+    withConnectedClient(async (client, socket) => {
+      /** Answer the next command with an ack carrying `payload`. */
+      const answerNext = (payload: Omit<AckPayload, "command_id">) =>
+        socket.once("message", (data) => {
+          const command = ClientCommandSchema.parse(JSON.parse(data.toString("utf8")));
+          const ack = ackEvent(command.message_id);
+          socket.send(
+            JSON.stringify({ ...ack, payload: { command_id: command.message_id, ...payload } }),
+          );
+        });
+      answerNext({
+        disposition: "failed",
+        error: { code: "internal", message: "broke after recording" },
+      });
+      await expect(client.startConversation()).rejects.toThrow(
+        "start_conversation failed: internal",
+      );
+      answerNext({
+        disposition: "accepted",
+        result: { conversation_id: "conv_1" },
+        duplicate: true,
+      });
+      await expect(client.startConversation()).resolves.toBe("conv_1");
     }));
 
   it("does not send a command whose signal is already aborted", () =>

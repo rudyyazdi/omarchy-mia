@@ -133,6 +133,16 @@ export const ErrorCodeSchema = z.enum([
 ]);
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
 
+/**
+ * A command's outcome as its ack reports it. `failed` means the command was recorded and then handling broke:
+ * it may have taken effect, and it will not run again.
+ */
+export const AckDispositionSchema = z.enum(["accepted", "rejected", "failed"]);
+export type AckDisposition = z.infer<typeof AckDispositionSchema>;
+/** The dispositions whose ack carries an error. */
+export const ErrorDispositionSchema = AckDispositionSchema.exclude(["accepted"]);
+export type ErrorDisposition = z.infer<typeof ErrorDispositionSchema>;
+
 export const ToolCallStatusSchema = z.enum([
   "proposed",
   "awaiting_approval",
@@ -151,9 +161,11 @@ export type ToolCallStatus = z.infer<typeof ToolCallStatusSchema>;
 const eventPayloads = {
   ack: z.object({
     command_id: id,
-    disposition: z.enum(["accepted", "duplicate", "rejected"]),
+    disposition: AckDispositionSchema,
     error: z.object({ code: ErrorCodeSchema, message: z.string() }).optional(),
     result: z.record(z.string(), z.unknown()).optional(),
+    /** Set when this message_id was already recorded for the client: the ack repeats the stored reply. */
+    duplicate: z.literal(true).optional(),
   }),
   conversation_started: z.object({
     conversation_id: id,
