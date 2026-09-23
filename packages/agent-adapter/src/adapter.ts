@@ -335,6 +335,8 @@ export interface HookEvidence {
   records: Record<string, unknown>[];
   /** Lines that were not a JSON object, such as the truncated last line of a turn killed mid-write. */
   malformedLines: number;
+  /** Why an existing file could not be read (EACCES, EISDIR, EIO), in which case there are no records; else null. */
+  readError: string | null;
 }
 
 const parseHookLine = (line: string): Record<string, unknown> | null => {
@@ -347,13 +349,19 @@ const parseHookLine = (line: string): Record<string, unknown> | null => {
 };
 
 /**
- * Evidence is best-effort: a malformed line is counted and skipped rather than thrown, because a throw
- * here would keep the turn that wrote it from being recorded as finished.
+ * Evidence is best-effort: a malformed line is counted and skipped, and an unreadable file is reported,
+ * rather than thrown, because a throw here would keep the turn that wrote it from being recorded as finished.
  */
 export const readHookEvidence = (path: string): HookEvidence => {
-  const evidence: HookEvidence = { records: [], malformedLines: 0 };
+  const evidence: HookEvidence = { records: [], malformedLines: 0, readError: null };
   if (!existsSync(path)) return evidence;
-  for (const line of readFileSync(path, "utf8").split("\n")) {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    return { ...evidence, readError: errorMessage(error) };
+  }
+  for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     const record = parseHookLine(line);
     if (record) evidence.records.push(record);

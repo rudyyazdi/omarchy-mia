@@ -154,13 +154,13 @@ describe("streaming and commands", () => {
     await client.waitFor("task_finished");
   });
 
-  it("records a turn finished when its hook evidence ends in a truncated line", async () => {
+  /** Ends a turn after `writeEvidence` prepares its hook evidence path; returns the recorded effort evidence. */
+  const finishWithHookEvidence = async (
+    writeEvidence: (path: string) => void,
+  ): Promise<unknown> => {
     const { turn, taskId } = await submit("hello");
     turn.init();
-    writeFileSync(
-      join(turn.options.runtimeDir, "hook-evidence.jsonl"),
-      `${JSON.stringify({ effort: "medium" })}\n{"effort":"hi`,
-    );
+    writeEvidence(join(turn.options.runtimeDir, "hook-evidence.jsonl"));
     turn.end();
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("completed");
@@ -173,10 +173,23 @@ describe("streaming and commands", () => {
         taskId,
       )[0],
     );
-    expect(JSON.parse(execution.effort_evidence)).toMatchObject({
-      values: ["medium"],
-      samples: 1,
-      malformed_lines: 1,
+    return JSON.parse(execution.effort_evidence);
+  };
+
+  it("records a turn finished when its hook evidence ends in a truncated line", async () => {
+    const evidence = await finishWithHookEvidence((path) =>
+      writeFileSync(path, `${JSON.stringify({ effort: "medium" })}\n{"effort":"hi`),
+    );
+    expect(evidence).toMatchObject({ values: ["medium"], samples: 1, malformed_lines: 1 });
+  });
+
+  it("records a turn finished when its hook evidence cannot be read", async () => {
+    const evidence = await finishWithHookEvidence((path) => mkdirSync(path));
+    expect(evidence).toMatchObject({
+      values: [],
+      samples: 0,
+      read_error: expect.stringContaining("EISDIR"),
+      note: expect.stringContaining("hook evidence unreadable (EISDIR"),
     });
   });
 });

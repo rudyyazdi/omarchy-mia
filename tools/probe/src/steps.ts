@@ -194,6 +194,7 @@ export const effortControl = async (context: ProbeContext): Promise<void> => {
     exit,
     efforts: effortsOf(hooks.records),
     hook_evidence_malformed_lines: hooks.malformedLines,
+    hook_evidence_read_error: hooks.readError,
     stdout_lines: stdout.split("\n").filter(Boolean).length,
   };
   writeFileSync(join(runtimeDir, "control.stream.jsonl"), stdout, { mode: 0o600 });
