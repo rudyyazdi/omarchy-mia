@@ -4,7 +4,7 @@ Imports point down the layers: nothing imports a layer above itself, and nothing
 
 Which workspace sits in which layer is the `LAYERS` list in [`eslint.config.js`](../eslint.config.js). That list is the source: `npm run lint` turns it into `no-restricted-imports` overrides and fails on an upward or cross-workspace import, while a table here could only ever agree with it by hand.
 
-Layers 3 and 4 are entry points: only tests may import an app, and nothing imports a test or a tool.
+Layers 3 and 4 are the top layers: only tests may import an app, and nothing imports a test or a tool.
 
 ## When to split
 

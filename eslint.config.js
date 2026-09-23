@@ -26,7 +26,7 @@ const LAYERS = [
     workspaces: ["@mia/server", "@mia/text-client", "@mia/debug-cli", "@mia/probe"],
     mayImportAnything: false,
   },
-  // Layer 4: tests are the top entry point and forbid nothing, so they get no override.
+  // Layer 4: tests are the top layer and forbid nothing, so they get no override.
   {
     files: ["tests/*/**"],
     workspaces: ["@mia/acceptance", "@mia/fake-claude"],
@@ -114,7 +114,7 @@ export default tseslint.config(
     files: ["**/*.ts", "**/*.js", "**/*.mjs"],
     languageOptions: { globals: globals.node, ecmaVersion: 2025, sourceType: "module" },
     rules: {
-      // Repo style rules; each has a rationale in AGENTS.md.
+      // Enforces AGENTS.md, Style.
       "max-params": ["error", { max: 3 }],
       "no-nested-ternary": "error",
       "func-style": ["error", "expression"],
@@ -123,6 +123,7 @@ export default tseslint.config(
       "no-restricted-syntax": ["error", ...RESTRICTED_SYNTAX],
       "@typescript-eslint/no-non-null-assertion": "error",
       "@typescript-eslint/consistent-type-assertions": ["error", { assertionStyle: "never" }],
+      // Off: `type` and `interface` are both allowed.
       "@typescript-eslint/consistent-type-definitions": "off",
       "@typescript-eslint/no-unused-vars": [
         "error",
@@ -145,7 +146,7 @@ export default tseslint.config(
     },
   },
   {
-    // A main.ts only parses arguments and calls an exported function (AGENTS.md).
+    // Keeps entry points small; the rule is in AGENTS.md, Node.
     files: ["**/main.ts"],
     rules: { "max-lines": ["error", 60] },
   },
