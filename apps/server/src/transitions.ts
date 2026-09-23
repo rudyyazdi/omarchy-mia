@@ -85,7 +85,8 @@ const detailFor = (status: ToolCallStatus): string | undefined =>
  * A request identical to a revision already awaiting approval is a duplicate: it is refused without a second
  * approval, so a call never has two pending approvals and the first request stays held until the user
  * decides. Anything else (no revision yet, changed arguments, or a revision already released or refused)
- * proposes a new revision.
+ * proposes a new revision. Denying assumes the runtime still honours the first prompt: a runtime that gives
+ * up on a prompt aborts it, which abandons the held call, so its retry proposes afresh instead.
  */
 export type PermissionBinding<Latest> =
   | { kind: "reuse"; call: Latest }

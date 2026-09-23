@@ -207,6 +207,7 @@ describe("binding", () => {
     toolIdentity: "mcp__d1__change",
     digest: "d1",
   };
+  const held: typeof latest = { ...latest, status: "awaiting_approval" };
   const same = { toolIdentity: "mcp__d1__change", digest: "d1" };
 
   it("reuses the latest revision only while it is proposed with the same tool and arguments", () => {
@@ -222,13 +223,14 @@ describe("binding", () => {
   });
 
   it("refuses a request identical to one already awaiting approval, without a second approval", () => {
-    expect(bindPermissionRequest({ ...latest, status: "awaiting_approval" }, same)).toMatchObject({
+    expect(bindPermissionRequest(held, same)).toMatchObject({
       kind: "duplicate",
       settle: { behavior: "deny" },
     });
-    expect(
-      bindPermissionRequest({ ...latest, status: "awaiting_approval" }, { ...same, digest: "d2" }),
-    ).toEqual({ kind: "propose" });
+    expect(bindPermissionRequest(held, { ...same, digest: "d2" })).toEqual({ kind: "propose" });
+    expect(bindPermissionRequest(held, { ...same, toolIdentity: "mcp__d1__read" })).toEqual({
+      kind: "propose",
+    });
   });
 
   it("invalidates a held binding and its approval, and leaves a released one alone", () => {

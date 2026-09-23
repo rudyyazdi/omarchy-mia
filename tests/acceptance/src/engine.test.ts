@@ -252,6 +252,10 @@ describe("approval path", () => {
       ),
     ).toEqual([expect.stringContaining("(toolu_1) repeats a request already awaiting approval")]);
     expect(approvalStatuses()).toEqual(["pending"]);
+    // The refused request dropping its own prompt afterwards abandons nothing: the first one stays held.
+    must(turn.pendingAbandons[1], "refused prompt").abort();
+    await tick();
+    expect(approvalStatuses()).toEqual(["pending"]);
     const ack = await decide(taskId, requested.payload.approval_id, "approve");
     expect(ack.result?.released).toBe(true);
     expect((await held).behavior).toBe("allow");
