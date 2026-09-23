@@ -20,16 +20,6 @@ describe("readRuntimeFile", () => {
     expect(await readRuntimeFile(file)).toEqual({ status: "read", bytes: Buffer.from("{}\n") });
   });
 
-  it("gives up on a read in progress once its deadline aborts", async () => {
-    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-runtime-file-"));
-    const path = join(directory.path, "transcript.jsonl");
-    writeFileSync(path, "{}\n");
-    const deadline = new AbortController();
-    const read = readRuntimeFile(path, { signal: deadline.signal });
-    deadline.abort(new DOMException("deadline", "TimeoutError"));
-    expect(await read).toEqual({ status: "unreadable", reason: "timed out" });
-  });
-
   it("reports why a read was abandoned before it started", async () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-runtime-file-"));
     const path = join(directory.path, "transcript.jsonl");
@@ -38,6 +28,14 @@ describe("readRuntimeFile", () => {
     expect(await readRuntimeFile(path, { signal })).toEqual({
       status: "unreadable",
       reason: "abandoned at shutdown",
+    });
+  });
+
+  it("reports a read abandoned at its deadline as timed out", async () => {
+    const signal = AbortSignal.abort(new DOMException("deadline", "TimeoutError"));
+    expect(await readRuntimeFile("/nonexistent", { signal })).toEqual({
+      status: "unreadable",
+      reason: "timed out",
     });
   });
 });

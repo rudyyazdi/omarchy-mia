@@ -335,7 +335,7 @@ describe("streaming and commands", () => {
   ): Promise<unknown> => {
     const { turn, taskId } = await submit("hello");
     turn.init();
-    writeEvidence(join(turn.options.runtimeDir, "hook-evidence.jsonl"));
+    writeEvidence(turn.hookEvidencePath);
     turn.end();
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("completed");
@@ -365,9 +365,8 @@ describe("streaming and commands", () => {
    * Resolves once the engine has started that read.
    */
   const endHoldingHookEvidence = async (turn: ScriptedTurn, line: string) => {
-    const path = join(turn.options.runtimeDir, "hook-evidence.jsonl");
-    writeFileSync(path, line);
-    const held = ts.holdEvidenceRead(path);
+    writeFileSync(turn.hookEvidencePath, line);
+    const held = ts.holdEvidenceRead(turn.hookEvidencePath);
     turn.end();
     await held.started;
     return held;
@@ -375,8 +374,12 @@ describe("streaming and commands", () => {
 
   /** The transcript artifacts a task recorded. */
   const transcriptArtifacts = (taskId: string) =>
-    rows<{ capture_status: CaptureStatus; capture_reason: string | null }>(
-      `SELECT a.capture_status, a.capture_reason FROM artifacts a
+    rows<{
+      capture_status: CaptureStatus;
+      capture_reason: string | null;
+      object_digest: string | null;
+    }>(
+      `SELECT a.capture_status, a.capture_reason, a.object_digest FROM artifacts a
        JOIN artifact_links l ON l.artifact_id = a.id
        WHERE l.task_id = ? AND l.relation = 'runtime_transcript'`,
       taskId,
@@ -390,8 +393,7 @@ describe("streaming and commands", () => {
       const { turn, taskId } = await submit(`turn ${index}`);
       taskIds.push(taskId);
       turn.init();
-      const hookEvidence = join(turn.options.runtimeDir, "hook-evidence.jsonl");
-      if (!existsSync(hookEvidence)) execFileSync("mkfifo", [hookEvidence]);
+      execFileSync("mkfifo", [turn.hookEvidencePath]);
       turn.transcriptAs = "fifo";
       turn.end();
       await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
@@ -403,19 +405,18 @@ describe("streaming and commands", () => {
         {
           capture_status: "failed",
           capture_reason: expect.stringContaining("unreadable: not a regular file"),
+          object_digest: null,
         },
       ]);
     }
     const { turn, taskId } = await submit("and now?");
     turn.init();
-    const hookEvidence = join(turn.options.runtimeDir, "hook-evidence.jsonl");
-    rmSync(hookEvidence);
-    writeFileSync(hookEvidence, `${JSON.stringify({ effort: "medium" })}\n`);
+    writeFileSync(turn.hookEvidencePath, `${JSON.stringify({ effort: "medium" })}\n`);
     turn.end();
     await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
     expect(effortEvidence(taskId)).toMatchObject({ values: ["medium"], read_error: null });
     expect(transcriptArtifacts(taskId)).toEqual([
-      { capture_status: "retained", capture_reason: null },
+      { capture_status: "retained", capture_reason: null, object_digest: expect.any(String) },
     ]);
   });
 
@@ -493,13 +494,7 @@ describe("streaming and commands", () => {
     turn.end(); // a no-op once the kill ended it
     await closing;
     expect(taskStatus(taskId)).toBe("interrupted");
-    expect(
-      rows(
-        `SELECT a.capture_status FROM artifacts a JOIN artifact_links l ON l.artifact_id = a.id
-         WHERE l.task_id = ? AND l.relation = 'runtime_transcript'`,
-        taskId,
-      ),
-    ).toEqual([{ capture_status: "retained" }]);
+    expect(transcriptArtifacts(taskId)).toMatchObject([{ capture_status: "retained" }]);
   });
 
   /** Ends a turn after `prepare` has set it up to lose its transcript; returns the transcript artifacts. */
@@ -511,16 +506,7 @@ describe("streaming and commands", () => {
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("completed");
     expect(taskStatus(taskId)).toBe("completed");
-    return rows<{
-      capture_status: CaptureStatus;
-      capture_reason: string | null;
-      object_digest: null;
-    }>(
-      `SELECT a.capture_status, a.capture_reason, a.object_digest FROM artifacts a
-       JOIN artifact_links l ON l.artifact_id = a.id
-       WHERE l.task_id = ? AND l.relation = 'runtime_transcript'`,
-      taskId,
-    );
+    return transcriptArtifacts(taskId);
   };
 
   it("records a turn finished, and why its transcript is missing, when the transcript cannot be read", async () => {

@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach } from "vitest";
-import { readRuntimeFile, type Profile, type RuntimeFileReader } from "@mia/agent-adapter";
+import {
+  readRuntimeFile,
+  untilAborted,
+  type Profile,
+  type RuntimeFileReader,
+} from "@mia/agent-adapter";
 import { startServer, type MiaServer, type TurnRunner } from "@mia/server";
 import type { AckError, AckPayload } from "@mia/protocol";
 import { describeAck, MiaClient } from "@mia/text-client";
@@ -32,23 +37,6 @@ export interface HeldRead {
   started: Promise<void>;
   release(): void;
 }
-
-/** Resolves once `released` does or `signal` aborts, whichever is first. */
-const releasedOrAborted = async (
-  released: Promise<void>,
-  signal: AbortSignal | undefined,
-): Promise<void> => {
-  if (!signal) return released;
-  if (signal.aborted) return;
-  const aborted = Promise.withResolvers<undefined>();
-  const onAbort = () => aborted.resolve(undefined);
-  signal.addEventListener("abort", onAbort, { once: true });
-  try {
-    await Promise.race([released, aborted.promise]);
-  } finally {
-    signal.removeEventListener("abort", onAbort);
-  }
-};
 
 /** A test's own timeout bounds its waits; connecting gets a shorter deadline so a dead server fails fast. */
 const CONNECT_TIMEOUT_MS = 10_000;
@@ -146,7 +134,11 @@ export const startTestServer = async (
     if (hold) {
       holds.delete(path);
       hold.started();
-      await releasedOrAborted(hold.released, options.signal);
+      await untilAborted(
+        () => hold.released,
+        options.signal,
+        () => undefined,
+      );
     }
     return readRuntimeFile(path, options);
   };

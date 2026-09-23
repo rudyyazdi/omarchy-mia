@@ -8,7 +8,7 @@ import { errorMessage, redactString, type RuntimeCancellation } from "@mia/proto
 import type { ExecutionStatus } from "@mia/records";
 import type { ApprovalBridge, PermissionHandler } from "./bridge.ts";
 import type { RuntimeConfig } from "./config.ts";
-import { withinDeadline } from "./deadline.ts";
+import { untilAborted, withinDeadline } from "./deadline.ts";
 import { prepareLaunch, runtimeEnvironment, type LaunchPlan } from "./launch.ts";
 import { resolveExecutable } from "./resolve-executable.ts";
 import { ClaudeTranslator } from "./claude-translate.ts";
@@ -395,18 +395,20 @@ const abortReason = (reason: unknown): string =>
  * Opens without blocking and reads only a regular file. A blocking open of a FIFO waits for a writer that may
  * never come, and a read of one waits for data, each holding one of libuv's few worker threads meanwhile; a
  * runtime that leaves a FIFO on every turn would take one more each turn until every async fs call stalls.
+ * O_NOCTTY keeps a terminal device at the path from becoming the server's controlling terminal.
  */
 const readRegularFile = async (
   path: string,
   signal: AbortSignal | undefined,
 ): Promise<RuntimeFileRead> => {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY);
   try {
     if (!(await handle.stat()).isFile())
       return { status: "unreadable", reason: "not a regular file" };
     return { status: "read", bytes: await handle.readFile({ signal }) };
   } finally {
-    await handle.close();
+    // Nothing was written through this descriptor, so a failed close loses nothing the result depends on.
+    await handle.close().catch(() => undefined);
   }
 };
 
@@ -430,24 +432,17 @@ const readOrReport = async (
  * FIFO) and any other failure (EACCES, ENOTDIR) is reported. Asynchronous because the server reads at turn end
  * while it serves other connections.
  *
- * When `signal` aborts the read is unreadable at once, even if the `open()` or `read()` under it is blocked (a
- * regular file on a stale mount): `readFile`'s own signal is only checked between those calls. Nothing avoids
- * that blocked call, so each such abandoned read keeps its descriptor, and a libuv worker thread, until the
- * kernel returns, and then closes the descriptor.
+ * A read is never started under a signal that has already aborted, and is unreadable the moment `signal` aborts,
+ * even if the `open()` or `read()` under it is blocked (a regular file on a stale mount): `readFile`'s own signal
+ * is only checked between those calls. Nothing avoids that blocked call, so each such abandoned read keeps its
+ * descriptor, and a libuv worker thread, until the kernel returns, and then closes the descriptor.
  */
-export const readRuntimeFile: RuntimeFileReader = async (path, { signal } = {}) => {
-  const read = readOrReport(path, signal);
-  if (!signal) return read;
-  const abandoned = Promise.withResolvers<RuntimeFileRead>();
-  const onAbort = () =>
-    abandoned.resolve({ status: "unreadable", reason: abortReason(signal.reason) });
-  signal.addEventListener("abort", onAbort, { once: true });
-  try {
-    return await Promise.race([read, abandoned.promise]);
-  } finally {
-    signal.removeEventListener("abort", onAbort);
-  }
-};
+export const readRuntimeFile: RuntimeFileReader = (path, { signal } = {}) =>
+  untilAborted(
+    () => readOrReport(path, signal),
+    signal,
+    (reason) => ({ status: "unreadable", reason: abortReason(reason) }),
+  );
 
 /** Counts and skips malformed lines, such as the truncated last line of a turn killed mid-write. */
 const parseHookEvidence = (text: string): HookEvidence => {

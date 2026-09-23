@@ -102,6 +102,11 @@ export class ScriptedTurn {
     });
   }
 
+  /** Where this turn's hook evidence belongs: one file per turn, as the real launch names it. */
+  get hookEvidencePath(): string {
+    return join(this.options.runtimeDir, `turn-${this.options.turnIndex}.hooks.jsonl`);
+  }
+
   end(status: "completed" | "failed" = "completed", error: string | null = null): void {
     if (this.ended) return;
     this.ended = true;
@@ -144,7 +149,7 @@ export class ScriptedTurn {
       exit,
       error,
       streamLogPath,
-      hookEvidencePath: join(this.options.runtimeDir, "hook-evidence.jsonl"),
+      hookEvidencePath: this.hookEvidencePath,
       launch: {
         model: "scripted",
         effort: "medium",

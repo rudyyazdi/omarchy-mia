@@ -29,3 +29,4 @@ export type {
 } from "./adapter.ts";
 export type { RuntimeEvent, RuntimeInit, TurnSummary } from "./runtime-events.ts";
 export { LiveCallBudget } from "./budget.ts";
+export { untilAborted } from "./deadline.ts";
