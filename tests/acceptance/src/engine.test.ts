@@ -353,13 +353,15 @@ describe("approval path", () => {
     turn.end();
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("completed");
-    const calls = rows<{ runtime_call_id: string; status: string }>(
-      "SELECT runtime_call_id, status FROM tool_calls ORDER BY created_at",
+    // The refused call's error result stays linked to it, as its result, not as an unmatched one.
+    const calls = rows<{ runtime_call_id: string; status: string; has_result: number }>(
+      "SELECT runtime_call_id, status, result_event_id IS NOT NULL AS has_result FROM tool_calls ORDER BY created_at",
     );
     expect(calls).toEqual([
-      { runtime_call_id: "toolu_1", status: "completed" },
-      { runtime_call_id: "toolu_2", status: "denied" },
+      { runtime_call_id: "toolu_1", status: "completed", has_result: 1 },
+      { runtime_call_id: "toolu_2", status: "denied", has_result: 1 },
     ]);
+    expect(rows("SELECT id FROM events WHERE type = 'tool_result_unmatched'")).toHaveLength(0);
   });
 
   it("invalidates an approval when arguments change under the same runtime call id", async () => {
@@ -422,6 +424,73 @@ describe("approval path", () => {
     expect(stale.error?.code).toBe("invalid_state");
     turn.end();
     await client.waitFor("task_finished");
+  });
+
+  it("attaches a late stream line to the earlier revision it announces and keeps the later approval pending", async () => {
+    const { turn, taskId, held: first } = await submitHeldCall("change");
+    const second = turn.request("mcp__d1__change", { delta: 2 }, "toolu_1");
+    const requested2 = await client.waitFor(
+      "approval_requested",
+      (event) => event.payload.binding_revision === 2,
+    );
+    expect((await first).behavior).toBe("deny");
+    // The stream line for the first request's arguments arrives only now.
+    turn.propose("toolu_1", "mcp__d1__change", { delta: 1 });
+    const streamLine = must(
+      rows<{ id: string }>(
+        "SELECT id FROM events WHERE type = 'tool_proposed' ORDER BY sequence DESC LIMIT 1",
+      )[0],
+      "stream line event",
+    ).id;
+    expect(
+      rows<{ binding_revision: number; status: string; streamed: number }>(
+        "SELECT binding_revision, status, proposal_event_id = ? AS streamed FROM tool_calls WHERE runtime_call_id = 'toolu_1' ORDER BY binding_revision",
+        streamLine,
+      ),
+    ).toEqual([
+      { binding_revision: 1, status: "invalidated", streamed: 1 },
+      { binding_revision: 2, status: "awaiting_approval", streamed: 0 },
+    ]);
+    expect(approvalStatuses()).toEqual(["invalidated", "pending"]);
+    expect(taskStatus(taskId)).toBe("awaiting_approval");
+    const ack = await decide(taskId, requested2.payload.approval_id, "approve");
+    expect(ack.result?.released).toBe(true);
+    expect((await second).behavior).toBe("allow");
+    turn.end();
+    await client.waitFor("task_finished");
+  });
+
+  it("completes the released call, not a later stream binding under its call id, when the result arrives", async () => {
+    const { turn } = await submit("read");
+    turn.init();
+    expect((await turn.request("mcp__d1__read", { q: 1 }, "toolu_1")).behavior).toBe("allow");
+    turn.propose("toolu_1", "mcp__d1__change", { q: 1 });
+    turn.toolResult("toolu_1", "read");
+    turn.end();
+    await client.waitFor("task_finished");
+    expect(
+      rows<{ tool_identity: string; status: string; has_result: number }>(
+        "SELECT tool_identity, status, result_event_id IS NOT NULL AS has_result FROM tool_calls WHERE runtime_call_id = 'toolu_1' ORDER BY binding_revision",
+      ),
+    ).toEqual([
+      { tool_identity: "mcp__d1__read", status: "completed", has_result: 1 },
+      { tool_identity: "mcp__d1__change", status: "invalidated", has_result: 0 },
+    ]);
+  });
+
+  it("never settles a call Mia never released: a result for a streamed-only call is unmatched", async () => {
+    const { turn } = await submit("change");
+    turn.init();
+    turn.propose("toolu_1", "mcp__d1__change", { delta: 1 });
+    turn.toolResult("toolu_1", "ran anyway");
+    turn.end();
+    await client.waitFor("task_finished");
+    expect(
+      rows<{ status: string; has_result: number }>(
+        "SELECT status, result_event_id IS NOT NULL AS has_result FROM tool_calls",
+      ),
+    ).toEqual([{ status: "invalidated", has_result: 0 }]);
+    expect(rows("SELECT id FROM events WHERE type = 'tool_result_unmatched'")).toHaveLength(1);
   });
 
   it("refuses a repeated request for a call already awaiting approval and keeps one approval", async () => {

@@ -49,6 +49,7 @@ import { createConversationProvenance } from "./provenance.ts";
 import {
   bindPermissionRequest,
   bindStreamProposal,
+  bindToolResult,
   classifyActions,
   classifyTask,
   decideAbandonment,
@@ -992,8 +993,8 @@ export class Engine {
               },
               opts,
             );
-            const last = task.calls.get(proposed.runtimeCallId)?.at(-1);
-            const binding = bindStreamProposal(last, {
+            const revisions = task.calls.get(proposed.runtimeCallId) ?? [];
+            const binding = bindStreamProposal(revisions, {
               toolIdentity: proposed.toolIdentity,
               digest,
             });
@@ -1001,6 +1002,7 @@ export class Engine {
               this.deps.writer.updateToolCall(binding.call.id, { proposalEventId: proposal.id });
               return;
             }
+            const last = revisions.at(-1);
             if (last) this.supersede(task, last, { toolIdentity: proposed.toolIdentity, digest });
             const policy =
               this.deps.profile.runtime.toolPolicy[proposed.toolIdentity] ?? "unlisted";
@@ -1028,8 +1030,8 @@ export class Engine {
               },
               opts,
             );
-            const call = task.calls.get(toolResult.runtimeCallId)?.at(-1);
-            if (!call) {
+            const binding = bindToolResult(task.calls.get(toolResult.runtimeCallId) ?? []);
+            if (binding.kind === "unmatched") {
               this.record(
                 "tool_result_unmatched",
                 { runtime_call_id: toolResult.runtimeCallId },
@@ -1037,6 +1039,7 @@ export class Engine {
               );
               return;
             }
+            const { call } = binding;
             const status = statusAfterResult(call.status, toolResult.isError);
             this.deps.writer.updateToolCall(call.id, { status, resultEventId: result.id });
             if (status === "completed")
