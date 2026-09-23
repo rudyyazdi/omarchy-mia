@@ -2,6 +2,7 @@ import { writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigurationError, validateRuntimeConfig } from "@mia/agent-adapter";
+import { LIMITS, PROTOCOL_VERSION } from "@mia/protocol";
 import { ObjectStore } from "@mia/records";
 import type { AckPayload, MiaClient } from "@mia/text-client";
 import { ScriptedRuntime, type ScriptedTurn } from "./scripted-runtime.ts";
@@ -270,6 +271,25 @@ describe("streaming and commands", () => {
     const bad = client.waitFor("ack", (event) => event.payload.command_id === "unknown");
     client.sendRaw("{not json");
     expect(ackError((await bad).payload).code).toBe("invalid_message");
+    // The client drops any event its schema refuses, so receiving this ack at all shows the server
+    // did not echo a message_id the protocol forbids.
+    for (const messageId of ["", "x".repeat(LIMITS.maxIdChars + 1)]) {
+      const seen = new Set(client.events);
+      const unusable = client.waitFor(
+        "ack",
+        (event) => !seen.has(event) && event.payload.command_id === "unknown",
+      );
+      client.sendRaw(
+        JSON.stringify({
+          protocol_version: PROTOCOL_VERSION,
+          message_id: messageId,
+          client_id: client.clientId,
+          type: "start_conversation",
+          payload: {},
+        }),
+      );
+      expect(ackError((await unusable).payload).code).toBe("invalid_message");
+    }
     const big = await client.submitText("x".repeat(40_000));
     expect(big.disposition).toBe("rejected");
     expect(ackError(big).code).toBe("invalid_message");

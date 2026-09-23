@@ -1,6 +1,7 @@
 import {
   ClientCommandSchema,
   EnvelopeHeadSchema,
+  IdSchema,
   LIMITS,
   PROTOCOL_VERSION,
   type ClientCommand,
@@ -48,10 +49,10 @@ export const decodeEnvelope = (input: EnvelopeInput): Decoded => {
     return invalid(UNKNOWN_COMMAND_ID, "envelope is not valid JSON");
   }
   const head = EnvelopeHeadSchema.safeParse(json);
+  // Echo `message_id` only when it is a valid `id`: an ack carrying any other string would fail the
+  // client's own `ServerEventSchema`, so the sender would drop it and never learn why.
   const commandId =
-    head.success && typeof head.data.message_id === "string"
-      ? head.data.message_id
-      : UNKNOWN_COMMAND_ID;
+    IdSchema.safeParse(head.success ? head.data.message_id : undefined).data ?? UNKNOWN_COMMAND_ID;
   if (!head.success)
     return invalid(
       commandId,

@@ -3,6 +3,7 @@ export {
   EnvelopeHeadSchema,
   ErrorCodeSchema,
   ErrorDispositionSchema,
+  IdSchema,
   LIMITS,
   PROTOCOL_VERSION,
   ServerEventSchema,

@@ -1,4 +1,4 @@
-import { LIMITS, PROTOCOL_VERSION } from "@mia/protocol";
+import { IdSchema, LIMITS, PROTOCOL_VERSION } from "@mia/protocol";
 import { describe, expect, it } from "vitest";
 import { decodeEnvelope, type Decoded } from "./decode.ts";
 
@@ -84,12 +84,49 @@ describe("decodeEnvelope rejections", () => {
       message: "client_id changed within a connection",
     });
   });
+});
 
-  it("keeps the command id 'unknown' when the head carries a non-string message_id", () => {
-    const decoded = decodeText(envelope({ message_id: 7 }));
-    expect(decoded.ok).toBe(false);
-    if (decoded.ok) return;
-    expect(decoded.commandId).toBe("unknown");
+describe("decodeEnvelope command id", () => {
+  it.each([
+    ["a non-string", 7],
+    ["an empty", ""],
+    ["an over-long", "x".repeat(LIMITS.maxIdChars + 1)],
+  ])("acknowledges %s message_id as 'unknown', since no ack could carry it", (_, messageId) => {
+    const decoded = decodeText(envelope({ message_id: messageId }));
+    expect(decoded).toMatchObject({ ok: false, commandId: "unknown", code: "invalid_message" });
+  });
+
+  it("echoes a message_id of exactly the maximum length", () => {
+    const messageId = "x".repeat(LIMITS.maxIdChars);
+    expect(decodeText(envelope({ message_id: messageId }))).toMatchObject({
+      ok: true,
+      commandId: messageId,
+    });
+  });
+
+  const texts: [string, string, string | null][] = [
+    ["oversized", "x".repeat(LIMITS.maxEnvelopeBytes + 1), null],
+    ["not JSON", "{not json", null],
+    ["not a head", "[]", null],
+    ["wrong version", envelope({ protocol_version: 99 }), null],
+    ["wrong version, empty id", envelope({ protocol_version: 99, message_id: "" }), null],
+    ["bad payload", envelope({ type: "submit_text" }), null],
+    ["rebound client", envelope(), "client-B"],
+    ["numeric id", envelope({ message_id: 7 }), null],
+    ["empty id", envelope({ message_id: "" }), null],
+    ["over-long id", envelope({ message_id: "x".repeat(LIMITS.maxIdChars + 1) }), null],
+    ["valid", envelope(), null],
+  ];
+
+  // The ack's other fields are fixed by the gateway or typed by `Decoded`; the command id is the
+  // only part a client controls, so it is what every outcome must keep a valid protocol `id`.
+  it.each(texts)("yields a command id an ack can carry (%s frame)", (_, text, boundClientId) => {
+    expect(IdSchema.safeParse(decodeText(text, boundClientId).commandId).success).toBe(true);
+  });
+
+  it("yields a command id an ack can carry (binary frame)", () => {
+    const decoded = decodeEnvelope({ text: envelope(), isBinary: true, boundClientId: null });
+    expect(IdSchema.safeParse(decoded.commandId).success).toBe(true);
   });
 });
 
