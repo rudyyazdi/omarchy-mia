@@ -34,7 +34,11 @@ const isEventOf =
 export class MiaClient extends EventEmitter {
   readonly clientId: string;
   private socket: WebSocket | null = null;
-  private pendingAcks = new Map<string, (ack: AckPayload) => void>();
+  // Each waiter settles exactly once: by its ack, its deadline, or the socket closing first.
+  private pendingAcks = new Map<
+    string,
+    { acknowledge: (ack: AckPayload) => void; abandon: () => void }
+  >();
   readonly recentInteractionIds: string[] = [];
   readonly recentErrors: { at: string; message: string }[] = [];
   connectionState: ClientDiagnostics["connection_state"] = "disconnected";
@@ -67,6 +71,9 @@ export class MiaClient extends EventEmitter {
     socket.on("message", (data) => this.onMessage(data.toString("utf8")));
     socket.on("close", (code, reason) => {
       this.connectionState = "disconnected";
+      // No ack can arrive on a closed socket, so its waiters fail now rather than at their deadline.
+      for (const waiter of this.pendingAcks.values()) waiter.abandon();
+      this.pendingAcks.clear();
       this.emit("disconnected", { code, reason: reason.toString() });
     });
     socket.on("error", (error) => this.pushError(error.message));
@@ -93,7 +100,7 @@ export class MiaClient extends EventEmitter {
       const waiter = this.pendingAcks.get(serverEvent.payload.command_id);
       if (waiter) {
         this.pendingAcks.delete(serverEvent.payload.command_id);
-        waiter(serverEvent.payload);
+        waiter.acknowledge(serverEvent.payload);
       }
     }
     if (serverEvent.type === "conversation_started")
@@ -135,7 +142,11 @@ export class MiaClient extends EventEmitter {
       reject(new Error(`no acknowledgement for ${type} (${messageId}) within 30s`));
     };
     deadline.addEventListener("abort", onTimeout, { once: true });
-    this.pendingAcks.set(messageId, resolve);
+    this.pendingAcks.set(messageId, {
+      acknowledge: resolve,
+      abandon: () =>
+        reject(new Error(`connection closed before ${type} (${messageId}) was acknowledged`)),
+    });
     try {
       socket.send(JSON.stringify(envelope));
     } catch (error) {

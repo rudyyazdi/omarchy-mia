@@ -10,6 +10,12 @@ import { MiaClient } from "./client.ts";
 /** Where to connect: read from a server profile, or given directly. */
 export type ConnectionOptions = { config: string } | { url: string; secretFile: string };
 
+/** The streams the person types into and reads from; main.ts passes process.stdin and process.stdout. */
+export interface TextClientIo {
+  input: NodeJS.ReadableStream;
+  output: NodeJS.WritableStream & { isTTY?: boolean };
+}
+
 const ProfileConnectionSchema = z.object({
   server: z.object({ host: z.string(), port: z.number(), secretFile: z.string() }),
 });
@@ -31,10 +37,23 @@ const resolveConnection = (options: ConnectionOptions): { url: string; secretFil
 class Terminal {
   #rl: Interface | null = null;
   #streaming = false;
-  readonly #interactive = Boolean(process.stdout.isTTY);
+  readonly #output: TextClientIo["output"];
+  readonly #interactive: boolean;
 
+  constructor(output: TextClientIo["output"]) {
+    this.#output = output;
+    this.#interactive = output.isTTY === true;
+  }
+
+  /**
+   * Owns the prompt only while the interface is open: a closed interface throws on prompt(), and events and
+   * in-flight lines still report after it closes, so from then on writes go to the output alone.
+   */
   attach(rl: Interface): void {
     this.#rl = rl;
+    rl.once("close", () => {
+      this.#rl = null;
+    });
   }
 
   prompt(): void {
@@ -46,20 +65,20 @@ class Terminal {
       this.#clearPromptLine();
       this.#streaming = true;
     }
-    process.stdout.write(text);
+    this.#output.write(text);
   }
 
   out(line: string): void {
     this.#endStream();
     this.#clearPromptLine();
-    process.stdout.write(line + "\n");
+    this.#output.write(line + "\n");
     this.#redrawPrompt();
   }
 
   #clearPromptLine(): void {
     if (this.#rl && this.#interactive) {
-      clearLine(process.stdout, 0);
-      cursorTo(process.stdout, 0);
+      clearLine(this.#output, 0);
+      cursorTo(this.#output, 0);
     }
   }
 
@@ -69,7 +88,7 @@ class Terminal {
 
   #endStream(): void {
     if (!this.#streaming) return;
-    process.stdout.write("\n");
+    this.#output.write("\n");
     this.#streaming = false;
     this.#redrawPrompt();
   }
@@ -142,10 +161,7 @@ const renderEvents = (session: Session): void => {
     out(`✗ error ${event.payload.code}: ${event.payload.message}`),
   );
   client.on("client_error", (message: string) => out(`✗ client: ${message}`));
-  client.on("disconnected", () => {
-    out("connection closed");
-    process.exit(0);
-  });
+  client.on("disconnected", () => out("connection closed"));
 };
 
 /** Runs one typed line: plain text becomes a task, a slash command acts on the session. */
@@ -204,15 +220,31 @@ const handleLine = async (session: Session, text: string, quit: () => void): Pro
     .exhaustive();
 };
 
-/** Connects to the server, starts a conversation and runs the interactive prompt until the person quits. */
-export const runTextClient = async (options: ConnectionOptions): Promise<void> => {
+const startSession = async (client: MiaClient): Promise<string> => {
+  await client.connect();
+  try {
+    await client.sendDiagnostics();
+    return await client.startConversation();
+  } catch (error) {
+    client.close();
+    throw error;
+  }
+};
+
+/**
+ * Connects to the server, starts a conversation and handles typed lines, one at a time and in order, until the
+ * person quits, the input ends or the connection closes. It resolves once the last line has been handled and the
+ * connection is closed, and rejects if the session cannot start; the exit code is main.ts's to choose.
+ */
+export const runTextClient = async (
+  options: ConnectionOptions,
+  io: TextClientIo,
+): Promise<void> => {
   const { url, secretFile } = resolveConnection(options);
-  if (!existsSync(secretFile)) {
-    console.error(
+  if (!existsSync(secretFile))
+    throw new Error(
       `secret file ${secretFile} not found; start the server first (it creates the secret)`,
     );
-    process.exit(1);
-  }
   const commit =
     spawnSync("git", ["rev-parse", "--short", "HEAD"], { encoding: "utf8" }).stdout?.trim() || null;
   const client = new MiaClient({
@@ -222,27 +254,31 @@ export const runTextClient = async (options: ConnectionOptions): Promise<void> =
   });
   const session: Session = {
     client,
-    terminal: new Terminal(),
+    terminal: new Terminal(io.output),
     currentTask: null,
     pendingApprovals: new Map(),
   };
   const out = (line: string) => session.terminal.out(line);
   renderEvents(session);
+  // Listening before connecting means a close during setup is not missed. The promise never rejects.
+  const closed = Promise.withResolvers<undefined>();
+  client.once("disconnected", () => closed.resolve(undefined));
 
-  await client.connect();
-  await client.sendDiagnostics();
-  const conversationId = await client.startConversation();
+  const conversationId = await startSession(client);
   out(`connected to ${url}; conversation ${conversationId}`);
   out("type text to submit a task; /approve <id>, /reject <id>, /interrupt, /diag, /quit");
+  const rl = createInterface({ input: io.input, output: io.output, prompt: "mia> " });
+  session.terminal.attach(rl);
   const heartbeat = setInterval(() => void client.heartbeat().catch(() => undefined), 15_000);
+  // Ends the session from any side (/quit, the input ending, the connection closing); safe to repeat.
   const quit = () => {
     clearInterval(heartbeat);
+    rl.close();
     client.close();
   };
+  rl.once("close", quit);
+  closed.promise.then(quit).catch((error: unknown) => out(`✗ ${errorMessage(error)}`));
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: "mia> " });
-  session.terminal.attach(rl);
-  rl.prompt();
   const onLine = async (line: string): Promise<void> => {
     const text = line.trim();
     try {
@@ -254,9 +290,8 @@ export const runTextClient = async (options: ConnectionOptions): Promise<void> =
       session.terminal.prompt();
     }
   };
-  // The .catch covers the terminal itself failing, which onLine cannot report through it.
-  rl.on("line", (line) => {
-    onLine(line).catch((error: unknown) => console.error(`✗ ${errorMessage(error)}`));
-  });
-  rl.on("close", quit);
+  session.terminal.prompt();
+  // The loop ends when the interface closes, after the lines it had already read.
+  for await (const line of rl) await onLine(line);
+  await closed.promise;
 };

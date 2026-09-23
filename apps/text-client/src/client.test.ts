@@ -1,18 +1,8 @@
 import { once } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
-import { PROTOCOL_VERSION, type ServerEventOf } from "@mia/protocol";
+import { ackEvent } from "./ack-fixture.ts";
 import { MiaClient } from "./client.ts";
-
-const ackEvent = (commandId: string): ServerEventOf<"ack"> => ({
-  protocol_version: PROTOCOL_VERSION,
-  message_id: `event_${commandId}`,
-  conversation_id: null,
-  sequence: null,
-  server_time: new Date().toISOString(),
-  type: "ack",
-  payload: { command_id: commandId, disposition: "accepted" },
-});
 
 const makeClient = (url = "ws://127.0.0.1:1") =>
   new MiaClient({

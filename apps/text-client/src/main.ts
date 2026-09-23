@@ -1,5 +1,6 @@
 import { Command } from "commander";
-import { runTextClient } from "./repl.ts";
+import { errorMessage } from "@mia/protocol";
+import { runTextClient, type ConnectionOptions } from "./repl.ts";
 
 /**
  * Bad arguments exit 2 with commander's own help on stderr: the option list and the argument
@@ -28,6 +29,16 @@ const { url, secretFile, config } = program.opts<{
   config?: string;
 }>();
 
-if (config) await runTextClient({ config });
-else if (url && secretFile) await runTextClient({ url, secretFile });
-else usage();
+const connection = (): ConnectionOptions => {
+  if (config) return { config };
+  if (url && secretFile) return { url, secretFile };
+  return usage();
+};
+
+runTextClient(connection(), { input: process.stdin, output: process.stdout }).then(
+  () => process.exit(0),
+  (error: unknown) => {
+    console.error(`mia-client: ${errorMessage(error)}`);
+    process.exit(1);
+  },
+);
