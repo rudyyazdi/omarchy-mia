@@ -12,6 +12,7 @@ import { startFixture } from "@mia/controlled-mcp";
 import { errorMessage, isRecord } from "@mia/protocol";
 import { Catalog, exportConversation, snapshotConversation, verifyExport } from "@mia/records";
 import { loadProfile, startServer, type MiaServer } from "@mia/server";
+import { readScenarioName, type ScenarioName } from "./scenarios.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 const program = new Command()
@@ -33,6 +34,11 @@ const values = program.opts<{
   model: string;
   out?: string;
 }>();
+/** Named scenarios are checked before anything starts: promptfoo would silently match none. */
+const scenarios = values.scenarios?.split(",").map((value) => {
+  const read = readScenarioName(value);
+  return read.ok ? read.name : program.error(read.error, { exitCode: 2 });
+});
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const outDir = resolve(values.out ?? join(REPO_ROOT, ".mia-state", "live", stamp));
 mkdirSync(outDir, { recursive: true, mode: 0o700 });
@@ -63,7 +69,7 @@ interface RuntimeEvidence {
 }
 
 interface LiveRow {
-  scenario: string;
+  scenario: ScenarioName;
   repeat: number;
   lane: "L";
   pass: boolean;
@@ -186,7 +192,7 @@ const args = [
   values.repeat,
   "--no-progress-bar",
 ];
-if (values.scenarios) args.push("--filter-pattern", `^(${values.scenarios.split(",").join("|")})$`);
+if (scenarios) args.push("--filter-pattern", `^(${scenarios.join("|")})$`);
 log(`promptfoo ${args.join(" ")}`);
 const { promise: promptfooExited, resolve: resolveExit } = Promise.withResolvers<number>();
 const child = spawn(join(REPO_ROOT, "node_modules/.bin/promptfoo"), args, {
@@ -222,6 +228,8 @@ const PfOutputSchema = z.looseObject({
 const RuntimeIdentitySchema = z.looseObject({ runtime_version: z.string().optional() });
 
 const rows: LiveRow[] = [];
+/** Results whose scenario name is not declared; they cannot form a row, so they fail the run. */
+const unreadResults: string[] = [];
 if (existsSync(resultsPath)) {
   const raw = PfOutputSchema.parse(JSON.parse(readFileSync(resultsPath, "utf8")));
   const results = raw.results?.results ?? [];
@@ -229,9 +237,15 @@ if (existsSync(resultsPath)) {
     new Catalog(server1.profile.stateDirectory, { readonly: true }),
     new Catalog(server2.profile.stateDirectory, { readonly: true }),
   ];
-  const repeatCounters: Record<string, number> = {};
+  const repeatCounters: Partial<Record<ScenarioName, number>> = {};
   for (const result of results) {
-    const scenario = String(result.testCase?.vars?.scenario ?? result.vars?.scenario ?? "?");
+    const read = readScenarioName(result.testCase?.vars?.scenario ?? result.vars?.scenario);
+    if (!read.ok) {
+      unreadResults.push(read.error);
+      log(`skipping a result: ${read.error}`);
+      continue;
+    }
+    const scenario = read.name;
     const repeat = (repeatCounters[scenario] ?? 0) + 1;
     repeatCounters[scenario] = repeat;
     const evidence = decodeEvidence(result.response?.output);
@@ -334,6 +348,7 @@ const summary = {
   prompt_version: promptVersion,
   repeat: Number(values.repeat),
   promptfoo_exit: exitCode,
+  unread_results: unreadResults,
   rows,
 };
 writeLiveResults({ rows, summary, promptVersion, outDirAbs: outDir });
@@ -343,4 +358,4 @@ log(
 await server1.close();
 await server2.close();
 await fixture.close();
-process.exit(exitCode === 0 && rows.every((row) => row.pass) ? 0 : 1);
+process.exit(exitCode === 0 && unreadResults.length === 0 && rows.every((row) => row.pass) ? 0 : 1);
