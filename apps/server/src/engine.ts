@@ -149,6 +149,16 @@ interface ConversationState {
   /** Retained copy of the agent prompt used for every turn of this conversation. */
   promptFile: string;
   turnCount: number;
+  /**
+   * A runtime has started this conversation's session, so the next turn resumes it instead of creating it. Set
+   * when a turn's runtime_init commits, not from the turn count: a turn whose runtime never spawned (a failed
+   * launch, or an interruption before spawn) leaves no session to resume. Keyed off the init event rather than
+   * the spawn, so a runtime that exits before its init (rejecting its arguments or settings) leaves the session
+   * to be created again; one that exits after init but before it persists the session still sets it. Only a
+   * committed init sets it, as memory follows the records: if that commit fails, the next turn tries to create a
+   * session that exists and fails, and the turn after resumes once its init commits.
+   */
+  sessionStarted: boolean;
   epoch: number;
   /** Mia-authored note carried into the next runtime turn after an interruption or unknown outcome. */
   pendingNote: string | null;
@@ -464,6 +474,7 @@ export class Engine {
           directory: conv.directory,
           promptFile,
           turnCount: 0,
+          sessionStarted: false,
           epoch: 0,
           pendingNote: null,
         };
@@ -582,7 +593,7 @@ export class Engine {
     const handle = this.deps.adapter.submitTurn({
       text: runtimePrompt,
       runtimeConversationId: conversation.runtimeConversationId,
-      firstTurn: turnIndex === 1,
+      firstTurn: !conversation.sessionStarted,
       runtimeDir: resolve(conversation.directory, "runtime"),
       turnIndex,
       agentPromptFile: conversation.promptFile,
@@ -1019,6 +1030,7 @@ export class Engine {
             this.deps.writer.updateExecution(task.executionId, { reportedModel: init.model });
             this.onCommit(() => {
               task.reportedModel = init.model;
+              conversation.sessionStarted = true;
             });
           })
           .with({ type: "text_delta" }, (delta) => {

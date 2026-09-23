@@ -1192,6 +1192,48 @@ describe("interruption path", () => {
   });
 });
 
+describe("runtime session", () => {
+  /** Once `first` has finished, the next turn runs in the same session, resuming it or creating it. */
+  const expectNextTurnSession = async (
+    first: { turn: ScriptedTurn; taskId: string },
+    resume: boolean,
+  ) => {
+    await client.waitFor("task_finished");
+    const { turn: next } = await submit("second");
+    expect(next.launch.resume).toBe(resume);
+    expect(next.options.runtimeConversationId).toBe(first.turn.options.runtimeConversationId);
+    next.end();
+    await client.waitFor("task_finished", (event) => event.payload.task_id !== first.taskId);
+  };
+
+  it("creates the session again on the turn after one whose runtime never started", async () => {
+    const first = await submit("first");
+    expect(first.turn.launch.resume).toBe(false);
+    await client.interrupt(first.taskId);
+    expect((await client.waitFor("task_finished")).payload.status).toBe("interrupted");
+    await expectNextTurnSession(first, false);
+  });
+
+  it("creates the session again on the turn after one whose runtime exited before its init", async () => {
+    const first = await submit("first");
+    first.turn.emit({
+      type: "runtime_started",
+      pid: 4242,
+      launch: first.turn.launch,
+      at: new Date().toISOString(),
+    });
+    first.turn.end("failed", "invalid settings");
+    await expectNextTurnSession(first, false);
+  });
+
+  it("resumes the session on the turn after one whose runtime reported its init", async () => {
+    const first = await submit("first");
+    first.turn.init();
+    first.turn.end();
+    await expectNextTurnSession(first, true);
+  });
+});
+
 describe("configuration and provenance", () => {
   it("records the runtime identity probed at startup, not at each conversation start", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mia-identity-"));

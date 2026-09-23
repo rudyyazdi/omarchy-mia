@@ -19,6 +19,7 @@ import { retainStdout } from "./transcript.ts";
 export interface TurnOptions {
   text: string;
   runtimeConversationId: string;
+  /** True creates the runtime session (`--session-id`); false resumes it (`--resume`), so it must already exist. */
   firstTurn: boolean;
   runtimeDir: string;
   turnIndex: number;

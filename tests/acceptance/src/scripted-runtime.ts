@@ -46,6 +46,21 @@ export class ScriptedTurn {
     this.options.onEvent(event);
   }
 
+  /** What the real adapter would have launched: `resume` is whether it passes `--resume` or `--session-id`. */
+  get launch(): TurnResult["launch"] {
+    return {
+      model: "scripted",
+      effort: "medium",
+      session_id: this.options.runtimeConversationId,
+      resume: !this.options.firstTurn,
+      builtin_tools: [],
+      mcp_servers: ["d1", "mia_approval"],
+      permission_prompt_tool: "mcp__mia_approval__request",
+      settings: {},
+      mcp_config: {},
+    };
+  }
+
   text(text: string): void {
     this.emit({ type: "text_delta", text, at: new Date().toISOString() });
   }
@@ -150,17 +165,7 @@ export class ScriptedTurn {
       error,
       streamLogPath,
       hookEvidencePath: this.hookEvidencePath,
-      launch: {
-        model: "scripted",
-        effort: "medium",
-        session_id: this.options.runtimeConversationId,
-        resume: !this.options.firstTurn,
-        builtin_tools: [],
-        mcp_servers: ["d1", "mia_approval"],
-        permission_prompt_tool: "mcp__mia_approval__request",
-        settings: {},
-        mcp_config: {},
-      },
+      launch: this.launch,
       init: this.reportedInit,
       interrupted: this.interrupted,
       runtimeCancellation,
