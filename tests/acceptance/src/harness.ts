@@ -12,6 +12,8 @@ export interface TestServer {
   server: MiaServer;
   profile: Profile;
   dir: string;
+  /** What the server logged, in order: how a test observes a loss the records cannot hold. */
+  logs: readonly string[];
   connect(clientId?: string): Promise<MiaClient>;
   catalog(): Catalog;
   close(): Promise<void>;
@@ -85,6 +87,7 @@ export const startTestServer = async (
     server,
     profile,
     dir,
+    logs,
     connect: async (clientId?: string) => {
       const client = new MiaClient({
         url: server.gateway.url,

@@ -87,6 +87,31 @@ const failNextCommit = (): void => {
   };
 };
 
+/** Make every object write fail: a file where the object store stages its writes. */
+const failObjectWrites = (): void => {
+  const { staging } = ts.server.catalog.paths;
+  rmSync(staging, { recursive: true });
+  writeFileSync(staging, "");
+};
+
+/** Make inserting an artifact link with `relation` fail, after the rows before it are written, when `when` holds. */
+const failArtifactLinks = (relation: string, when: string): void => {
+  ts.server.catalog.db.exec(`CREATE TRIGGER fail_${relation}_link BEFORE INSERT ON artifact_links
+    WHEN NEW.relation = '${relation}' AND ${when}
+    BEGIN SELECT RAISE(ABORT, 'simulated link failure'); END`);
+};
+
+/** Write a file into the profile's output directory, where a declared tool output may be retained from. */
+const writeOutputFile = (name: string, text: string): string => {
+  const outDir = must(ts.profile.runtime.outputDirectories[0], "output directory");
+  mkdirSync(outDir, { recursive: true });
+  const file = join(outDir, name);
+  writeFileSync(file, text);
+  return file;
+};
+
+const countRows = (table: string): number => rows(`SELECT 1 FROM ${table}`).length;
+
 /** Make every delivery of one event type to the client throw, as a failing socket would. */
 const failDelivery = (type: string): void => {
   const engine = ts.server.engine;
@@ -247,12 +272,7 @@ describe("streaming and commands", () => {
   });
 
   it("records a turn finished, and why its transcript is missing, when the transcript cannot be stored", async () => {
-    const transcripts = await finishLosingTranscript(() => {
-      // A file where the object store stages its writes makes every object write fail.
-      const { staging } = ts.server.catalog.paths;
-      rmSync(staging, { recursive: true });
-      writeFileSync(staging, "");
-    });
+    const transcripts = await finishLosingTranscript(failObjectWrites);
     expect(transcripts).toEqual([
       {
         capture_status: "failed",
@@ -262,18 +282,11 @@ describe("streaming and commands", () => {
     ]);
   });
 
-  /** Make linking a runtime transcript fail after its object and artifact rows are written, when `when` holds. */
-  const failTranscriptLinks = (when: string): void => {
-    ts.server.catalog.db.exec(`CREATE TRIGGER fail_transcript_link BEFORE INSERT ON artifact_links
-      WHEN NEW.relation = 'runtime_transcript' AND ${when}
-      BEGIN SELECT RAISE(ABORT, 'simulated link failure'); END`);
-  };
-  const countRows = (table: string): number => rows(`SELECT 1 FROM ${table}`).length;
-
   it("undoes a transcript's partial rows when its retention fails midway, and records it failed", async () => {
     let objectsBefore = 0;
     const transcripts = await finishLosingTranscript(() => {
-      failTranscriptLinks(
+      failArtifactLinks(
+        "runtime_transcript",
         "(SELECT capture_status FROM artifacts WHERE id = NEW.artifact_id) = 'retained'",
       );
       objectsBefore = countRows("objects");
@@ -290,7 +303,9 @@ describe("streaming and commands", () => {
   });
 
   it("records a turn finished when not even its failed transcript can be recorded", async () => {
-    const transcripts = await finishLosingTranscript(() => failTranscriptLinks("1"));
+    const transcripts = await finishLosingTranscript(() =>
+      failArtifactLinks("runtime_transcript", "1"),
+    );
     expect(transcripts).toEqual([]);
     expect(rows("SELECT 1 FROM artifacts WHERE kind = 'runtime_transcript'")).toHaveLength(0);
   });
@@ -815,10 +830,7 @@ describe("configuration and provenance", () => {
   });
 
   it("registers declared tool outputs inside the output directory and ignores unmatched calls", async () => {
-    const outDir = must(ts.profile.runtime.outputDirectories[0], "output directory");
-    mkdirSync(outDir, { recursive: true });
-    const file = join(outDir, "result.txt");
-    writeFileSync(file, "D1");
+    const file = writeOutputFile("result.txt", "D1");
     const { turn, taskId } = await submit("artifact");
     turn.init();
     const decision = turn.request(
@@ -914,5 +926,82 @@ describe("configuration and provenance", () => {
     expect(rows("SELECT id FROM artifact_links WHERE relation = 'task_output'")).toHaveLength(0);
     expect(rows("SELECT id FROM events WHERE type = 'artifact_registered'")).toHaveLength(0);
     expect(rows("SELECT id FROM events WHERE type = 'tool_result'")).toHaveLength(4);
+  });
+
+  /**
+   * Complete one approved call whose result declares a file in the output directory, after `prepare` has set
+   * up its retention to fail. The call and task still complete; returns the file's digest and its artifacts.
+   */
+  const completeLosingToolOutput = async (prepare: () => void) => {
+    const file = writeOutputFile("result.txt", "D1");
+    const { turn, taskId, held, requested } = await submitHeldCall(
+      "artifact",
+      "mcp__d1__artifact",
+      { name: "result.txt" },
+    );
+    await decide(taskId, requested.payload.approval_id, "approve");
+    await held;
+    prepare();
+    turn.toolResult("toolu_1", JSON.stringify({ artifact: { path: file, name: "result.txt" } }));
+    turn.end();
+    const finished = await client.waitFor("task_finished");
+    expect(finished.payload.status).toBe("completed");
+    expect(rows("SELECT status FROM tool_calls")).toEqual([{ status: "completed" }]);
+    expect(rows("SELECT 1 FROM events WHERE type = 'tool_result'")).toHaveLength(1);
+    expect(rows("SELECT 1 FROM events WHERE type = 'artifact_registered'")).toHaveLength(0);
+    const artifacts = rows<{
+      capture_status: string;
+      capture_reason: string | null;
+      object_digest: string | null;
+      external_locator: string | null;
+    }>(
+      "SELECT capture_status, capture_reason, object_digest, external_locator FROM artifacts WHERE kind = 'tool_output'",
+    );
+    return { file, digest: ObjectStore.digestOf(Buffer.from("D1")), artifacts };
+  };
+
+  it("records a tool result, and why its output is missing, when the output cannot be stored", async () => {
+    const { file, artifacts } = await completeLosingToolOutput(failObjectWrites);
+    expect(artifacts).toEqual([
+      {
+        capture_status: "failed",
+        capture_reason: expect.stringMatching(/^not retained: EEXIST: /),
+        object_digest: null,
+        external_locator: file,
+      },
+    ]);
+    expect(
+      rows(
+        "SELECT l.relation FROM artifact_links l JOIN artifacts a ON a.id = l.artifact_id WHERE a.kind = 'tool_output'",
+      ),
+    ).toEqual([{ relation: "tool_result" }]);
+  });
+
+  it("undoes a tool output's partial rows when its retention fails midway, and records it failed", async () => {
+    const { file, digest, artifacts } = await completeLosingToolOutput(() =>
+      failArtifactLinks(
+        "task_output",
+        "(SELECT kind FROM artifacts WHERE id = NEW.artifact_id) = 'tool_output'",
+      ),
+    );
+    expect(artifacts).toEqual([
+      {
+        capture_status: "failed",
+        capture_reason: expect.stringContaining("not retained: simulated link failure"),
+        object_digest: null,
+        external_locator: file,
+      },
+    ]);
+    expect(rows("SELECT 1 FROM objects WHERE digest = ?", digest)).toHaveLength(0);
+  });
+
+  it("records a tool result when not even its failed output can be recorded", async () => {
+    const { file, artifacts } = await completeLosingToolOutput(() =>
+      failArtifactLinks("tool_result", "1"),
+    );
+    expect(artifacts).toEqual([]);
+    expect(ts.logs).toContain(
+      `tool output ${file} lost, not retained: simulated link failure; not recorded: simulated link failure`,
+    );
   });
 });
