@@ -20,6 +20,7 @@ import {
   ackResult,
   must,
   mustString,
+  startTestServer,
   testProfile,
   tick,
   useScriptedSession,
@@ -1069,13 +1070,27 @@ describe("configuration and provenance", () => {
         `#!/bin/sh\nread -r version < '${versionFile}'\necho "$version"\n`,
         { mode: 0o755 },
       );
-      await restartSession({ executable });
-      writeFileSync(versionFile, "2.0.0 (Claude Code)\n");
-      await client.startConversation();
-      const versions = rows<{ version: string | null }>(
-        "SELECT version FROM provenance_entries WHERE role = 'runtime_identity'",
-      ).map((row) => row.version);
-      expect(versions).toEqual(["1.0.0 (Claude Code)", "1.0.0 (Claude Code)"]);
+      const server = await startTestServer(new ScriptedRuntime(), { executable });
+      try {
+        // Upgraded after startup but before any conversation: a probe deferred to the first start would see it.
+        writeFileSync(versionFile, "2.0.0 (Claude Code)\n");
+        const identityClient = await server.connect();
+        await identityClient.startConversation();
+        await identityClient.startConversation();
+        const catalog = server.catalog();
+        try {
+          const versions = catalog
+            .all<{
+              version: string | null;
+            }>("SELECT version FROM provenance_entries WHERE role = 'runtime_identity'")
+            .map((row) => row.version);
+          expect(versions).toEqual(["1.0.0 (Claude Code)", "1.0.0 (Claude Code)"]);
+        } finally {
+          catalog.close();
+        }
+      } finally {
+        await server.close();
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

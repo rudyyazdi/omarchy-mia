@@ -29,7 +29,8 @@ export interface ProvenanceSummary {
 }
 
 /**
- * Snapshot everything that shaped this conversation, immutably, at creation time. Later edits to the
+ * Snapshot everything that shaped this conversation, immutably, at creation time, except the runtime and
+ * build identity, which record the server as it was at startup (see `ServerIdentity`). Later edits to the
  * prompt, configuration or source tree do not change retained objects.
  */
 export const createConversationProvenance = (input: {

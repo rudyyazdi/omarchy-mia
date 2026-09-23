@@ -70,7 +70,8 @@ export const testProfile = (
     server: { host: "127.0.0.1", port: 0, secretFile: join(dir, "state", "client-secret") },
     runtime: {
       kind: "claude-code",
-      executable: "claude",
+      // Never resolvable, so starting a test server does not probe a real Claude Code on the machine.
+      executable: "mia-test-runtime-not-installed",
       model: "scripted-model",
       effort: "medium",
       workingDirectory: join(dir, "work"),

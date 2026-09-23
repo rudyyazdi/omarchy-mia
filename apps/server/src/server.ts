@@ -12,6 +12,7 @@ import { Catalog, RecordWriter } from "@mia/records";
 import { collectBuildInfo } from "./build-info.ts";
 import { Engine, type TurnRunner } from "./engine.ts";
 import { startGateway, type GatewayHandle } from "./gateway.ts";
+import type { ServerIdentity } from "./provenance.ts";
 
 export interface MiaServer {
   profile: Profile;
@@ -61,7 +62,7 @@ export const startServer = async (input: {
   const profile = resolveProfile(input);
   const log = input.log ?? ((message: string) => process.stderr.write(`[mia-server] ${message}\n`));
   // Synchronous child processes are acceptable here only because nothing is serving yet.
-  const identity = {
+  const identity: ServerIdentity = {
     runtime: probeStaticCapabilities(profile.runtime, input.env),
     build: collectBuildInfo("mia-server", SOURCE_ROOT),
   };
