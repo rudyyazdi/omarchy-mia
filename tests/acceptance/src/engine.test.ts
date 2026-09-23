@@ -57,6 +57,22 @@ const submitHeldCall = async (
 const decide = (taskId: string, approvalId: string, decision: "approve" | "reject") =>
   client.decide({ taskId: taskId, approvalId: approvalId, decision: decision });
 
+/**
+ * Make the next catalog transaction do its work and then fail to commit, so it rolls back after the engine
+ * has run everything it runs inside a transaction.
+ */
+const failNextCommit = (): void => {
+  const catalog = ts.server.catalog;
+  const original = catalog.transaction.bind(catalog);
+  catalog.transaction = <T>(fn: () => T): T => {
+    catalog.transaction = original;
+    return original(() => {
+      fn();
+      throw new Error("simulated commit failure");
+    });
+  };
+};
+
 /** Approval statuses in catalog order: how these tests show that nothing was authorised. */
 const approvalStatuses = (): string[] =>
   rows<{ status: string }>("SELECT status FROM approvals").map((row) => row.status);
@@ -261,16 +277,7 @@ describe("approval path", () => {
 
   it("keeps the call held when the decision cannot be persisted", async () => {
     const { turn, taskId, held, requested } = await submitHeldCall("change");
-    const catalog = ts.server.catalog;
-    const original = catalog.transaction.bind(catalog);
-    let failed = false;
-    catalog.transaction = <T>(fn: () => T): T => {
-      if (!failed) {
-        failed = true;
-        throw new Error("simulated disk failure");
-      }
-      return original(fn);
-    };
+    failNextCommit();
     const ack = await decide(taskId, requested.payload.approval_id, "approve");
     expect(ack.disposition).toBe("rejected");
     expect(ack.error?.code).toBe("record_failure");
@@ -282,6 +289,41 @@ describe("approval path", () => {
     expect((await held).behavior).toBe("allow");
     turn.end();
     await client.waitFor("task_finished");
+  });
+
+  it("releases a committed decision even when delivering it to the client fails", async () => {
+    const { turn, taskId, held, requested } = await submitHeldCall("change");
+    const engine = ts.server.engine;
+    const send = engine.send;
+    engine.send = (connectionId, event) => {
+      if (event.type === "approval_resolved") throw new Error("simulated socket failure");
+      send(connectionId, event);
+    };
+    const dispatched = client.waitFor(
+      "tool_call",
+      (event) => event.payload.status === "dispatched",
+    );
+    expect(await decide(taskId, requested.payload.approval_id, "approve")).toMatchObject({
+      disposition: "accepted",
+      result: { released: true },
+    });
+    expect((await held).behavior).toBe("allow");
+    await dispatched;
+    expect(approvalStatuses()).toEqual(["approved"]);
+    turn.end();
+    await client.waitFor("task_finished");
+  });
+
+  it("leaves no call behind when a permission request cannot be recorded", async () => {
+    const { turn } = await submit("read");
+    turn.init();
+    failNextCommit();
+    const read = await turn.request("mcp__d1__read", {}, "toolu_1");
+    expect(read.behavior).toBe("deny");
+    turn.end();
+    const finished = await client.waitFor("task_finished");
+    expect(finished.payload.status).toBe("completed");
+    expect(rows("SELECT id FROM tool_calls")).toHaveLength(0);
   });
 
   it("treats disconnection as no decision and keeps the pending record", async () => {
@@ -308,6 +350,21 @@ describe("approval path", () => {
 });
 
 describe("interruption path", () => {
+  it("keeps the gate open and the approval pending when an interruption cannot be recorded", async () => {
+    const { turn, taskId, held, requested } = await submitHeldCall("change");
+    failNextCommit();
+    const ack = await client.interrupt(taskId);
+    expect(ack.error?.code).toBe("record_failure");
+    await tick();
+    expect(turn.interrupted).toBe(false);
+    expect(turn.decisions).toHaveLength(0);
+    expect(approvalStatuses()).toEqual(["pending"]);
+    await decide(taskId, requested.payload.approval_id, "approve");
+    expect((await held).behavior).toBe("allow");
+    turn.end();
+    expect((await client.waitFor("task_finished")).payload.status).toBe("outcome_unknown");
+  });
+
   it("interrupt before release: gate closes, approval is stale, nothing dispatches", async () => {
     const { taskId, held, requested } = await submitHeldCall("change");
     const ack = await client.interrupt(taskId);
@@ -386,6 +443,20 @@ describe("interruption path", () => {
     expect(
       outcome.payload.actions.find((action) => action.tool_identity === "mcp__d1__change")?.status,
     ).toBe("blocked_gate");
+  });
+
+  it("reports unknown when a released call's result cannot be recorded", async () => {
+    const { turn } = await submit("read");
+    turn.init();
+    expect((await turn.request("mcp__d1__read", {}, "toolu_1")).behavior).toBe("allow");
+    failNextCommit();
+    turn.toolResult("toolu_1", "ok");
+    turn.end();
+    const finished = await client.waitFor("task_finished");
+    expect(finished.payload.status).toBe("outcome_unknown");
+    expect(must(rows<{ status: string }>("SELECT status FROM tool_calls")[0]).status).toBe(
+      "unknown",
+    );
   });
 
   it("reports unknown when a released call never returns a result", async () => {
