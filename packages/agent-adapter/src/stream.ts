@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { errorMessage, redactString, redactValue } from "@mia/protocol";
+import { errorMessage, redactSensitivePairs, redactString, redactValue } from "@mia/protocol";
 
 /**
  * Loose schemas for the Claude Code stream-json output. Only the fields Mia relies on are typed;
@@ -166,12 +166,13 @@ export const parseStreamLine = (line: string): ParsedLine | null => {
 /**
  * The line as it may be retained or shown: a line that parsed as JSON is redacted by key and by value,
  * even when it failed its schema, because a credential under a sensitive key need not look like a secret.
- * Only a line that is not JSON falls back to value redaction. The redacted form of a JSON line is
- * re-serialised, not verbatim: duplicate keys collapse and numbers beyond double precision round.
+ * A line that is not JSON, typically one cut short when the runtime died mid-write, is redacted by key as
+ * text (`redactSensitivePairs`) and by value. The redacted form of a JSON line is re-serialised, not
+ * verbatim: duplicate keys collapse and numbers beyond double precision round.
  */
 export const redactLine = (parsed: ParsedLine): string =>
   !parsed.ok && parsed.reason === "invalid_json"
-    ? redactString(parsed.raw)
+    ? redactString(redactSensitivePairs(parsed.raw))
     : JSON.stringify(redactValue(parsed.json));
 
 /** Incremental newline-delimited JSON splitter. */

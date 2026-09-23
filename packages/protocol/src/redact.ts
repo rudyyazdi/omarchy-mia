@@ -65,3 +65,109 @@ const walk = (value: unknown, key: string | undefined): unknown => {
  * not preserved (a sensitive key replaces its whole subtree, and keys that redact alike collapse into one), so the result is unknown.
  */
 export const redactValue = (value: unknown): unknown => walk(value, undefined);
+
+type Span = { end: number; complete: boolean };
+
+/** The span of the JSON string literal opening at `start`; one cut short runs to the end of the text. */
+const stringSpan = (text: string, start: number): Span => {
+  let index = start + 1;
+  while (index < text.length) {
+    const char = text.charAt(index);
+    if (char === '"') return { end: index + 1, complete: true };
+    index += char === "\\" ? 2 : 1;
+  }
+  return { end: text.length, complete: false };
+};
+
+const skipSpace = (text: string, start: number): number => {
+  let index = start;
+  while (index < text.length && /\s/.test(text.charAt(index))) index += 1;
+  return index;
+};
+
+/** The span of the JSON object or array opening at `start`, skipping string literals whole. */
+const containerSpan = (text: string, start: number): Span => {
+  let depth = 0;
+  let index = start;
+  while (index < text.length) {
+    const char = text.charAt(index);
+    if (char === '"') {
+      index = stringSpan(text, index).end;
+      continue;
+    }
+    if (char === "{" || char === "[") depth += 1;
+    if (char === "}" || char === "]") depth -= 1;
+    index += 1;
+    if (depth === 0) return { end: index, complete: true };
+  }
+  return { end: text.length, complete: false };
+};
+
+/**
+ * The span of the JSON value opening at `start`. A string, object or array cut short runs to the end of the
+ * text; any other value runs to the next delimiter, so a number or literal cut short cannot be told from a
+ * whole one.
+ */
+const valueSpan = (text: string, start: number): Span => {
+  const opening = text.charAt(start);
+  if (opening === '"') return stringSpan(text, start);
+  if (opening === "{" || opening === "[") return containerSpan(text, start);
+  let index = start;
+  while (index < text.length && !/[\s,\]}]/.test(text.charAt(index))) index += 1;
+  return { end: index, complete: true };
+};
+
+/** The decoded value of a JSON literal, or undefined when it is cut short or not JSON. */
+const parseLiteral = (literal: string): unknown => {
+  try {
+    const parsed: unknown = JSON.parse(literal);
+    return parsed;
+  } catch {
+    return undefined;
+  }
+};
+
+const decodeKey = (literal: string): string => {
+  const parsed = parseLiteral(literal);
+  return typeof parsed === "string" ? parsed : literal.slice(1, -1);
+};
+
+/**
+ * Redact, by key, text that looks like JSON but does not parse, typically a runtime line cut short: the value
+ * of each `"<key>": <value>` pair whose key is sensitive (`isSensitiveKey`, except a token count) becomes
+ * `"[REDACTED]"`. A value cut short is redacted to the end of the text and keeps no closing quote, so the cut
+ * stays visible. String literals are skipped whole, so a quoted key inside a string value is not a pair.
+ * Value-shaped secrets are left to `redactString`.
+ */
+export const redactSensitivePairs = (text: string): string => {
+  let out = "";
+  let copied = 0;
+  let index = 0;
+  while (index < text.length) {
+    if (text.charAt(index) !== '"') {
+      index += 1;
+      continue;
+    }
+    const keySpan = stringSpan(text, index);
+    const colon = skipSpace(text, keySpan.end);
+    if (!keySpan.complete || text.charAt(colon) !== ":") {
+      index = keySpan.end;
+      continue;
+    }
+    const key = decodeKey(text.slice(index, keySpan.end));
+    const valueStart = skipSpace(text, colon + 1);
+    const value = valueSpan(text, valueStart);
+    if (
+      !isSensitiveKey(key) ||
+      value.end === valueStart ||
+      isTokenCount(key, parseLiteral(text.slice(valueStart, value.end)))
+    ) {
+      index = colon + 1;
+      continue;
+    }
+    out += `${text.slice(copied, valueStart)}"${REDACTED}${value.complete ? '"' : ""}`;
+    copied = value.end;
+    index = value.end;
+  }
+  return out + text.slice(copied);
+};

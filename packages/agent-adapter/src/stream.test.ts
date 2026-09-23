@@ -111,9 +111,29 @@ describe("redactLine", () => {
     expect(redacted(line)).toBe(expected);
   });
 
-  it("redacts a line that is not JSON by value", () => {
+  it.each([
+    ['{"type":"assistant","api_key":"short', `{"type":"assistant","api_key":"${REDACTED}`],
+    [
+      '{"type":"assistant","api_key":"short","text":"kept',
+      `{"type":"assistant","api_key":"${REDACTED}","text":"kept`,
+    ],
+    ['{"type":"assistant","password":123456', `{"type":"assistant","password":"${REDACTED}"`],
+    [
+      '{"type":"assistant","nested":{"token":{"value":"x"},"text":"kept',
+      `{"type":"assistant","nested":{"token":"${REDACTED}","text":"kept`,
+    ],
+    [
+      '{"type":"result","usage":{"input_tokens":1200',
+      '{"type":"result","usage":{"input_tokens":1200',
+    ],
+  ])("redacts a line cut short by key: %s", (line, expected) => {
+    expect(parseStreamLine(line)?.ok).toBe(false);
+    expect(redacted(line)).toBe(expected);
+  });
+
+  it("redacts a line that is not JSON by key and by value", () => {
     expect(redacted('{"api_key":"short" sk-ant-abcdefghijkl')).toBe(
-      `{"api_key":"short" ${REDACTED}`,
+      `{"api_key":"${REDACTED}" ${REDACTED}`,
     );
   });
 });

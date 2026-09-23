@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { REDACTED, redactValue, registerSecret } from "./redact.ts";
+import { REDACTED, redactSensitivePairs, redactValue, registerSecret } from "./redact.ts";
 
 describe("redactValue", () => {
   it("replaces registered secrets throughout nested values without mutating the input", () => {
@@ -68,5 +68,41 @@ describe("redactValue", () => {
     expect(JSON.stringify(redacted)).toBe(
       `{"headers":{"${REDACTED}":1},"__proto__":{"text":"kept"}}`,
     );
+  });
+});
+
+describe("redactSensitivePairs", () => {
+  it.each([
+    ['{"api_key":"short', `{"api_key":"${REDACTED}`],
+    ['{"api_key" : "short", "text":"kept"}', `{"api_key" : "${REDACTED}", "text":"kept"}`],
+    ['{"secret":"a\\"b","text":"kept', `{"secret":"${REDACTED}","text":"kept`],
+    ['{"secret":"a\\"b', `{"secret":"${REDACTED}`],
+    ['{"password":123456,"text":"kept', `{"password":"${REDACTED}","text":"kept`],
+    ['{"password":12', `{"password":"${REDACTED}"`],
+    [
+      '{"auth":{"token":true,"value":"x"},"text":"kept',
+      `{"auth":{"token":"${REDACTED}","value":"x"},"text":"kept`,
+    ],
+    ['{"credentials":{"value":"x"},"text":"kept', `{"credentials":"${REDACTED}","text":"kept`],
+    ['{"credentials":["x","y"', `{"credentials":"${REDACTED}`],
+    ['{"credentials":{"value":"}"', `{"credentials":"${REDACTED}`],
+    ['{"\\u0074oken":"short', `{"\\u0074oken":"${REDACTED}`],
+    [
+      '{"text":"say \\"password\\": short","more":"kept',
+      '{"text":"say \\"password\\": short","more":"kept',
+    ],
+    [
+      '{"usage":{"input_tokens":1200,"output_tokens":3',
+      '{"usage":{"input_tokens":1200,"output_tokens":3',
+    ],
+    [
+      '{"MAX_THINKING_TOKENS":"8000","API_TOKENS":"abc',
+      `{"MAX_THINKING_TOKENS":"8000","API_TOKENS":"${REDACTED}`,
+    ],
+    ['{"api_key":', '{"api_key":'],
+    ['{"api_ke', '{"api_ke'],
+    ['error: "token": abc123 then more', `error: "token": "${REDACTED}" then more`],
+  ])("%s", (text, expected) => {
+    expect(redactSensitivePairs(text)).toBe(expected);
   });
 });
