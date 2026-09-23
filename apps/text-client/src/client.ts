@@ -94,6 +94,8 @@ export class MiaClient extends EventEmitter {
       // A refused upgrade leaves the socket connecting; terminating one already closed does nothing.
       socket.terminate();
       this.connectionState = "disconnected";
+      // A wait started before or during the handshake would otherwise outlive the connection it waited on.
+      this.abandonPending();
       throw error;
     } finally {
       signal?.removeEventListener("abort", onAbort);
@@ -102,14 +104,18 @@ export class MiaClient extends EventEmitter {
     socket.on("message", (data) => this.onMessage(data.toString("utf8")));
     socket.on("close", (code, reason) => {
       this.connectionState = "disconnected";
-      // No ack can arrive on a closed socket, so its waiters fail now rather than at their deadline.
-      for (const waiter of this.pendingAcks.values()) waiter.abandon();
-      this.pendingAcks.clear();
-      for (const abandon of this.pendingWaits) abandon();
-      this.pendingWaits.clear();
+      this.abandonPending();
       this.emit("disconnected", { code, reason: reason.toString() });
     });
     socket.on("error", (error) => this.pushError(error.message));
+  }
+
+  /** No ack or event can arrive on a closed socket, so its waiters fail now rather than at their caller's deadline. */
+  private abandonPending(): void {
+    for (const waiter of this.pendingAcks.values()) waiter.abandon();
+    this.pendingAcks.clear();
+    for (const abandon of this.pendingWaits) abandon();
+    this.pendingWaits.clear();
   }
 
   private onMessage(text: string): void {
@@ -290,7 +296,8 @@ export class MiaClient extends EventEmitter {
     if (existing) return Promise.resolve(existing);
     if (signal?.aborted) return Promise.reject(signal.reason);
     const closed = new Error(`connection closed while waiting for ${type}`);
-    // A client that has not connected yet keeps waiting: its events may still come.
+    // Only a socket that is closing or closed (including one whose handshake failed) rejects at once; with no socket
+    // yet, or one still connecting, the wait is registered and the events may still come.
     const state = this.socket?.readyState;
     if (state === WebSocket.CLOSING || state === WebSocket.CLOSED) return Promise.reject(closed);
     const channel = type === "error" ? "server_error" : type;
