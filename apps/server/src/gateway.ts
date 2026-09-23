@@ -11,6 +11,7 @@ import {
   registerSecret,
   type ClientCommand,
   type ErrorCode,
+  type EventPayload,
   type ServerEvent,
 } from "@mia/protocol";
 import { nowIso, type RecordWriter } from "@mia/records";
@@ -61,7 +62,7 @@ interface ConnectionState {
 
 interface AckReply {
   commandId: string;
-  disposition: "accepted" | "duplicate" | "rejected";
+  disposition: EventPayload<"ack">["disposition"];
   error?: { code: ErrorCode; message: string };
   result?: Record<string, unknown>;
 }

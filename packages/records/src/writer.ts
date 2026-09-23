@@ -1,9 +1,28 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { canonicalDigest, redactString, redactValue } from "@mia/protocol";
+import {
+  canonicalDigest,
+  redactString,
+  redactValue,
+  type ApprovalStatus,
+  type TaskStatus,
+  type ToolCallStatus,
+} from "@mia/protocol";
 import { Catalog, newId, nowIso } from "./catalog.ts";
 import { ObjectStore } from "./objects.ts";
-import type { CaptureStatus, CommandRow, LinkRelation } from "./schema.ts";
+import type {
+  ArtifactKind,
+  CaptureStatus,
+  ClientKind,
+  CommandDisposition,
+  CommandRow,
+  ConversationStatus,
+  ExecutionStatus,
+  LinkRelation,
+  ProvenanceEntryRow,
+  ProvenanceRole,
+  ToolCallPolicy,
+} from "./schema.ts";
 
 export interface EventInput {
   conversationId: string;
@@ -28,7 +47,7 @@ export interface AppendedEvent {
 }
 
 export interface ArtifactInput {
-  kind: string;
+  kind: ArtifactKind;
   logicalName: string;
   mimeType?: string | null;
   schemaVersion?: string | null;
@@ -66,7 +85,7 @@ export class RecordWriter {
 
   // ---- clients & connections ----
 
-  ensureClient(clientId: string, kind: string): void {
+  ensureClient(clientId: string, kind: ClientKind): void {
     const existing = this.catalog.get("SELECT id FROM clients WHERE id = ?", clientId);
     if (!existing) this.catalog.insert("clients", { id: clientId, first_seen_at: nowIso(), kind });
   }
@@ -108,7 +127,7 @@ export class RecordWriter {
   }):
     | {
         duplicate: true;
-        disposition: string;
+        disposition: CommandDisposition;
         sameDigest: boolean;
         error: string | null;
         commandId: string;
@@ -149,7 +168,7 @@ export class RecordWriter {
   finishCommand(
     commandId: string,
     outcome: {
-      disposition: "accepted" | "rejected";
+      disposition: CommandDisposition;
       error: string | null;
       resultEventId: string | null;
     },
@@ -215,11 +234,11 @@ export class RecordWriter {
 
   addProvenanceEntry(input: {
     provenanceSetId: string;
-    role: string;
+    role: ProvenanceRole;
     ordinal?: number;
     version?: string | null;
     artifactId?: string | null;
-    availability: "retained" | "unavailable";
+    availability: ProvenanceEntryRow["availability"];
     reason?: string | null;
   }): string {
     const id = newId("pe");
@@ -300,7 +319,7 @@ export class RecordWriter {
     return { id, startedAt, directory };
   }
 
-  updateConversation(id: string, fields: { status?: string }): void {
+  updateConversation(id: string, fields: { status?: ConversationStatus }): void {
     this.catalog.update("conversations", id, { status: fields.status });
   }
 
@@ -317,7 +336,7 @@ export class RecordWriter {
     return id;
   }
 
-  updateTask(id: string, fields: { status?: string; finishedAt?: string | null }): void {
+  updateTask(id: string, fields: { status?: TaskStatus; finishedAt?: string | null }): void {
     this.catalog.update("tasks", id, { status: fields.status, finished_at: fields.finishedAt });
   }
 
@@ -351,7 +370,7 @@ export class RecordWriter {
   updateExecution(
     id: string,
     fields: {
-      status?: string;
+      status?: ExecutionStatus;
       endedAt?: string | null;
       reportedModel?: string | null;
       reportedEffort?: string | null;
@@ -411,8 +430,8 @@ export class RecordWriter {
     toolIdentity: string;
     argumentDigest: string;
     redactedArguments: unknown;
-    policy: string;
-    status: string;
+    policy: ToolCallPolicy;
+    status: ToolCallStatus;
     proposalEventId: string | null;
   }): string {
     const id = newId("call");
@@ -439,7 +458,7 @@ export class RecordWriter {
   updateToolCall(
     id: string,
     fields: {
-      status?: string;
+      status?: ToolCallStatus;
       detail?: string | null;
       dispatchEventId?: string | null;
       resultEventId?: string | null;
@@ -476,7 +495,7 @@ export class RecordWriter {
   updateApproval(
     id: string,
     fields: {
-      status: "approved" | "rejected" | "invalidated" | "expired";
+      status: Exclude<ApprovalStatus, "pending">;
       reason?: string | null;
       decisionEventId?: string | null;
       decisionClientId?: string | null;

@@ -18,6 +18,7 @@ import {
   errorMessage,
   redactValue,
   sha256Hex,
+  type ApprovalStatus,
   type ClientDiagnostics,
   type Decision,
   type ErrorCode,
@@ -27,7 +28,15 @@ import {
   type TaskStatus,
   type ToolCallStatus,
 } from "@mia/protocol";
-import { newId, nowIso, type Catalog, type RecordWriter } from "@mia/records";
+import {
+  newId,
+  nowIso,
+  type ArtifactKind,
+  type Catalog,
+  type ExecutionStatus,
+  type RecordWriter,
+  type ToolCallPolicy,
+} from "@mia/records";
 import type { Profile } from "./config.ts";
 import { createConversationProvenance } from "./provenance.ts";
 
@@ -55,7 +64,7 @@ interface ToolCallState {
   toolIdentity: string;
   digest: string;
   redactedArguments: unknown;
-  policy: string;
+  policy: ToolCallPolicy;
   status: ToolCallStatus;
   approvalId: string | null;
   resolve: ((decision: PermissionDecision) => void) | null;
@@ -127,7 +136,7 @@ interface NewCallInput {
   toolIdentity: string;
   digest: string;
   args: unknown;
-  policy: string;
+  policy: ToolCallPolicy;
   proposalEventId: string | null;
 }
 
@@ -195,7 +204,7 @@ const effortLevels = (hooks: Record<string, unknown>[]): string[] => {
   return [...new Set(levels.filter((level): level is string => typeof level === "string"))];
 };
 
-const executionStatusFor = (task: TaskState, result: TurnResult): string => {
+const executionStatusFor = (task: TaskState, result: TurnResult): ExecutionStatus => {
   if (result.status === "completed") return "completed";
   return task.interrupted ? "killed" : "failed";
 };
@@ -546,7 +555,7 @@ export class Engine {
     const addressed = this.addressTask(ctx, payload);
     if (addressed.kind === "rejected") return addressed.result;
     if (addressed.kind === "no_active_task") {
-      const known = this.deps.catalog.get<{ status: string; task_id: string }>(
+      const known = this.deps.catalog.get<{ status: ApprovalStatus; task_id: string }>(
         "SELECT a.status, t.task_id FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id WHERE a.id = ?",
         payload.approval_id,
       );
@@ -562,7 +571,7 @@ export class Engine {
       return fail("unauthenticated", "decision must come from the client that owns the task");
     const call = task.pendingApprovals.get(payload.approval_id);
     if (!call || call.status !== "awaiting_approval" || !call.approvalId) {
-      const known = this.deps.catalog.get<{ status: string }>(
+      const known = this.deps.catalog.get<{ status: ApprovalStatus }>(
         "SELECT status FROM approvals WHERE id = ?",
         payload.approval_id,
       );
@@ -1355,7 +1364,7 @@ export class Engine {
           if (call.approvalId)
             writer.updateApproval(call.approvalId, { status: "expired", reason: "task ended" });
         const retain = (artifact: {
-          kind: string;
+          kind: ArtifactKind;
           name: string;
           bytes: Buffer;
           relation: "runtime_transcript" | "task_output";

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { TaskStatus } from "@mia/protocol";
 import { parseJson, type Catalog } from "./catalog.ts";
 import {
   emptySnapshotTables,
@@ -10,6 +11,7 @@ import {
   type ClientRow,
   type CommandRow,
   type ConversationRow,
+  type ConversationStatus,
   type DiagnosticsRow,
   type EventRow,
   type ExecutionRow,
@@ -28,7 +30,7 @@ const isPresent = <T>(value: T | undefined): value is T => value !== undefined;
 export interface ConversationSummary {
   id: string;
   started_at: string;
-  status: string;
+  status: ConversationStatus;
   task_count: number;
   last_sequence: number;
   runtime_conversation_id: string | null;
@@ -60,7 +62,12 @@ export interface ConversationSnapshot {
   ongoing_tasks: string[];
 }
 
-const FINISHED_TASK_STATUSES = new Set(["completed", "failed", "interrupted", "outcome_unknown"]);
+const FINISHED_TASK_STATUSES: ReadonlySet<TaskStatus> = new Set([
+  "completed",
+  "failed",
+  "interrupted",
+  "outcome_unknown",
+]);
 
 /**
  * Read every record belonging to one conversation from a single SQLite read transaction, bounded by the
@@ -222,7 +229,7 @@ export type ToolCallView = ToolCallRow & { approvals: ApprovalRow[] };
 /** Derived, readable view used by the report and the CLI. */
 export interface TaskView {
   id: string;
-  status: string;
+  status: TaskStatus;
   created_at: string;
   finished_at: string | null;
   text: string;

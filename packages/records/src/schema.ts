@@ -1,4 +1,7 @@
 import { z } from "zod";
+import type { ApprovalStatus, TaskStatus, ToolCallStatus, ToolPolicy } from "@mia/protocol";
+
+export type { ApprovalStatus } from "@mia/protocol";
 
 export const SCHEMA_VERSION = 1;
 
@@ -261,6 +264,26 @@ export type ExportTable = (typeof EXPORT_TABLES)[number];
 // One interface per table, mirroring the SQL columns above (so snake_case) with their nullability.
 // Catalog.get<T>/Catalog.all<T> name the row type at the SQLite boundary; nothing downstream casts.
 
+export type ConversationStatus = "active" | "closed";
+export type ExecutionStatus = "running" | "completed" | "failed" | "killed";
+/** Missing configuration stays distinct from an explicit deny in the persisted policy audit. */
+export type ToolCallPolicy = ToolPolicy | "unlisted";
+export type ClientKind = "text-client";
+/** Duplicate delivery is an acknowledgement, not a new persisted command outcome. */
+export type CommandDisposition = "accepted" | "rejected";
+export type ArtifactKind = "snapshot" | "tool_output" | "runtime_transcript" | "effort_evidence";
+export type ProvenanceRole =
+  | "agent_prompt"
+  | "runtime_instructions"
+  | "configuration"
+  | "tool_contracts"
+  | "model_selection"
+  | "runtime_identity"
+  | "architecture"
+  | "server_build"
+  | "server_local_changes"
+  | "client_build";
+
 export interface ObjectRow {
   digest: string;
   byte_count: number;
@@ -286,7 +309,7 @@ export type CaptureStatus = z.infer<typeof CaptureStatusSchema>;
 
 export interface ArtifactRow {
   id: string;
-  kind: string;
+  kind: ArtifactKind;
   mime_type: string | null;
   schema_version: string | null;
   logical_name: string;
@@ -305,7 +328,7 @@ export interface ArtifactRow {
 export interface ProvenanceEntryRow {
   id: string;
   provenance_set_id: string;
-  role: string;
+  role: ProvenanceRole;
   ordinal: number;
   version: string | null;
   artifact_id: string | null;
@@ -316,7 +339,7 @@ export interface ProvenanceEntryRow {
 export interface ConversationRow {
   id: string;
   started_at: string;
-  status: string;
+  status: ConversationStatus;
   provenance_set_id: string;
   directory: string;
   runtime_conversation_id: string | null;
@@ -325,7 +348,7 @@ export interface ConversationRow {
 export interface ClientRow {
   id: string;
   first_seen_at: string;
-  kind: string;
+  kind: ClientKind;
 }
 
 export interface ClientConnectionRow {
@@ -341,7 +364,7 @@ export interface ClientConnectionRow {
 export interface TaskRow {
   id: string;
   conversation_id: string;
-  status: string;
+  status: TaskStatus;
   created_at: string;
   finished_at: string | null;
   text: string;
@@ -361,7 +384,7 @@ export interface ExecutionRow {
   effort_evidence: string | null;
   provenance_set_id: string | null;
   execution_epoch: number;
-  status: string;
+  status: ExecutionStatus;
   started_at: string;
   ended_at: string | null;
   usage: string | null;
@@ -371,6 +394,7 @@ export interface EventRow {
   id: string;
   conversation_id: string;
   sequence: number;
+  /** Open: the journal also records internal and runtime events outside the client protocol. */
   type: string;
   payload_version: number;
   payload: string;
@@ -395,7 +419,7 @@ export interface CommandRow {
   client_command_id: string;
   type: string;
   payload_digest: string;
-  disposition: string;
+  disposition: CommandDisposition;
   error: string | null;
   result_event_id: string | null;
   received_at: string;
@@ -411,8 +435,8 @@ export interface ToolCallRow {
   tool_identity: string;
   argument_digest: string;
   redacted_arguments: string;
-  policy: string;
-  status: string;
+  policy: ToolCallPolicy;
+  status: ToolCallStatus;
   detail: string | null;
   proposal_event_id: string | null;
   dispatch_event_id: string | null;
@@ -420,8 +444,6 @@ export interface ToolCallRow {
   created_at: string;
   updated_at: string;
 }
-
-export type ApprovalStatus = "pending" | "approved" | "rejected" | "invalidated" | "expired";
 
 export interface ApprovalRow {
   id: string;

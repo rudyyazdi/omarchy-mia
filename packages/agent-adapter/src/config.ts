@@ -1,10 +1,10 @@
 import { z } from "zod";
+import { ToolPolicySchema } from "@mia/protocol";
+
+export { ToolPolicySchema, type ToolPolicy } from "@mia/protocol";
 
 export const EffortSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
 export type Effort = z.infer<typeof EffortSchema>;
-
-export const ToolPolicySchema = z.enum(["allow", "ask", "deny"]);
-export type ToolPolicy = z.infer<typeof ToolPolicySchema>;
 
 /** The two network transports differ only in their discriminator; the shape they accept is one definition. */
 const remoteMcpServerSchema = <Transport extends "http" | "sse">(transport: Transport) =>
