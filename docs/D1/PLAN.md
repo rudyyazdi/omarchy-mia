@@ -275,7 +275,7 @@ Required automated cases:
 - Every invocation explicitly applies agent selection. Conflicting inherited effort cannot override it; unsupported configuration fails. Provenance distinguishes explicit settings from runtime-reported or unreported values.
 - No approval-required fixture call executes before approval; approved call executes once; rejected call never executes; repeated decisions and duplicate commands do not repeat effects.
 - A separate controlled tool allowed by the effective policy executes without an approval prompt; configuring every-call approval for the test fixture does not impose it on other tools.
-- A second identical call needs fresh approval. Changed arguments under the same runtime ID create a new binding revision and invalidate the old approval. Wrong client/task/call IDs and stale epochs cannot authorize execution.
+- A second identical call needs fresh approval. A changed tool or changed arguments under the same runtime ID create a new binding revision and invalidate the old approval. Wrong client/task/call IDs and stale epochs cannot authorize execution.
 - Unsupported every-call policy fails before work starts; policy is never inferred from an agent's prose.
 - Interruption before release, concurrently with release, and after dispatch; cancellation success, uncancellable completion, and unknown outcomes; no automatic retry or new consequential dispatch while gated.
 - Disconnection while approval is pending grants nothing. Record-write failure before authorization leaves the call held or rejected with an explicit error.
