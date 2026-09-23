@@ -151,6 +151,39 @@ describe("client cancellation", () => {
       );
     }));
 
+  it("rejects an event wait as soon as the connection closes, and drops its listener", () =>
+    withConnectedClient(async (client, socket) => {
+      const pending = client.waitFor("task_finished");
+      expect(client.listenerCount("task_finished")).toBe(1);
+      socket.close();
+      await expect(pending).rejects.toThrow("connection closed while waiting for task_finished");
+      expect(client.listenerCount("task_finished")).toBe(0);
+    }));
+
+  it("after the connection closed, resolves a wait for an event already received and rejects any other", () =>
+    withConnectedClient(async (client, socket) => {
+      const received = once(client, "ack");
+      socket.send(JSON.stringify(ackEvent("seen")));
+      await received;
+      const disconnected = once(client, "disconnected");
+      socket.close();
+      await disconnected;
+      await expect(client.waitFor("ack")).resolves.toMatchObject({
+        payload: { command_id: "seen" },
+      });
+      await expect(client.waitFor("task_finished")).rejects.toThrow(
+        "connection closed while waiting for task_finished",
+      );
+    }));
+
+  it("rejects a wait started while the client is closing its connection", () =>
+    withConnectedClient(async (client) => {
+      client.close();
+      await expect(client.waitFor("task_finished")).rejects.toThrow(
+        "connection closed while waiting for task_finished",
+      );
+    }));
+
   it("rejects a connect still waiting for the handshake with its signal's reason, and drops the connection", () =>
     withHandshakeServer("silent", async (url, requested) => {
       const client = makeClient(url);
@@ -173,6 +206,15 @@ describe("client cancellation", () => {
       await expect(connecting).rejects.toThrow("server refused the connection: HTTP 401");
       expect(client.connectionState).toBe("disconnected");
       await dropped;
+    }));
+
+  it("rejects a wait started before the handshake once the connect fails, and drops its listener", () =>
+    withHandshakeServer("refuse", async (url) => {
+      const client = makeClient(url);
+      const pending = client.waitFor("task_finished");
+      await expect(client.connect()).rejects.toThrow("server refused the connection: HTTP 401");
+      await expect(pending).rejects.toThrow("connection closed while waiting for task_finished");
+      expect(client.listenerCount("task_finished")).toBe(0);
     }));
 
   it("does not open a connection when the signal is already aborted", () =>
