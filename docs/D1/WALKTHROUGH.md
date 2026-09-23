@@ -111,8 +111,11 @@ cat .mia-state/fixture-test/client-secret                                       
 Keep A (fixture) and C (server) running. Terminal B:
 
 ```sh
-npm run client -- --config examples/config/fixture-test.json
+MIA_FIXTURE_MCP_URL=http://127.0.0.1:47331/mcp MIA_FIXTURE_DIR=/tmp/mia-play \
+  npm run client -- --config examples/config/fixture-test.json
 ```
+
+The client loads the profile exactly as the server does, so it needs the same placeholders set.
 
 Each step below drives one live-lane scenario by hand. Type the prompt the named scenario submits
 ([`scenarios.ts`](../../tests/acceptance/promptfoo/scenarios.ts)); what the run must produce is what that scenario's

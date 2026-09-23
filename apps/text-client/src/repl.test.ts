@@ -1,13 +1,23 @@
 import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { ClientCommandSchema, type ClientCommand } from "@mia/protocol";
 import { ackEvent } from "./ack-fixture.ts";
 import { runTextClient, type TextClientDeadlines, type TextClientIo } from "./repl.ts";
+
+const PRODUCTION_EXAMPLE = resolve(
+  import.meta.dirname,
+  "..",
+  "..",
+  "..",
+  "examples",
+  "config",
+  "production-opus.example.json",
+);
 
 /** How the fake server answers one command. */
 type Respond = (socket: WebSocket, command: ClientCommand) => void;
@@ -168,6 +178,18 @@ describe("text client session", () => {
     const closedByClient = once(socket, "close");
     await expect(session).rejects.toThrow("start_conversation rejected: invalid_state: no");
     await closedByClient;
+  });
+
+  it("reads the connection from a profile, substituting its placeholders as the server does", async () => {
+    await expect(
+      runTextClient({ config: PRODUCTION_EXAMPLE, env: { XDG_STATE_HOME: dir } }, io, deadlines),
+    ).rejects.toThrow(`secret file ${join(dir, "mia", "client-secret")} not found`);
+  });
+
+  it("rejects a profile whose placeholders the environment does not set", async () => {
+    await expect(
+      runTextClient({ config: PRODUCTION_EXAMPLE, env: {} }, io, deadlines),
+    ).rejects.toThrow("${XDG_STATE_HOME} but it is not set");
   });
 
   it("rejects instead of exiting when the secret file is missing", async () => {

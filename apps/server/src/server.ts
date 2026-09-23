@@ -1,8 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { ApprovalBridge, ClaudeCodeAdapter } from "@mia/agent-adapter";
+import { ApprovalBridge, ClaudeCodeAdapter, loadProfile, type Profile } from "@mia/agent-adapter";
 import { Catalog, RecordWriter } from "@mia/records";
-import { loadProfile, type Profile } from "./config.ts";
 import { Engine, type TurnRunner } from "./engine.ts";
 import { startGateway, type GatewayHandle } from "./gateway.ts";
 

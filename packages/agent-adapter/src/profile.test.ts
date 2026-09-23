@@ -1,9 +1,9 @@
 import { mkdtempDisposableSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ConfigurationError } from "@mia/agent-adapter";
 import { describe, expect, it } from "vitest";
-import { loadProfile, type Profile } from "./config.ts";
+import { ConfigurationError } from "./config.ts";
+import { loadProfile, type Profile } from "./profile.ts";
 
 const profileInput = (): Profile => ({
   profile: "unit",
@@ -51,6 +51,30 @@ describe("loadProfile", () => {
           outputDirectories: [resolved("out"), "/absolute/output"],
         },
       });
+    });
+  });
+
+  // Each value would break or rewrite the profile if it were pasted into the raw JSON text.
+  it.each([
+    { name: "a quote", value: 'x","executable":"injected' },
+    { name: "a backslash", value: "C:\\models\\" },
+    { name: "a brace", value: '}{"executable":"injected"}' },
+  ])("keeps a substituted value holding $name as the literal string", ({ value }) => {
+    withProfileFile(JSON.stringify(profileInput()), (path) => {
+      const { runtime } = loadProfile(path, { MODEL: value });
+      expect(runtime.model).toBe(value);
+      expect(runtime.executable).toBe("claude");
+    });
+  });
+
+  it("substitutes placeholders inside arrays and nested objects, but not in keys", () => {
+    const input = profileInput();
+    input.notes = ["model ${MODEL}"];
+    input.runtime.env = { ["${MODEL}"]: "${MODEL}" };
+    withProfileFile(JSON.stringify(input), (path) => {
+      const profile = loadProfile(path, { MODEL: "m" });
+      expect(profile.notes).toEqual(["model m"]);
+      expect(profile.runtime.env).toEqual({ ["${MODEL}"]: "m" });
     });
   });
 
