@@ -228,13 +228,13 @@ const failedVerification = (problem: string): VerificationResult => ({
 const invalidManifest = (error: z.ZodError): VerificationResult =>
   failedVerification(`manifest.json invalid: ${z.prettifyError(error).replaceAll("\n", "; ")}`);
 
+const RESERVED_FILE_NAME = "__proto__";
+
 /**
  * Zod's record parser drops a `__proto__` key before any key schema runs, so a manifest entry with that name would
  * never be checked: a missing file would pass and a present one would read as unlisted. The exporter never writes a
- * root file with that name, so the verifier rejects it outright instead.
+ * root file with that name, so the verifier looks for it in the raw JSON and rejects it outright instead.
  */
-const RESERVED_FILE_NAME = "__proto__";
-
 const listsReservedFileName = (manifestJson: unknown): boolean => {
   if (typeof manifestJson !== "object" || manifestJson === null || !("files" in manifestJson))
     return false;

@@ -249,12 +249,9 @@ describe("verifyExport input validation", () => {
     },
   );
 
-  it.each([
-    { present: false, contents: "" },
-    { present: true, contents: "wrong checksum" },
-  ])(
-    "rejects a manifest listing the reserved name __proto__ (file present: $present)",
-    ({ present, contents }) => {
+  it.each([false, true])(
+    "rejects a manifest listing the reserved name __proto__ (file present: %s)",
+    (present) => {
       const files = { ...manifest.files };
       // JSON.parse keeps an own `__proto__` key, which an assignment would not create.
       Object.defineProperty(files, "__proto__", {
@@ -262,7 +259,7 @@ describe("verifyExport input validation", () => {
         enumerable: true,
       });
       writeManifest({ ...manifest, files });
-      if (present) writeFileSync(join(directory, "__proto__"), contents);
+      if (present) writeFileSync(join(directory, "__proto__"), "wrong checksum");
       expect(verifyExport(directory)).toEqual({
         ok: false,
         complete: false,
