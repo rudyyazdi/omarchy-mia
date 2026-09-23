@@ -2,28 +2,43 @@ import { execFileSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempDisposableSync,
-  statSync,
   symlinkSync,
   truncateSync,
   writeFileSync,
 } from "node:fs";
-import { open, realpath } from "node:fs/promises";
+import { open, realpath, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { MAX_ARTIFACT_BYTES } from "./artifact-capture.ts";
-import { collectArtifact } from "./artifact-collector.ts";
+import {
+  collectArtifact,
+  createArtifactCollector,
+  type ArtifactCollector,
+  type CaptureFs,
+} from "./artifact-collector.ts";
 
-vi.mock("node:fs/promises", async (importOriginal) => {
-  const filesystem = await importOriginal<typeof import("node:fs/promises")>();
-  return {
-    ...filesystem,
-    open: vi.fn(filesystem.open),
-    realpath: vi.fn(filesystem.realpath),
+/** A collector over the real filesystem that records every path it resolves or opens. */
+const recordingCollector = (): {
+  collect: ArtifactCollector;
+  resolved: string[];
+  opened: string[];
+} => {
+  const resolved: string[] = [];
+  const opened: string[] = [];
+  const fs: CaptureFs = {
+    realpath: async (path) => {
+      resolved.push(path);
+      return realpath(path);
+    },
+    stat,
+    open: async (path, flags) => {
+      opened.push(path);
+      return open(path, flags);
+    },
   };
-});
-
-afterEach(() => vi.clearAllMocks());
+  return { collect: createArtifactCollector(fs), resolved, opened };
+};
 
 const workspace = (): { root: string; out: string; [Symbol.dispose]: () => void } => {
   const directory = mkdtempDisposableSync(join(tmpdir(), "mia-artifacts-"));
@@ -37,10 +52,13 @@ describe("collectArtifact", () => {
     using dirs = workspace();
     writeFileSync(join(dirs.out, "real.txt"), "D1");
     symlinkSync(join(dirs.out, "real.txt"), join(dirs.out, "link.txt"));
-    expect(await collectArtifact({ path: join(dirs.out, "link.txt") }, [dirs.out])).toEqual({
+    const { collect, opened } = recordingCollector();
+    expect(await collect({ path: join(dirs.out, "link.txt") }, [dirs.out])).toEqual({
       status: "retained",
       bytes: Buffer.from("D1"),
     });
+    // Only the resolved target is opened, never the symlink itself.
+    expect(opened).toEqual([await realpath(join(dirs.out, "real.txt"))]);
   });
 
   it("resolves a symlinked output directory before checking containment", async () => {
@@ -58,25 +76,28 @@ describe("collectArtifact", () => {
     const secret = join(dirs.root, "secret.txt");
     writeFileSync(secret, "private");
     symlinkSync(secret, join(dirs.out, "escape.txt"));
+    const { collect, opened } = recordingCollector();
     for (const path of [secret, join(dirs.out, "escape.txt")])
-      expect((await collectArtifact({ path }, [dirs.out])).status).toBe("external_only");
-    expect(open).not.toHaveBeenCalled();
+      expect((await collect({ path }, [dirs.out])).status).toBe("external_only");
+    expect(opened).toEqual([]);
   });
 
   it("refuses a relative path without touching the filesystem", async () => {
     using dirs = workspace();
-    expect((await collectArtifact({ path: "out/a.txt" }, [dirs.out])).status).toBe("failed");
-    expect(realpath).not.toHaveBeenCalled();
-    expect(open).not.toHaveBeenCalled();
+    const { collect, resolved, opened } = recordingCollector();
+    expect((await collect({ path: "out/a.txt" }, [dirs.out])).status).toBe("failed");
+    expect(resolved).toEqual([]);
+    expect(opened).toEqual([]);
   });
 
   it("reports a dangling symlink as missing without reading", async () => {
     using dirs = workspace();
     symlinkSync(join(dirs.out, "gone.txt"), join(dirs.out, "dangling.txt"));
-    expect(
-      (await collectArtifact({ path: join(dirs.out, "dangling.txt") }, [dirs.out])).status,
-    ).toBe("missing");
-    expect(open).not.toHaveBeenCalled();
+    const { collect, opened } = recordingCollector();
+    expect((await collect({ path: join(dirs.out, "dangling.txt") }, [dirs.out])).status).toBe(
+      "missing",
+    );
+    expect(opened).toEqual([]);
   });
 
   it("treats an output directory that does not exist as containing nothing", async () => {
@@ -93,28 +114,32 @@ describe("collectArtifact", () => {
     const large = join(dirs.out, "large.bin");
     writeFileSync(large, "");
     truncateSync(large, MAX_ARTIFACT_BYTES + 1); // sparse: no bytes written to disk
-    expect(await collectArtifact({ path: large }, [dirs.out])).toEqual({
+    const { collect, opened } = recordingCollector();
+    expect(await collect({ path: large }, [dirs.out])).toEqual({
       status: "failed",
       reason: `declared file is ${MAX_ARTIFACT_BYTES + 1} bytes, over the ${MAX_ARTIFACT_BYTES}-byte limit`,
     });
-    expect(open).not.toHaveBeenCalled();
+    expect(opened).toEqual([]);
   });
 
   it("fails a file that grew after it was admitted instead of reading past its size", async () => {
     using dirs = workspace();
     const file = join(dirs.out, "growing.txt");
     writeFileSync(file, "grown");
-    const filesystem = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
-    vi.mocked(open).mockImplementationOnce(async (...args) => {
-      const handle = await filesystem.open(...args);
-      vi.spyOn(handle, "stat").mockImplementationOnce(async () => {
-        const stats = statSync(file);
-        stats.size = 2; // as admitted, before the tool appended to it
-        return stats;
-      });
-      return handle;
+    const collect = createArtifactCollector({
+      realpath,
+      stat,
+      open: async (path, flags) => {
+        const handle = await open(path, flags);
+        return {
+          // As admitted, before the tool appended to it.
+          stat: async () => ({ isFile: () => true, size: 2 }),
+          read: async (...args) => handle.read(...args),
+          close: async () => handle.close(),
+        };
+      },
     });
-    expect(await collectArtifact({ path: file }, [dirs.out])).toEqual({
+    expect(await collect({ path: file }, [dirs.out])).toEqual({
       status: "failed",
       reason: "declared file changed during collection",
     });
@@ -125,11 +150,12 @@ describe("collectArtifact", () => {
     using dirs = workspace();
     mkdirSync(join(dirs.out, "folder"));
     execFileSync("mkfifo", [join(dirs.out, "fifo")]);
+    const { collect, opened } = recordingCollector();
     for (const name of ["folder", "fifo"])
-      expect(await collectArtifact({ path: join(dirs.out, name) }, [dirs.out])).toEqual({
+      expect(await collect({ path: join(dirs.out, name) }, [dirs.out])).toEqual({
         status: "failed",
         reason: "declared path is not a regular file",
       });
-    expect(open).not.toHaveBeenCalled();
+    expect(opened).toEqual([]);
   });
 });
