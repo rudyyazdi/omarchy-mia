@@ -81,14 +81,16 @@ export class MiaClient extends EventEmitter {
     socket.once("unexpected-response", (_, res) =>
       reject(new Error(`server refused the connection: HTTP ${res.statusCode}`)),
     );
+    // An abort after "open" but before this resumes leaves the connection alone, since connect() resolves.
     const onAbort = () => {
-      reject(signal?.reason);
-      socket.terminate();
+      if (socket.readyState === WebSocket.CONNECTING) reject(signal?.reason);
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
       await promise;
     } catch (error) {
+      // A refused upgrade leaves the socket connecting; terminating one already closed does nothing.
+      socket.terminate();
       this.connectionState = "disconnected";
       throw error;
     } finally {

@@ -10,8 +10,11 @@ import type { ServerEvent } from "@mia/protocol";
 
 export interface ScenarioContext {
   client: MiaClient;
-  /** The scenario's deadline, built by the provider; every client command and wait listens for it. */
-  signal: AbortSignal;
+  /**
+   * A deadline for one step: `ms` from now, or the scenario's own deadline if that comes first. The provider builds
+   * it; every client command and wait below listens for one.
+   */
+  within: (ms: number) => AbortSignal;
   harness: FixtureHarness;
   reconnect: () => Promise<MiaClient>;
   budget: (label: string) => void;
@@ -58,6 +61,10 @@ export const readScenarioList = (
   }
   return { ok: true, names };
 };
+
+/** How long one command may wait for its acknowledgement. */
+const ACK_TIMEOUT_MS = 30_000;
+const acknowledgedWithin = (ctx: ScenarioContext) => ({ signal: ctx.within(ACK_TIMEOUT_MS) });
 
 const LedgerRefSchema = z.object({ tool: z.string(), call_id: z.string() });
 
@@ -142,7 +149,7 @@ const runTask = async (
 }> => {
   const { client } = ctx;
   ctx.budget(task.text.slice(0, 40));
-  const ack = await client.submitText(task.text, { signal: ctx.signal });
+  const ack = await client.submitText(task.text, acknowledgedWithin(ctx));
   if (ack.disposition !== "accepted")
     throw new Error(`submit rejected: ${ack.error?.code} ${ack.error?.message}`);
   const taskId = taskIdOf(ack);
@@ -167,7 +174,7 @@ const runTask = async (
       taskId: taskId,
       approvalId: event.payload.approval_id,
       decision: choice,
-      signal: ctx.signal,
+      ...acknowledgedWithin(ctx),
     });
     if (decided.disposition !== "accepted")
       decisions.push({
@@ -187,7 +194,7 @@ const runTask = async (
   const [finished] = await Promise.all([
     Promise.race([
       client.waitFor("task_finished", (event) => event.payload.task_id === taskId, {
-        signal: ctx.signal,
+        signal: ctx.within(600_000),
       }),
       decisionFailed.promise,
     ]),
@@ -276,7 +283,7 @@ const interruptAtEntered = async ({
 }: TaskContext): Promise<{ call_id: string }> => {
   const entered = await ctx.harness.waitEntered(300_000);
   notes.push(`entered ${entered.call_id} (${entered.mode})`);
-  const ack = await ctx.client.interrupt(taskId, { signal: ctx.signal });
+  const ack = await ctx.client.interrupt(taskId, acknowledgedWithin(ctx));
   notes.push(`interrupt ack ${ack.disposition}`);
   return entered;
 };
@@ -326,12 +333,12 @@ export const SCENARIOS: Scenario[] = [
     async run(ctx) {
       const notes: string[] = [];
       ctx.budget("silence-disconnect");
-      const ack = await ctx.client.submitText(CHANGE_ONCE, { signal: ctx.signal });
+      const ack = await ctx.client.submitText(CHANGE_ONCE, acknowledgedWithin(ctx));
       const taskId = taskIdOf(ack);
       const requested = await ctx.client.waitFor(
         "approval_requested",
         (event) => event.payload.task_id === taskId,
-        { signal: ctx.signal },
+        { signal: ctx.within(300_000) },
       );
       const approvalId = requested.payload.approval_id;
       const commitsAtRequest = commitCount(await ctx.harness.state());
@@ -344,13 +351,13 @@ export const SCENARIOS: Scenario[] = [
         taskId: taskId,
         approvalId: approvalId,
         decision: "reject",
-        signal: ctx.signal,
+        ...acknowledgedWithin(ctx),
       });
       notes.push(`decision after reconnect: ${decided.disposition} ${decided.error?.code ?? ""}`);
       const finished = await again.waitFor(
         "task_finished",
         (event) => event.payload.task_id === taskId,
-        { signal: ctx.signal },
+        { signal: ctx.within(300_000) },
       );
       again.close();
       return {
@@ -396,7 +403,7 @@ export const SCENARIOS: Scenario[] = [
           await ctx.client.waitFor(
             "interruption_outcome",
             (event) => event.payload.task_id === taskId,
-            { signal: ctx.signal },
+            { signal: ctx.within(120_000) },
           );
           notes.push(`commits before release: ${commitCount(await ctx.harness.state())}`);
           await ctx.harness.release(entered.call_id);

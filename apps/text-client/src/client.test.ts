@@ -35,16 +35,33 @@ const withConnectedClient = async (
   }
 };
 
-/** Runs `test` against a TCP server that accepts connections but never answers the WebSocket handshake. */
-const withSilentServer = async (test: (url: string) => Promise<void>): Promise<void> => {
+/** How the handshake server answers a WebSocket upgrade request: never, or with an HTTP 401. */
+type Handshake = "silent" | "refuse";
+
+/**
+ * Runs `test` against a TCP server that answers the upgrade request as `handshake` says. `requested` resolves with
+ * the server's end of the first connection once the client's upgrade request arrives.
+ */
+const withHandshakeServer = async (
+  handshake: Handshake,
+  test: (url: string, requested: Promise<Socket>) => Promise<void>,
+): Promise<void> => {
   const sockets = new Set<Socket>();
-  const server = createServer((socket) => sockets.add(socket));
+  const requested = Promise.withResolvers<Socket>();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.once("data", () => {
+      if (handshake === "refuse")
+        socket.write("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+      requested.resolve(socket);
+    });
+  });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("no TCP address");
   try {
-    await test(`ws://127.0.0.1:${address.port}`);
+    await test(`ws://127.0.0.1:${address.port}`, requested.promise);
   } finally {
     for (const socket of sockets) socket.destroy();
     const closed = once(server, "close");
@@ -134,19 +151,32 @@ describe("client cancellation", () => {
       );
     }));
 
-  it("rejects a connect still waiting for the handshake with its signal's reason", () =>
-    withSilentServer(async (url) => {
+  it("rejects a connect still waiting for the handshake with its signal's reason, and drops the connection", () =>
+    withHandshakeServer("silent", async (url, requested) => {
       const client = makeClient(url);
       const deadline = new AbortController();
       const connecting = client.connect({ signal: deadline.signal });
+      const serverSide = await requested;
+      const dropped = once(serverSide, "close");
       const reason = new Error("connect cancelled");
       deadline.abort(reason);
       await expect(connecting).rejects.toBe(reason);
       expect(client.connectionState).toBe("disconnected");
+      await dropped;
+    }));
+
+  it("drops the connection when the server refuses the upgrade", () =>
+    withHandshakeServer("refuse", async (url, requested) => {
+      const client = makeClient(url);
+      const connecting = client.connect();
+      const dropped = once(await requested, "close");
+      await expect(connecting).rejects.toThrow("server refused the connection: HTTP 401");
+      expect(client.connectionState).toBe("disconnected");
+      await dropped;
     }));
 
   it("does not open a connection when the signal is already aborted", () =>
-    withSilentServer(async (url) => {
+    withHandshakeServer("silent", async (url) => {
       const client = makeClient(url);
       const reason = new Error("already cancelled");
       await expect(client.connect({ signal: AbortSignal.abort(reason) })).rejects.toBe(reason);

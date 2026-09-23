@@ -125,7 +125,9 @@ describe("text client session", () => {
     );
     io.input.write("one\n");
     await held.promise;
-    ackDeadlines.at(-1)?.abort(new Error("ack deadline passed"));
+    const submitDeadline = ackDeadlines.at(-1);
+    if (!submitDeadline) throw new Error("the submission was sent without a deadline");
+    submitDeadline.abort(new Error("ack deadline passed"));
     io.input.end("two\n");
     await expect(session).resolves.toBeUndefined();
     expect(submitted()).toEqual(["one", "two"]);
