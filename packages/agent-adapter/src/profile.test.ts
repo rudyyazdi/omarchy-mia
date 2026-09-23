@@ -67,14 +67,14 @@ describe("loadProfile", () => {
     });
   });
 
-  it("substitutes placeholders inside arrays and nested objects, but not in keys", () => {
+  it("substitutes placeholders inside arrays and nested values", () => {
     const input = profileInput();
     input.notes = ["model ${MODEL}"];
-    input.runtime.env = { ["${MODEL}"]: "${MODEL}" };
+    input.runtime.env = { SELECTED: "${MODEL}" };
     withProfileFile(JSON.stringify(input), (path) => {
       const profile = loadProfile(path, { MODEL: "m" });
       expect(profile.notes).toEqual(["model m"]);
-      expect(profile.runtime.env).toEqual({ ["${MODEL}"]: "m" });
+      expect(profile.runtime.env).toEqual({ SELECTED: "m" });
     });
   });
 
@@ -90,7 +90,15 @@ describe("loadProfile", () => {
       name: "unresolved environment",
       env: {},
       contents: JSON.stringify(profileInput()),
-      message: "MODEL} but it is not set",
+      message: "runtime.model references ${MODEL} but it is not set",
+    },
+    {
+      name: "a placeholder in a key",
+      contents: JSON.stringify({
+        ...profileInput(),
+        runtime: { ...profileInput().runtime, env: { ["${MODEL}"]: "x" } },
+      }),
+      message: "runtime.env.${MODEL} has a placeholder in its key",
     },
     {
       name: "non-loopback host",

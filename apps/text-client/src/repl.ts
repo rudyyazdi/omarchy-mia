@@ -6,10 +6,7 @@ import { loadProfile } from "@mia/agent-adapter";
 import { errorMessage, type EventPayload, type ServerEventOf } from "@mia/protocol";
 import { MiaClient } from "./client.ts";
 
-/**
- * Where to connect: read from a server profile, or given directly. A profile is loaded exactly as the server loads
- * it, so `env` must set every `${ENV}` placeholder it uses.
- */
+/** Where to connect: read from a server profile (loaded by `loadProfile`, whose placeholders `env` fills), or given directly. */
 export type ConnectionOptions =
   { config: string; env: NodeJS.ProcessEnv } | { url: string; secretFile: string };
 

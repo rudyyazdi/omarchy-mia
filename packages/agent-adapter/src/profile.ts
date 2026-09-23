@@ -6,9 +6,9 @@ import { ConfigurationError, RuntimeConfigSchema, validateRuntimeConfig } from "
 
 /**
  * A profile is explicit about everything. Relative paths resolve against the profile file's directory.
- * Placeholders of the form ${ENV_NAME} in string values are substituted from the environment (used by
- * test harnesses to inject fixture URLs); an unset placeholder is a configuration error. The server and
- * the text client both load a profile through `loadProfile`, so they see the same profile or neither starts.
+ * Placeholders of the form ${ENV_NAME} in string values are substituted from the environment; an unset
+ * placeholder, or one written in a key, is a configuration error. The server and the text client both
+ * load a profile through `loadProfile`, so a profile the server rejects also stops the client.
  */
 export const ProfileSchema = z
   .object({
@@ -30,26 +30,47 @@ export const ProfileSchema = z
   .strict();
 export type Profile = z.infer<typeof ProfileSchema>;
 
-const substitute = (text: string, env: NodeJS.ProcessEnv): string =>
-  text.replace(/\$\{([A-Z0-9_]+)\}/g, (_, name: string) => {
-    const value = env[name];
+const PLACEHOLDER = /\$\{([A-Z0-9_]+)\}/g;
+
+/** What every substitution needs besides the value: the environment, and the profile file errors name. */
+interface Substitution {
+  env: NodeJS.ProcessEnv;
+  file: string;
+}
+
+const substitute = (text: string, field: string, context: Substitution): string =>
+  text.replace(PLACEHOLDER, (_, name: string) => {
+    const value = context.env[name];
     if (value === undefined)
       throw new ConfigurationError(
-        `profile references \${${name}} but it is not set in the environment`,
+        `profile ${context.file}: ${field} references \${${name}} but it is not set in the environment`,
       );
     return value;
   });
 
 /**
  * Substitution runs on parsed string values, never on the raw text: a value holding `"`, `\` or `}` then
- * stays that literal string and cannot end its field, add one or override one. Keys are left untouched.
+ * stays that literal string and cannot end its field, add one or override one. Keys are never substituted,
+ * and a placeholder in one is rejected rather than kept as a literal key.
  */
-const substituteValues = (json: unknown, env: NodeJS.ProcessEnv): unknown => {
-  if (typeof json === "string") return substitute(json, env);
-  if (Array.isArray(json)) return json.map((item) => substituteValues(item, env));
+const substituteValues = (
+  json: unknown,
+  path: readonly string[],
+  context: Substitution,
+): unknown => {
+  if (typeof json === "string") return substitute(json, path.join(".") || "(root)", context);
+  if (Array.isArray(json))
+    return json.map((item, index) => substituteValues(item, [...path, String(index)], context));
   if (typeof json === "object" && json !== null)
     return Object.fromEntries(
-      Object.entries(json).map(([key, item]) => [key, substituteValues(item, env)]),
+      Object.entries(json).map(([key, item]) => {
+        const field = [...path, key].join(".");
+        if (key.match(PLACEHOLDER))
+          throw new ConfigurationError(
+            `profile ${context.file}: ${field} has a placeholder in its key; placeholders are substituted only in values`,
+          );
+        return [key, substituteValues(item, [...path, key], context)];
+      }),
     );
   return json;
 };
@@ -68,7 +89,7 @@ export const loadProfile = (path: string, env: NodeJS.ProcessEnv): Profile => {
   } catch (error) {
     throw new ConfigurationError(`profile ${absolute} is not valid JSON: ${errorMessage(error)}`);
   }
-  const parsed = ProfileSchema.safeParse(substituteValues(json, env));
+  const parsed = ProfileSchema.safeParse(substituteValues(json, [], { env, file: absolute }));
   if (!parsed.success)
     throw new ConfigurationError(
       `profile ${absolute} is invalid: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,

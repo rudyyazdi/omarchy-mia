@@ -1,10 +1,11 @@
 import { once } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
+import { ProfileSchema } from "@mia/agent-adapter";
 import { ClientCommandSchema, type ClientCommand } from "@mia/protocol";
 import { ackEvent } from "./ack-fixture.ts";
 import { runTextClient, type TextClientDeadlines, type TextClientIo } from "./repl.ts";
@@ -74,8 +75,8 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-/** Starts a session against a fake server that answers each command with `respond`. */
-const start = async (respond: Respond = accept): Promise<WebSocketServer> => {
+/** Starts a fake server that answers each command with `respond`, and returns its port. */
+const listen = async (respond: Respond): Promise<{ fake: WebSocketServer; port: number }> => {
   const fake = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   server = fake;
   await once(fake, "listening");
@@ -88,8 +89,14 @@ const start = async (respond: Respond = accept): Promise<WebSocketServer> => {
   );
   const address = fake.address();
   if (address === null || typeof address === "string") throw new Error("no TCP address");
+  return { fake, port: address.port };
+};
+
+/** Starts a session against a fake server that answers each command with `respond`. */
+const start = async (respond: Respond = accept): Promise<WebSocketServer> => {
+  const { fake, port } = await listen(respond);
   session = runTextClient(
-    { url: `ws://127.0.0.1:${address.port}`, secretFile: join(dir, "secret") },
+    { url: `ws://127.0.0.1:${port}`, secretFile: join(dir, "secret") },
     io,
     deadlines,
   );
@@ -184,6 +191,22 @@ describe("text client session", () => {
     await expect(
       runTextClient({ config: PRODUCTION_EXAMPLE, env: { XDG_STATE_HOME: dir } }, io, deadlines),
     ).rejects.toThrow(`secret file ${join(dir, "mia", "client-secret")} not found`);
+  });
+
+  it("connects to the host and port a profile names, with its substituted secret file", async () => {
+    const { port } = await listen(accept);
+    const example = ProfileSchema.parse(JSON.parse(await readFile(PRODUCTION_EXAMPLE, "utf8")));
+    const listener = { host: "127.0.0.1", port, secretFile: "${SECRET_DIR}/secret" };
+    const config = join(dir, "profile.json");
+    await writeFile(config, JSON.stringify({ ...example, server: listener }));
+    session = runTextClient(
+      { config, env: { SECRET_DIR: dir, XDG_STATE_HOME: dir } },
+      io,
+      deadlines,
+    );
+    io.input.end();
+    await expect(session).resolves.toBeUndefined();
+    expect(printed).toContain(`connected to ws://127.0.0.1:${port}; conversation conv_1`);
   });
 
   it("rejects a profile whose placeholders the environment does not set", async () => {

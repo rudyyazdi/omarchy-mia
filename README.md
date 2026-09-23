@@ -16,7 +16,8 @@ Read first: [D1 plan](docs/D1/PLAN.md), [capability record](docs/D1/CAPABILITY-R
 | A configured profile (see `examples/config`)                                                               | Mia has no defaults: model, effort, MCP servers, per-tool policy and tool surface are all explicit  | the server refuses to start on an invalid profile |
 
 Nothing personal is committed: state lives under `$XDG_STATE_HOME/mia` (or a directory you name in the profile), the
-client secret is generated there with mode 0600, and example profiles use `${ENV}` placeholders.
+client secret is generated there with mode 0600, and example profiles use `${ENV}` placeholders. A placeholder is
+substituted only inside a string value, and the client loads the profile as the server does, so both need it set.
 
 ## Install
 
@@ -63,16 +64,16 @@ on the same fixture-ledger evidence.
 
 ## Layout
 
-| Path                      | Contents                                                                                                          |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `apps/server`             | profile loading, provenance snapshots, engine (coordinator + approval/interruption controller), WebSocket gateway |
-| `apps/text-client`        | terminal client and the reusable `MiaClient`                                                                      |
-| `apps/debug-cli`          | `mia debug …` read-only inspection, export, verify, reconcile                                                     |
-| `packages/protocol`       | versioned client/server messages (zod), canonical digests, redaction                                              |
-| `packages/agent-adapter`  | Claude Code adapter: launch plan, stream-json parsing, approval bridge, static probe, live budget                 |
-| `packages/records`        | SQLite catalog, content-addressed objects, record writer, snapshot queries, export/verify, HTML report            |
-| `packages/mcp-http`       | loopback Streamable-HTTP host used by the fixture and the bridge                                                  |
-| `fixtures/controlled-mcp` | controlled MCP fixture with append-only ledger and barriers                                                       |
-| `tests/acceptance`        | H lane (scripted runtime), fake-runtime end-to-end, promptfoo live lane                                           |
-| `tools/probe`             | capability probe                                                                                                  |
-| `prompts/`                | versioned Mia agent instructions (`agent-v1.md`)                                                                  |
+| Path                      | Contents                                                                                                           |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `apps/server`             | provenance snapshots, engine (coordinator + approval/interruption controller), WebSocket gateway                   |
+| `apps/text-client`        | terminal client and the reusable `MiaClient`                                                                       |
+| `apps/debug-cli`          | `mia debug …` read-only inspection, export, verify, reconcile                                                      |
+| `packages/protocol`       | versioned client/server messages (zod), canonical digests, redaction                                               |
+| `packages/agent-adapter`  | profile loading, Claude Code adapter: launch plan, stream-json parsing, approval bridge, static probe, live budget |
+| `packages/records`        | SQLite catalog, content-addressed objects, record writer, snapshot queries, export/verify, HTML report             |
+| `packages/mcp-http`       | loopback Streamable-HTTP host used by the fixture and the bridge                                                   |
+| `fixtures/controlled-mcp` | controlled MCP fixture with append-only ledger and barriers                                                        |
+| `tests/acceptance`        | H lane (scripted runtime), fake-runtime end-to-end, promptfoo live lane                                            |
+| `tools/probe`             | capability probe                                                                                                   |
+| `prompts/`                | versioned Mia agent instructions (`agent-v1.md`)                                                                   |
