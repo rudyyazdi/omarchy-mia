@@ -95,23 +95,26 @@ interface BindingKey {
   digest: string;
 }
 
-/** A report is the same call as the latest revision under its runtime call id only if both tool and arguments match. */
-const sameBinding = (latest: BindingKey, report: BindingKey): boolean =>
-  latest.toolIdentity === report.toolIdentity && latest.digest === report.digest;
+/** A report is the same call as a revision only if both tool and arguments match. */
+const sameBinding = (revision: BindingKey, report: BindingKey): boolean =>
+  revision.toolIdentity === report.toolIdentity && revision.digest === report.digest;
 
 /**
- * How a complete stream proposal binds to its runtime call id. Only the latest revision is compared. The same
- * binding attaches the proposal to it whatever its status: the permission request can arrive before its stream
- * line, so a matching proposal for a latest revision already released or refused is still that call's
- * announcement. Anything else proposes a new revision.
+ * How a complete stream proposal binds to its runtime call id. Every revision under the id is compared, latest
+ * first, not only the latest: the permission request can arrive before its stream line, and a changed request
+ * can open a later revision before the earlier one's line arrives. A matching proposal is that revision's
+ * announcement whatever its status, so it attaches to it and supersedes nothing. Anything else proposes a new
+ * revision.
  */
-export type StreamBinding<Latest> = { kind: "attach"; call: Latest } | { kind: "propose" };
+export type StreamBinding<Call> = { kind: "attach"; call: Call } | { kind: "propose" };
 
-export const bindStreamProposal = <Latest extends BindingKey>(
-  latest: Latest | undefined,
+export const bindStreamProposal = <Call extends BindingKey>(
+  revisions: readonly Call[],
   report: BindingKey,
-): StreamBinding<Latest> =>
-  latest && sameBinding(latest, report) ? { kind: "attach", call: latest } : { kind: "propose" };
+): StreamBinding<Call> => {
+  const call = revisions.findLast((revision) => sameBinding(revision, report));
+  return call ? { kind: "attach", call } : { kind: "propose" };
+};
 
 /**
  * How a permission request binds to its runtime call id. It reuses the latest revision while that is still
@@ -390,9 +393,34 @@ export const decideAbandonment = (input: {
 
 // ---------------------------------------------------------------- results and completion
 
-/** A result settles a released call; it never revives one already refused, invalidated, or settled. */
+/** Released to the runtime: the only kind of call that can have run. */
+const isReleased = (status: ToolCallStatus): boolean =>
+  status === "permitted" || status === "dispatched";
+
+/**
+ * Which revision under a runtime call id a tool result binds to. The runtime can only have run a revision Mia
+ * released, so the latest released one takes the result, even when a later revision (a stream line with another
+ * binding) is still held. With none released, the latest refused or settled revision takes it and keeps its
+ * status: that is a refused call's error result, or a repeated one. A held revision never takes a result, so it
+ * is never recorded as having run; with nothing else, the result is unmatched.
+ */
+export type ResultBinding<Call> = { kind: "bind"; call: Call } | { kind: "unmatched" };
+
+export const bindToolResult = <Call extends { status: ToolCallStatus }>(
+  revisions: readonly Call[],
+): ResultBinding<Call> => {
+  const call =
+    revisions.findLast((revision) => isReleased(revision.status)) ??
+    revisions.findLast((revision) => !isHeld(revision.status));
+  return call ? { kind: "bind", call } : { kind: "unmatched" };
+};
+
+/**
+ * A result settles a released call; it never revives one already refused, invalidated, or settled, and never
+ * completes one still held, which Mia never released.
+ */
 export const statusAfterResult = (status: ToolCallStatus, isError: boolean): ToolCallStatus => {
-  if (TERMINAL.has(status)) return status;
+  if (TERMINAL.has(status) || isHeld(status)) return status;
   return isError ? "failed" : "completed";
 };
 

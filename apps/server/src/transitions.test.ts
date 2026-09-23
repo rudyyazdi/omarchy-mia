@@ -5,6 +5,7 @@ import type { ToolCallPolicy } from "@mia/records";
 import {
   bindPermissionRequest,
   bindStreamProposal,
+  bindToolResult,
   classifyActions,
   classifyTask,
   decideAbandonment,
@@ -271,27 +272,46 @@ describe("binding", () => {
     });
   });
 
-  it("attaches a stream proposal to the latest revision only when tool and arguments both match", () => {
-    expect(bindStreamProposal(latest, same)).toEqual({ kind: "attach", call: latest });
-    expect(bindStreamProposal(held, same)).toEqual({ kind: "attach", call: held });
-    expect(bindStreamProposal(latest, { ...same, digest: "d2" })).toEqual({ kind: "propose" });
-    expect(bindStreamProposal(held, { ...same, toolIdentity: "mcp__d1__read" })).toEqual({
+  it("attaches a stream proposal to a revision only when tool and arguments both match", () => {
+    expect(bindStreamProposal([latest], same)).toEqual({ kind: "attach", call: latest });
+    expect(bindStreamProposal([held], same)).toEqual({ kind: "attach", call: held });
+    expect(bindStreamProposal([latest], { ...same, digest: "d2" })).toEqual({ kind: "propose" });
+    expect(bindStreamProposal([held], { ...same, toolIdentity: "mcp__d1__read" })).toEqual({
       kind: "propose",
     });
-    expect(bindStreamProposal(undefined, same)).toEqual({ kind: "propose" });
+    expect(bindStreamProposal([], same)).toEqual({ kind: "propose" });
   });
 
   it.each<ToolCallStatus>(["dispatched", "denied", "invalidated", "blocked_gate"])(
     "attaches a matching stream proposal to a %s call, since the request can come first",
     (status) => {
       const settled: typeof latest = { ...latest, status };
-      expect(bindStreamProposal(settled, same)).toEqual({ kind: "attach", call: settled });
-      expect(bindStreamProposal(settled, { ...same, digest: "d2" })).toEqual({ kind: "propose" });
-      expect(bindStreamProposal(settled, { ...same, toolIdentity: "mcp__d1__read" })).toEqual({
+      expect(bindStreamProposal([settled], same)).toEqual({ kind: "attach", call: settled });
+      expect(bindStreamProposal([settled], { ...same, digest: "d2" })).toEqual({
+        kind: "propose",
+      });
+      expect(bindStreamProposal([settled], { ...same, toolIdentity: "mcp__d1__read" })).toEqual({
         kind: "propose",
       });
     },
   );
+
+  it("attaches a late stream line to the earlier revision it announces, not the later one awaiting approval", () => {
+    const earlier: typeof latest = { ...latest, status: "invalidated" };
+    const later: typeof latest = { ...held, digest: "d2" };
+    expect(bindStreamProposal([earlier, later], same)).toEqual({ kind: "attach", call: earlier });
+    expect(bindStreamProposal([earlier, later], next)).toEqual({ kind: "attach", call: later });
+    expect(bindStreamProposal([earlier, later], { ...same, digest: "d3" })).toEqual({
+      kind: "propose",
+    });
+  });
+
+  it("attaches to the latest of several revisions with the same binding", () => {
+    const first: typeof latest = { ...latest, status: "invalidated" };
+    const middle: typeof latest = { ...latest, status: "invalidated", digest: "d2" };
+    const last: typeof latest = { ...held };
+    expect(bindStreamProposal([first, middle, last], same)).toEqual({ kind: "attach", call: last });
+  });
 
   it("invalidates a held binding and its approval, and leaves a released one alone", () => {
     const revision = (status: ToolCallStatus, approvalId: string | null) => ({
@@ -341,6 +361,48 @@ describe("completion", () => {
     expect(statusAfterResult("dispatched", true)).toBe("failed");
     expect(statusAfterResult("denied", false)).toBe("denied");
     expect(statusAfterResult("invalidated", false)).toBe("invalidated");
+  });
+
+  it.each<ToolCallStatus>(["proposed", "awaiting_approval"])(
+    "never completes a %s call, which Mia never released",
+    (status) => {
+      expect(statusAfterResult(status, false)).toBe(status);
+      expect(statusAfterResult(status, true)).toBe(status);
+    },
+  );
+
+  it("binds a result to the released revision, not a later one still held", () => {
+    const released = call("dispatched", "rev1");
+    const heldLater = call("proposed", "rev2");
+    expect(bindToolResult([released, heldLater])).toEqual({ kind: "bind", call: released });
+    expect(bindToolResult([call("permitted", "rev1"), call("awaiting_approval", "rev2")])).toEqual({
+      kind: "bind",
+      call: call("permitted", "rev1"),
+    });
+  });
+
+  it("binds a result to the latest released revision over a later refused one", () => {
+    const released = call("dispatched", "rev2");
+    expect(bindToolResult([call("invalidated", "rev1"), released, call("denied", "rev3")])).toEqual(
+      { kind: "bind", call: released },
+    );
+  });
+
+  it("binds a result with nothing released to the latest refused or settled revision", () => {
+    const refused = call("denied", "rev1");
+    expect(bindToolResult([refused, call("proposed", "rev2")])).toEqual({
+      kind: "bind",
+      call: refused,
+    });
+    const settled = call("completed", "rev1");
+    expect(bindToolResult([settled])).toEqual({ kind: "bind", call: settled });
+  });
+
+  it("leaves a result unmatched when every revision is still held, or there is none", () => {
+    expect(bindToolResult([call("proposed", "rev1"), call("awaiting_approval", "rev2")])).toEqual({
+      kind: "unmatched",
+    });
+    expect(bindToolResult([])).toEqual({ kind: "unmatched" });
   });
 
   it("classifies a released call without a result as unknown and a held one as never run", () => {
