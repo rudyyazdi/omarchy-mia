@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { ProfileSchema } from "@mia/agent-adapter";
 import { ClientCommandSchema, type ClientCommand } from "@mia/protocol";
-import { ackEvent } from "./ack-fixture.ts";
+import { ackEvent, refusalEvent } from "./ack-fixture.ts";
 import { runTextClient, type TextClientDeadlines, type TextClientIo } from "./repl.ts";
 
 const PRODUCTION_EXAMPLE = resolve(
@@ -151,6 +151,24 @@ describe("text client session", () => {
     expect(printed).toContain("✗ ack deadline passed\n");
   });
 
+  it("prints a refused submission's disposition and error, then handles the next line", async () => {
+    await start(
+      onSubmit((socket, command) =>
+        command.type === "submit_text" && command.payload.text === "one"
+          ? socket.send(
+              JSON.stringify(
+                refusalEvent(command.message_id, { code: "busy", message: "a task is running" }),
+              ),
+            )
+          : accept(socket, command),
+      ),
+    );
+    io.input.end("one\ntwo\n");
+    await expect(session).resolves.toBeUndefined();
+    expect(submitted()).toEqual(["one", "two"]);
+    expect(printed).toContain("submit rejected: busy: a task is running\n");
+  });
+
   it("/quit ends the session, drops the lines after it, and prompts no more", async () => {
     await start();
     io.input.write("/quit\nhello\n");
@@ -172,13 +190,8 @@ describe("text client session", () => {
   it("rejects, and closes the connection, when the conversation cannot start", async () => {
     const fake = await start((socket, command) => {
       if (command.type !== "start_conversation") return accept(socket, command);
-      const error = { code: "invalid_state" as const, message: "no" };
-      const refusal = ackEvent(command.message_id);
       socket.send(
-        JSON.stringify({
-          ...refusal,
-          payload: { ...refusal.payload, disposition: "rejected", error },
-        }),
+        JSON.stringify(refusalEvent(command.message_id, { code: "invalid_state", message: "no" })),
       );
     });
     const [socket] = await once(fake, "connection");

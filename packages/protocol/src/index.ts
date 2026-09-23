@@ -10,7 +10,10 @@ export {
   ToolPolicySchema,
 } from "./messages.ts";
 export type {
+  AcceptedAck,
   AckDisposition,
+  AckError,
+  AckPayload,
   ApprovalStatus,
   ClientCommand,
   ClientDiagnostics,
@@ -18,6 +21,7 @@ export type {
   ErrorCode,
   ErrorDisposition,
   EventPayload,
+  RefusedAck,
   ServerEvent,
   ServerEventOf,
   ServerEventType,

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type {
   AckDisposition,
+  AckError,
   ApprovalStatus,
   ErrorCode,
   ErrorDisposition,
@@ -286,7 +287,7 @@ export type CommandDisposition = "received" | AckDisposition;
 /** The reply a finished command's ack carried: what a duplicate of it is answered with. */
 export type CommandReply =
   | { disposition: "accepted"; result: Record<string, unknown> | null }
-  | { disposition: ErrorDisposition; error: { code: ErrorCode; message: string } };
+  | { disposition: ErrorDisposition; error: AckError };
 export type ArtifactKind = "snapshot" | "tool_output" | "runtime_transcript" | "effort_evidence";
 export type ProvenanceRole =
   | "agent_prompt"

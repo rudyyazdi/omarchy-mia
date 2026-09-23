@@ -4,7 +4,7 @@ import { clearLine, createInterface, cursorTo, type Interface } from "node:readl
 import { match, P } from "ts-pattern";
 import { loadProfile } from "@mia/agent-adapter";
 import { errorMessage, type EventPayload, type ServerEventOf } from "@mia/protocol";
-import { MiaClient, type AckPayload } from "./client.ts";
+import { describeAck, MiaClient } from "./client.ts";
 
 /** Where to connect: read from a server profile (loaded by `loadProfile`, whose placeholders `env` fills), or given directly. */
 export type ConnectionOptions =
@@ -26,16 +26,6 @@ export interface TextClientIo {
   input: NodeJS.ReadableStream;
   output: NodeJS.WritableStream & { isTTY?: boolean };
 }
-
-/** An ack as the person reads it: the disposition, and the error when the command was refused. */
-const describeAck = (ack: AckPayload): string =>
-  match(ack)
-    .with({ disposition: "accepted" }, () => "accepted")
-    .with(
-      { disposition: P.union("rejected", "failed") },
-      ({ disposition, error }) => `${disposition}: ${error.code}: ${error.message}`,
-    )
-    .exhaustive();
 
 const resolveConnection = (options: ConnectionOptions): { url: string; secretFile: string } => {
   if (!("config" in options)) return options;

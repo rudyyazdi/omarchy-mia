@@ -10,9 +10,9 @@ import {
   LIMITS,
   PROTOCOL_VERSION,
   registerSecret,
+  type AckError,
+  type AckPayload,
   type ClientCommand,
-  type ErrorCode,
-  type EventPayload,
   type ServerEvent,
 } from "@mia/protocol";
 import { nowIso, type CommandReply, type RecordedCommand, type RecordWriter } from "@mia/records";
@@ -60,8 +60,6 @@ interface ConnectionState {
   clientBuild: unknown;
   opened: boolean;
 }
-
-type AckPayload = EventPayload<"ack">;
 
 /**
  * The reply to a command that was recorded but did not finish: handling threw after the record committed, or a
@@ -167,11 +165,7 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
     if (conn.socket.readyState === conn.socket.OPEN) conn.socket.send(JSON.stringify(event));
   };
 
-  const rejectRaw = (
-    conn: ConnectionState,
-    commandId: string,
-    error: { code: ErrorCode; message: string },
-  ) => {
+  const rejectRaw = (conn: ConnectionState, commandId: string, error: AckError) => {
     ack(conn, { command_id: commandId, disposition: "rejected", error });
   };
 

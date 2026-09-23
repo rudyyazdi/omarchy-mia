@@ -5,7 +5,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach } from "vitest";
 import type { Profile } from "@mia/agent-adapter";
 import { startServer, type MiaServer, type TurnRunner } from "@mia/server";
-import { MiaClient, type AckPayload, type RefusedAck } from "@mia/text-client";
+import type { AckError, AckPayload } from "@mia/protocol";
+import { describeAck, MiaClient } from "@mia/text-client";
 import { Catalog } from "@mia/records";
 import { ScriptedRuntime } from "./scripted-runtime.ts";
 
@@ -40,12 +41,12 @@ export const mustString = (value: unknown, what = "value"): string => {
 /** The result of an ack the test expects accepted; throws with the ack's error otherwise. */
 export const ackResult = (ack: AckPayload): Record<string, unknown> => {
   if (ack.disposition !== "accepted")
-    throw new Error(`expected an accepted ack, got ${ack.disposition}: ${ack.error.message}`);
+    throw new Error(`expected an accepted ack, got ${describeAck(ack)}`);
   return must(ack.result, "ack result");
 };
 
 /** The error of an ack the test expects refused; throws if the command was accepted. */
-export const ackError = (ack: AckPayload): RefusedAck["error"] => {
+export const ackError = (ack: AckPayload): AckError => {
   if (ack.disposition === "accepted") throw new Error("expected a refused ack, got accepted");
   return ack.error;
 };

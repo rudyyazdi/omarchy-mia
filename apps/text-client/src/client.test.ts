@@ -3,8 +3,8 @@ import { createServer, type Socket } from "node:net";
 import { describe, expect, it } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
 import { ackEvent } from "./ack-fixture.ts";
-import { ClientCommandSchema } from "@mia/protocol";
-import { MiaClient, type AcceptedAck, type RefusedAck } from "./client.ts";
+import { ClientCommandSchema, type AcceptedAck, type RefusedAck } from "@mia/protocol";
+import { MiaClient } from "./client.ts";
 
 const makeClient = (url = "ws://127.0.0.1:1") =>
   new MiaClient({
