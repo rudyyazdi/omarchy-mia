@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigurationError, validateRuntimeConfig } from "@mia/agent-adapter";
 import { ObjectStore } from "@mia/records";
-import type { MiaClient } from "@mia/text-client";
+import type { AckPayload, MiaClient } from "@mia/text-client";
 import { ScriptedRuntime, type ScriptedTurn } from "./scripted-runtime.ts";
 import {
   must,
@@ -158,9 +158,13 @@ describe("streaming and commands", () => {
       event.sequence === null ? [] : [event.sequence],
     );
     expect([...seqs].sort((left, right) => left - right)).toEqual(seqs);
-    // resend with the same message id: duplicate disposition, no new task
+    // resend with the same message id: the original reply marked duplicate, no new task
     const dup = await client.submitText("hello", { messageId: "cmd-1" });
-    expect(dup.disposition).toBe("duplicate");
+    expect(dup).toMatchObject({
+      disposition: "accepted",
+      duplicate: true,
+      result: { task_id: taskId },
+    });
     expect(runtime.turns).toHaveLength(1);
     // same id, different payload: conflict, nothing executed
     const conflict = await client.submitText("different", { messageId: "cmd-1" });
@@ -168,6 +172,88 @@ describe("streaming and commands", () => {
     expect(conflict.error?.code).toBe("duplicate_command_conflict");
     expect(rows("SELECT id FROM tasks")).toHaveLength(1);
     expect(taskStatus(taskId)).toBe("completed");
+  });
+
+  it("answers a resend on a new connection of the same client with the original reply", async () => {
+    const started = await client.send("start_conversation", {}, { messageId: "cmd-start" });
+    client.conversationId = mustString(started.result?.conversation_id, "conversation id");
+    const { turn, taskId } = await submit("hello", "cmd-1");
+    const busy = await client.submitText("second", { messageId: "cmd-2" });
+    expect(busy.error?.code).toBe("busy");
+    client.close();
+    const again = await ts.connect("client-A");
+    again.conversationId = client.conversationId;
+    const resent = await again.submitText("hello", { messageId: "cmd-1" });
+    expect(resent).toEqual({
+      command_id: "cmd-1",
+      disposition: "accepted",
+      duplicate: true,
+      result: { task_id: taskId, execution_id: expect.any(String), execution_epoch: 1 },
+    });
+    expect(runtime.turns).toHaveLength(1);
+    expect(await again.submitText("second", { messageId: "cmd-2" })).toEqual({
+      ...busy,
+      duplicate: true,
+    });
+    expect(await again.send("start_conversation", {}, { messageId: "cmd-start" })).toEqual({
+      ...started,
+      duplicate: true,
+    });
+    turn.end();
+    await again.waitFor("task_finished");
+  });
+
+  /** Submit "hello" as cmd-1 under an injected fault: its turn starts, but the ack reports it failed. */
+  const submitThatFails = async (): Promise<{ failed: AckPayload; turn: ScriptedTurn }> => {
+    const started = runtime.nextTurn();
+    const failed = await client.submitText("hello", { messageId: "cmd-1" });
+    expect(failed).toMatchObject({ disposition: "failed", error: { code: "internal" } });
+    return { failed, turn: await started };
+  };
+
+  const cmd1Rows = () =>
+    rows("SELECT disposition, error_code FROM commands WHERE client_command_id = 'cmd-1'");
+
+  /** A resend of cmd-1 repeats the failed reply, starts no second turn, and leaves the record failed. */
+  const expectResendRepeats = async (failed: AckPayload, turn: ScriptedTurn): Promise<void> => {
+    expect(await client.submitText("hello", { messageId: "cmd-1" })).toEqual({
+      ...failed,
+      duplicate: true,
+    });
+    expect(runtime.turns).toHaveLength(1);
+    expect(cmd1Rows()).toEqual([{ disposition: "failed", error_code: "internal" }]);
+    turn.end();
+    await client.waitFor("task_finished");
+  };
+
+  it("answers a command that fails after it is recorded as failed, and never runs it again", async () => {
+    const engine = ts.server.engine;
+    const original = engine.submitText.bind(engine);
+    engine.submitText = (ctx, payload) => {
+      engine.submitText = original;
+      original(ctx, payload);
+      throw new Error("simulated failure after dispatch");
+    };
+    const { failed, turn } = await submitThatFails();
+    expect(failed.error?.message).not.toContain("nothing executed");
+    expect(failed.duplicate).toBeUndefined();
+    await expectResendRepeats(failed, turn);
+  });
+
+  it("settles a command whose outcome could not be stored as failed when it is resent", async () => {
+    const catalog = ts.server.catalog;
+    const update = catalog.update.bind(catalog);
+    let failures = 2; // the accepted outcome, then the failed one
+    catalog.update = (table, id, row) => {
+      if (table === "commands" && failures > 0) {
+        failures -= 1;
+        throw new Error("simulated write failure");
+      }
+      update(table, id, row);
+    };
+    const { failed, turn } = await submitThatFails();
+    expect(cmd1Rows()).toEqual([{ disposition: "received", error_code: null }]);
+    await expectResendRepeats(failed, turn);
   });
 
   it("rejects unsupported protocol versions, invalid JSON, oversized text and busy submissions", async () => {

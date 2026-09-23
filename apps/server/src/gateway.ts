@@ -3,9 +3,10 @@ import { once } from "node:events";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { dirname } from "node:path";
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
+  errorMessage,
   LIMITS,
   PROTOCOL_VERSION,
   registerSecret,
@@ -14,7 +15,7 @@ import {
   type EventPayload,
   type ServerEvent,
 } from "@mia/protocol";
-import { nowIso, type RecordWriter } from "@mia/records";
+import { nowIso, type CommandReply, type RecordedCommand, type RecordWriter } from "@mia/records";
 import { decodeEnvelope } from "./decode.ts";
 import type { CommandContext, CommandResult, Engine } from "./engine.ts";
 
@@ -65,7 +66,43 @@ interface AckReply {
   disposition: EventPayload<"ack">["disposition"];
   error?: { code: ErrorCode; message: string };
   result?: Record<string, unknown>;
+  duplicate?: true;
 }
+
+/**
+ * The reply to a command that was recorded but did not finish: handling threw after the record committed, or a
+ * duplicate found it still `received` (dispatch is synchronous, so that means the original never finished).
+ * The engine may have acted on it, so it is never run again.
+ */
+const FAILED_AFTER_RECORD: CommandReply = {
+  disposition: "failed",
+  error: {
+    code: "internal",
+    message:
+      "internal error after the command was recorded; it may have taken effect and will not run again",
+  },
+};
+
+/** How far handling a command got before it threw, which decides what its reply may claim. */
+type Progress =
+  { stage: "unrecorded" } | { stage: "recorded"; commandId: string } | { stage: "finished" };
+
+const replyFor = (result: CommandResult): CommandReply =>
+  result.ok
+    ? { disposition: "accepted", result: result.result ?? null }
+    : { disposition: "rejected", error: { code: result.code, message: result.message } };
+
+const ackFields = (reply: CommandReply): Omit<AckReply, "commandId"> =>
+  match(reply)
+    .with({ disposition: "accepted" }, ({ result }): Omit<AckReply, "commandId"> => ({
+      disposition: "accepted",
+      ...(result === null ? {} : { result }),
+    }))
+    .with({ disposition: P.union("rejected", "failed") }, ({ disposition, error }) => ({
+      disposition,
+      error,
+    }))
+    .exhaustive();
 
 const dispatch = (engine: Engine, ctx: CommandContext, command: ClientCommand): CommandResult =>
   match(command)
@@ -79,7 +116,8 @@ const dispatch = (engine: Engine, ctx: CommandContext, command: ClientCommand): 
 
 /**
  * Client gateway: loopback-only, bearer-authenticated WebSocket. Validates every envelope before any state
- * changes, deduplicates command IDs per connection, acknowledges every command, and delivers events.
+ * changes, deduplicates command IDs per client across its connections, acknowledges every command, and
+ * delivers events.
  */
 export const startGateway = async (options: GatewayOptions): Promise<GatewayHandle> => {
   const secret = loadOrCreateSecret(options.secretFile);
@@ -139,12 +177,45 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
     ack(conn, { commandId, disposition: "rejected", error });
   };
 
+  /** Store a recorded command as failed; a failure to store it is logged, since the reply says the same. */
+  const settleFailed = (recordedId: string) => {
+    try {
+      options.writer.finishCommand(recordedId, FAILED_AFTER_RECORD);
+    } catch (error) {
+      options.log(`could not record command ${recordedId} as failed: ${errorMessage(error)}`);
+    }
+  };
+
+  /** Answer a message_id the client already used, from its record; nothing runs. */
+  const answerRecorded = (
+    conn: ConnectionState,
+    commandId: string,
+    recorded: Exclude<RecordedCommand, { kind: "new" }>,
+  ) =>
+    match(recorded)
+      .with({ kind: "conflict" }, () =>
+        rejectRaw(conn, commandId, {
+          code: "duplicate_command_conflict",
+          message: "message_id reused with a different payload; nothing executed",
+        }),
+      )
+      .with({ kind: "duplicate" }, ({ reply }) =>
+        ack(conn, { commandId, ...ackFields(reply), duplicate: true }),
+      )
+      .with({ kind: "unfinished" }, (unfinished) => {
+        settleFailed(unfinished.commandId);
+        ack(conn, { commandId, ...ackFields(FAILED_AFTER_RECORD), duplicate: true });
+      })
+      .exhaustive();
+
   /**
-   * The effect half of a message: adopt the connection on its first command, record, dispatch, ack.
-   * Records are committed before the engine runs so a crash mid-dispatch leaves the command visible.
+   * The effect half of a message: adopt the connection on its first command, record, dispatch, finish, ack.
+   * The command is recorded `received` before the engine runs and finished with the reply its ack carries,
+   * so a duplicate is answered from the record and never runs twice.
    */
   const handleCommand = (conn: ConnectionState, command: ClientCommand) => {
     const commandId = command.message_id;
+    let progress: Progress = { stage: "unrecorded" };
     try {
       if (!conn.opened) {
         conn.clientId = command.client_id;
@@ -172,59 +243,41 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
         payload: command.payload,
         conversationId,
       });
-      if (recorded.duplicate) {
-        if (!recorded.sameDigest)
-          return rejectRaw(conn, commandId, {
-            code: "duplicate_command_conflict",
-            message: "message_id reused with a different payload; nothing executed",
-          });
-        return ack(conn, {
-          commandId,
-          disposition: "duplicate",
-          ...(recorded.error ? { error: { code: "invalid_state", message: recorded.error } } : {}),
-        });
-      }
-      const result = dispatch(
-        options.engine,
-        {
-          connectionId: conn.id,
-          clientId: command.client_id,
-          commandId: command.message_id,
-          clientBuild: conn.clientBuild,
-        },
-        command,
+      if (recorded.kind !== "new") return answerRecorded(conn, commandId, recorded);
+      progress = { stage: "recorded", commandId: recorded.commandId };
+      const reply = replyFor(
+        dispatch(
+          options.engine,
+          {
+            connectionId: conn.id,
+            clientId: command.client_id,
+            commandId: command.message_id,
+            clientBuild: conn.clientBuild,
+          },
+          command,
+        ),
       );
-      if (result.ok) {
-        options.writer.finishCommand(recorded.commandId, {
-          disposition: "accepted",
-          error: null,
-          resultEventId: null,
-        });
-        ack(conn, {
-          commandId,
-          disposition: "accepted",
-          ...(result.result ? { result: result.result } : {}),
-        });
-      } else {
-        options.writer.finishCommand(recorded.commandId, {
-          disposition: "rejected",
-          error: `${result.code}: ${result.message}`,
-          resultEventId: null,
-        });
-        ack(conn, {
-          commandId,
-          disposition: "rejected",
-          error: { code: result.code, message: result.message },
-        });
-      }
+      options.writer.finishCommand(recorded.commandId, reply);
+      progress = { stage: "finished" };
+      ack(conn, { commandId, ...ackFields(reply) });
     } catch (error) {
       options.log(
         `command handling failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
       );
-      rejectRaw(conn, commandId, {
-        code: "internal",
-        message: "internal error while handling the command; nothing executed",
-      });
+      match(progress)
+        .with({ stage: "unrecorded" }, () =>
+          rejectRaw(conn, commandId, {
+            code: "internal",
+            message: "internal error while handling the command; nothing executed",
+          }),
+        )
+        .with({ stage: "recorded" }, (recorded) => {
+          settleFailed(recorded.commandId);
+          ack(conn, { commandId, ...ackFields(FAILED_AFTER_RECORD) });
+        })
+        // Only the ack itself can throw here; its reply is stored, so a resend receives it.
+        .with({ stage: "finished" }, () => undefined)
+        .exhaustive();
     }
   };
 

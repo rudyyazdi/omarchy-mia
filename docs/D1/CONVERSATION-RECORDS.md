@@ -75,7 +75,7 @@ Each record below exists for a reason the schema cannot express; its columns, ty
 | `tasks` | Work retains its originating conversation even if another becomes active later. |
 | `executions` | Attribute actual runtime attempts and builds; do not assume a task always has only one execution. D1 runs one at a time. |
 | `events` | Ordered history plus causal links across different clocks. Unknown or unobservable timing remains unknown. |
-| `commands` | Detect duplicate commands and reject reuse of an ID with a different payload. |
+| `commands` | Answer a resent command with its original reply instead of running it again, and reject reuse of an ID with a different payload. |
 | `tool_calls` | Distinguish intent, authorization, dispatch, result, and uncertain side effects. |
 | `approvals` | Single-use exact-call authorization; denial and invalidation are evidence too. |
 | `clients`, `client_connections` | Differentiate stable devices from process/connection lifetimes and changing builds. |
@@ -105,7 +105,7 @@ Normalized events and affected state rows commit together. Events describe the e
 | `events(conversation_id, type, sequence)` | Index | Errors, approvals, interruptions, usage and timing without scanning all deltas. |
 | `events(producer_id, producer_event_id)` where producer event ID is present | Partial unique | Deduplicate inbound events only when the source supplies stable event identities; never deduplicate equal text by content. |
 | `events(caused_by_event_id)` | Index | Find effects of a user command, decision or tool result. |
-| `commands(client_connection_id, client_command_id)` | Unique | D1 command deduplication inside an authenticated connection lifetime. D3 extends this to durable retry identity across reconnects. |
+| `commands(client_id, client_command_id)` | Unique | Command deduplication across a client's reconnects; a client that restarts with a new ID starts afresh. |
 | `tool_calls(execution_id, runtime_call_id, binding_revision)` | Unique | Preserve immutable argument bindings under a runtime call ID; the probe establishes ID scope. Only the current revision can be released. |
 | `tool_calls(task_id, proposal_event_id)` | Index | List calls and uncertain outcomes for a task. |
 | `approvals(tool_call_id, execution_epoch)` | Unique | One decision lifecycle for each immutable call binding in an epoch. A changed tool or changed arguments create a new binding at the next revision, supersede the old binding, invalidate its pending approval and require a fresh decision. Never mutate approved arguments or release a superseded revision. |

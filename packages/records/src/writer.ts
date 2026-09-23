@@ -1,7 +1,10 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { match, P } from "ts-pattern";
+import { z } from "zod";
 import {
   canonicalDigest,
+  ErrorCodeSchema,
   redactString,
   redactValue,
   type ApprovalStatus,
@@ -15,7 +18,7 @@ import type {
   ArtifactKind,
   CaptureStatus,
   ClientKind,
-  CommandDisposition,
+  CommandReply,
   CommandRow,
   ConversationStatus,
   ExecutionStatus,
@@ -23,6 +26,43 @@ import type {
   ProvenanceEntryRow,
   ProvenanceRole,
 } from "./schema.ts";
+
+/** What recording a command found: a new command to run, or what to answer a reused message_id with. */
+export type RecordedCommand =
+  | { kind: "new"; commandId: string }
+  /** The message_id was used before with a different payload. */
+  | { kind: "conflict" }
+  /** The message_id was recorded but never finished, so its outcome is unknown. */
+  | { kind: "unfinished"; commandId: string }
+  | { kind: "duplicate"; reply: CommandReply };
+
+/** A stored command row, validated at the SQLite boundary; the table's CHECKs make any other shape corrupt. */
+const StoredCommandSchema = z.discriminatedUnion("disposition", [
+  z.object({ disposition: z.literal("received") }),
+  z.object({ disposition: z.literal("accepted"), result: z.string().nullable() }),
+  z.object({
+    disposition: z.enum(["rejected", "failed"]),
+    error_code: ErrorCodeSchema,
+    error_message: z.string(),
+  }),
+]);
+
+const storedReply = (
+  stored: Exclude<z.infer<typeof StoredCommandSchema>, { disposition: "received" }>,
+): CommandReply =>
+  match(stored)
+    .with({ disposition: "accepted" }, ({ result }): CommandReply => ({
+      disposition: "accepted",
+      result: result === null ? null : z.record(z.string(), z.unknown()).parse(JSON.parse(result)),
+    }))
+    .with(
+      { disposition: P.union("rejected", "failed") },
+      ({ disposition, error_code, error_message }) => ({
+        disposition,
+        error: { code: error_code, message: error_message },
+      }),
+    )
+    .exhaustive();
 
 export interface EventInput {
   conversationId: string;
@@ -126,7 +166,10 @@ export class RecordWriter {
 
   // ---- commands ----
 
-  /** Returns the existing disposition for a duplicate command ID, or null when the command is new (and recorded as accepted-pending). */
+  /**
+   * Record a command before it runs, keyed by the client's own identity so a resend on a new connection
+   * finds it. A message_id the client already used returns what was stored for it instead.
+   */
   recordCommand(input: {
     connectionId: string;
     clientId: string;
@@ -134,31 +177,23 @@ export class RecordWriter {
     type: string;
     payload: unknown;
     conversationId?: string | null;
-  }):
-    | {
-        duplicate: true;
-        disposition: CommandDisposition;
-        sameDigest: boolean;
-        error: string | null;
-        commandId: string;
-      }
-    | { duplicate: false; commandId: string } {
+  }): RecordedCommand {
     const digest = canonicalDigest(input.payload);
     const existing = this.catalog.get<
-      Pick<CommandRow, "id" | "payload_digest" | "disposition" | "error">
+      Pick<
+        CommandRow,
+        "id" | "payload_digest" | "disposition" | "error_code" | "error_message" | "result"
+      >
     >(
-      "SELECT id, payload_digest, disposition, error FROM commands WHERE client_connection_id = ? AND client_command_id = ?",
-      input.connectionId,
+      "SELECT id, payload_digest, disposition, error_code, error_message, result FROM commands WHERE client_id = ? AND client_command_id = ?",
+      input.clientId,
       input.clientCommandId,
     );
     if (existing) {
-      return {
-        duplicate: true,
-        disposition: existing.disposition,
-        sameDigest: existing.payload_digest === digest,
-        error: existing.error,
-        commandId: existing.id,
-      };
+      if (existing.payload_digest !== digest) return { kind: "conflict" };
+      const stored = StoredCommandSchema.parse(existing);
+      if (stored.disposition === "received") return { kind: "unfinished", commandId: existing.id };
+      return { kind: "duplicate", reply: storedReply(stored) };
     }
     const id = newId("cmd");
     this.catalog.insert("commands", {
@@ -169,25 +204,29 @@ export class RecordWriter {
       client_command_id: input.clientCommandId,
       type: input.type,
       payload_digest: digest,
-      disposition: "accepted",
+      disposition: "received",
       received_at: nowIso(),
     });
-    return { duplicate: false, commandId: id };
+    return { kind: "new", commandId: id };
   }
 
-  finishCommand(
-    commandId: string,
-    outcome: {
-      disposition: CommandDisposition;
-      error: string | null;
-      resultEventId: string | null;
-    },
-  ): void {
-    this.catalog.update("commands", commandId, {
-      disposition: outcome.disposition,
-      error: outcome.error,
-      result_event_id: outcome.resultEventId,
-    });
+  /** Store the reply a recorded command's ack carries, so a duplicate of it gets the same one. */
+  finishCommand(commandId: string, reply: CommandReply): void {
+    this.catalog.update(
+      "commands",
+      commandId,
+      match(reply)
+        .with({ disposition: "accepted" }, ({ result }) => ({
+          disposition: "accepted",
+          result: result === null ? null : JSON.stringify(result),
+        }))
+        .with({ disposition: P.union("rejected", "failed") }, ({ disposition, error }) => ({
+          disposition,
+          error_code: error.code,
+          error_message: error.message,
+        }))
+        .exhaustive(),
+    );
   }
 
   // ---- provenance & artifacts ----

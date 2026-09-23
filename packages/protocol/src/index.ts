@@ -1,6 +1,7 @@
 export {
   ClientCommandSchema,
   EnvelopeHeadSchema,
+  ErrorCodeSchema,
   LIMITS,
   PROTOCOL_VERSION,
   ServerEventSchema,
@@ -8,6 +9,7 @@ export {
   ToolPolicySchema,
 } from "./messages.ts";
 export type {
+  AckDisposition,
   ApprovalStatus,
   ClientCommand,
   ClientDiagnostics,
