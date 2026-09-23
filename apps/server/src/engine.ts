@@ -49,7 +49,7 @@ import {
   type DeclaredArtifact,
 } from "./artifact-capture.ts";
 import { collectArtifact } from "./artifact-collector.ts";
-import { createConversationProvenance } from "./provenance.ts";
+import { createConversationProvenance, type ServerIdentity } from "./provenance.ts";
 import {
   bindPermissionRequest,
   bindStreamProposal,
@@ -154,9 +154,8 @@ export interface EngineDeps {
   catalog: Catalog;
   writer: RecordWriter;
   adapter: TurnRunner;
-  sourceRoot: string;
-  /** The server process's environment; conversation provenance probes the runtime with it. */
-  env: NodeJS.ProcessEnv;
+  /** Computed once at startup; every conversation's provenance records it. */
+  identity: ServerIdentity;
   log: (message: string) => void;
 }
 
@@ -422,8 +421,7 @@ export class Engine {
           writer,
           profile,
           clientBuild: ctx.clientBuild,
-          sourceRoot: this.deps.sourceRoot,
-          env: this.deps.env,
+          identity: this.deps.identity,
         });
         const runtimeConversationId = randomUUID();
         const conv = writer.createConversation({
