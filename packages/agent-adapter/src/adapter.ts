@@ -3,13 +3,13 @@ import { existsSync, appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
-import { errorMessage, redactString, redactValue } from "@mia/protocol";
+import { errorMessage, redactString } from "@mia/protocol";
 import type { ApprovalBridge, PermissionHandler } from "./bridge.ts";
 import type { RuntimeConfig } from "./config.ts";
 import { prepareLaunch, type LaunchPlan } from "./launch.ts";
 import { ClaudeTranslator } from "./claude-translate.ts";
 import type { RuntimeEvent, RuntimeInit, TurnSummary } from "./runtime-events.ts";
-import { LineSplitter, parseStreamLine } from "./stream.ts";
+import { LineSplitter, parseStreamLine, redactLine } from "./stream.ts";
 
 export interface TurnOptions {
   text: string;
@@ -224,10 +224,7 @@ export class ClaudeCodeAdapter {
       for (const line of lines) {
         const parsed = parseStreamLine(line);
         if (!parsed) continue;
-        // Retained transcript: structured redaction (sensitive keys and secret-shaped values) when the line parsed as JSON.
-        const retained = parsed.ok
-          ? JSON.stringify(redactValue(JSON.parse(parsed.raw)))
-          : redactString(parsed.raw);
+        const retained = redactLine(parsed);
         try {
           appendFileSync(streamLogPath, retained + "\n", { mode: 0o600 });
         } catch (error) {
@@ -242,7 +239,7 @@ export class ClaudeCodeAdapter {
         else
           emit({
             type: "malformed_event",
-            raw: redactString(parsed.raw).slice(0, 2000),
+            raw: retained.slice(0, 2000),
             error: parsed.error,
             at: now(),
           });
