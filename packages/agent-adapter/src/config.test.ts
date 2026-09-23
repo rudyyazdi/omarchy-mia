@@ -28,6 +28,11 @@ describe("validateRuntimeConfig", () => {
       overrides: { toolPolicy: { mcp__missing__read: "allow" } },
       message: 'no MCP server "missing"',
     },
+    ...["constructor", "toString", "hasOwnProperty", "__proto__"].map((server) => ({
+      name: `policy for inherited name ${server}`,
+      overrides: { toolPolicy: { [`mcp__${server}__x`]: "allow" as const } },
+      message: `no MCP server "${server}"`,
+    })),
     {
       name: "malformed policy identity",
       overrides: { toolPolicy: { invalid: "ask" } },
