@@ -31,7 +31,7 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 const createExport = (root: string) => {
-  const catalog = new Catalog(join(root, "catalog"));
+  const catalog = Catalog.openSync(join(root, "catalog"));
   try {
     const writer = new RecordWriter(catalog);
     const provenanceSetId = writer.createProvenanceSet("export verification fixture");

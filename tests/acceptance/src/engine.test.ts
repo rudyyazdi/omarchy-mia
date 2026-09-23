@@ -1390,7 +1390,7 @@ describe("configuration and provenance", () => {
     writeFileSync(file, "tampered");
     expect(
       new ObjectStore(ts.server.catalog.paths)
-        .read(must(retained.object_digest, "object digest"))
+        .readSync(must(retained.object_digest, "object digest"))
         .toString(),
     ).toBe("D1");
     expect(existsSync(file)).toBe(true);

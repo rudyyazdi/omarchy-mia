@@ -32,7 +32,7 @@ describe("debug commands open the catalog read-only", () => {
 
   it("exports and reconciles an existing catalog", () => {
     const state = join(root, "state");
-    const catalog = new Catalog(state);
+    const catalog = Catalog.openSync(state);
     const conversationId = catalog.transaction(() => {
       const writer = new RecordWriter(catalog);
       const provenanceSetId = writer.createProvenanceSet("debug-cli fixture");

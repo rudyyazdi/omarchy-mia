@@ -8,7 +8,7 @@ import { ConfigurationError, RuntimeConfigSchema, validateRuntimeConfig } from "
  * A profile is explicit about everything. Relative paths resolve against the profile file's directory.
  * Placeholders of the form ${ENV_NAME} in string values are substituted from the environment; an unset
  * placeholder, or one written in a key, is a configuration error. The server and the text client both
- * load a profile through `loadProfile`, so a profile the server rejects also stops the client.
+ * load a profile through `loadProfileSync`, so a profile the server rejects also stops the client.
  */
 export const ProfileSchema = z
   .object({
@@ -75,11 +75,10 @@ const substituteValues = (
   return json;
 };
 
-export const loadProfile = (path: string, env: NodeJS.ProcessEnv): Profile => {
+export const loadProfileSync = (path: string, env: NodeJS.ProcessEnv): Profile => {
   const absolute = resolve(path);
   let raw: string;
   try {
-    // eslint-disable-next-line no-restricted-syntax -- runs before serving: a profile loads at startup
     raw = readFileSync(absolute, "utf8");
   } catch (error) {
     throw new ConfigurationError(`cannot read profile ${absolute}: ${errorMessage(error)}`);

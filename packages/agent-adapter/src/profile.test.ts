@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigurationError } from "./config.ts";
-import { loadProfile, type Profile } from "./profile.ts";
+import { loadProfileSync, type Profile } from "./profile.ts";
 
 const profileInput = (): Profile => ({
   profile: "unit",
@@ -34,10 +34,10 @@ const withProfileFile = (contents: string, check: (path: string) => void) => {
   check(path);
 };
 
-describe("loadProfile", () => {
+describe("loadProfileSync", () => {
   it("resolves paths against the profile directory and substitutes the supplied environment", () => {
     withProfileFile(JSON.stringify(profileInput()), (path) => {
-      const profile = loadProfile(path, { MODEL: "selected-model" });
+      const profile = loadProfileSync(path, { MODEL: "selected-model" });
       const resolved = (name: string) => join(path, "..", name);
       expect(profile).toMatchObject({
         stateDirectory: resolved("state"),
@@ -61,7 +61,7 @@ describe("loadProfile", () => {
     { name: "a brace", value: '}{"executable":"injected"}' },
   ])("keeps a substituted value holding $name as the literal string", ({ value }) => {
     withProfileFile(JSON.stringify(profileInput()), (path) => {
-      const { runtime } = loadProfile(path, { MODEL: value });
+      const { runtime } = loadProfileSync(path, { MODEL: value });
       expect(runtime.model).toBe(value);
       expect(runtime.executable).toBe("claude");
     });
@@ -72,7 +72,7 @@ describe("loadProfile", () => {
     input.notes = ["model ${MODEL}"];
     input.runtime.env = { SELECTED: "${MODEL}" };
     withProfileFile(JSON.stringify(input), (path) => {
-      const profile = loadProfile(path, { MODEL: "m" });
+      const profile = loadProfileSync(path, { MODEL: "m" });
       expect(profile.notes).toEqual(["model m"]);
       expect(profile.runtime.env).toEqual({ SELECTED: "m" });
     });
@@ -80,7 +80,9 @@ describe("loadProfile", () => {
 
   it("reports missing files as configuration errors", () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-missing-profile-"));
-    expect(() => loadProfile(join(directory.path, "absent.json"), {})).toThrow(ConfigurationError);
+    expect(() => loadProfileSync(join(directory.path, "absent.json"), {})).toThrow(
+      ConfigurationError,
+    );
   });
 
   it.each([
@@ -123,7 +125,7 @@ describe("loadProfile", () => {
     },
   ])("rejects $name", ({ contents, message, env = { MODEL: "fixture" } }) => {
     withProfileFile(contents, (path) => {
-      const load = () => loadProfile(path, env);
+      const load = () => loadProfileSync(path, env);
       expect(load).toThrow(ConfigurationError);
       expect(load).toThrow(message);
     });

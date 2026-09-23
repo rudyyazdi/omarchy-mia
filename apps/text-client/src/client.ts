@@ -90,8 +90,7 @@ export class MiaClient extends EventEmitter {
     if (invalid) throw invalid;
   }
 
-  static readSecret(path: string): string {
-    // eslint-disable-next-line no-restricted-syntax -- runs before connecting
+  static readSecretSync(path: string): string {
     return readFileSync(path, "utf8").trim();
   }
 

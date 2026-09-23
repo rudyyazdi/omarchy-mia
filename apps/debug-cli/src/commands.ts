@@ -43,7 +43,7 @@ const printLines = (lines: string[]) => {
  * writable open would create and migrate an empty catalog at a mistyped `--state`.
  */
 const withCatalog = (options: GlobalOptions, run: (catalog: Catalog) => void): void => {
-  const catalog = new Catalog(resolve(options.state), { readonly: true });
+  const catalog = Catalog.openSync(resolve(options.state), { readonly: true });
   try {
     run(catalog);
   } finally {

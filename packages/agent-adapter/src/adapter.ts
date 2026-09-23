@@ -10,7 +10,7 @@ import type { ApprovalBridge, PermissionHandler } from "./bridge.ts";
 import type { RuntimeConfig } from "./config.ts";
 import { untilAborted, withinDeadline } from "./deadline.ts";
 import { prepareLaunch, runtimeEnvironment, type LaunchPlan, type LaunchSetup } from "./launch.ts";
-import { resolveExecutable } from "./resolve-executable.ts";
+import { resolveExecutableSync } from "./resolve-executable.ts";
 import { ClaudeTranslator } from "./claude-translate.ts";
 import type { RuntimeEvent, RuntimeInit, TurnSummary } from "./runtime-events.ts";
 import { parseStreamLine, redactLine } from "./stream.ts";
@@ -104,14 +104,14 @@ const REQUIRED_FLAGS = [
  * `LaunchInput.env`): the executable is looked up on the PATH and run with the environment the launch
  * derives from it (`runtimeEnvironment`), and the credential is detected from it.
  */
-export const probeStaticCapabilities = (
+export const probeStaticCapabilitiesSync = (
   config: RuntimeConfig,
   env: NodeJS.ProcessEnv,
 ): StaticCapabilities => {
   const errors: string[] = [];
   // The launch spawns the runtime in config.workingDirectory with this environment, so probe it the same way.
   const launchEnv = runtimeEnvironment(config, env);
-  const resolved = resolveExecutable(config.executable, {
+  const resolved = resolveExecutableSync(config.executable, {
     path: launchEnv.PATH,
     cwd: config.workingDirectory,
   });
@@ -119,7 +119,6 @@ export const probeStaticCapabilities = (
   let version: string | null = null;
   const flags: Record<string, boolean> = {};
   if (resolved) {
-    // eslint-disable-next-line no-restricted-syntax -- runs before serving: startServer probes the runtime before it listens
     const versionProbe = spawnSync(resolved, ["--version"], {
       encoding: "utf8",
       timeout: 20_000,
@@ -131,7 +130,6 @@ export const probeStaticCapabilities = (
         `"${resolved} --version" failed: ${versionProbe.stderr?.trim() || versionProbe.error?.message || "unknown"}`,
       );
     const help =
-      // eslint-disable-next-line no-restricted-syntax -- runs before serving
       spawnSync(resolved, ["--help"], { encoding: "utf8", timeout: 20_000, env: launchEnv })
         .stdout ?? "";
     for (const flag of REQUIRED_FLAGS) {
@@ -145,7 +143,6 @@ export const probeStaticCapabilities = (
   }
   let credential: StaticCapabilities["credential_source"] = "none_detected";
   if (env.ANTHROPIC_API_KEY) credential = "ANTHROPIC_API_KEY";
-  // eslint-disable-next-line no-restricted-syntax -- runs before serving
   else if (existsSync(join(env.HOME ?? "", ".claude", ".credentials.json")))
     credential = "claude_credentials_file";
   if (credential === "none_detected")

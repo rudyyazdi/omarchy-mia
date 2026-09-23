@@ -50,49 +50,57 @@ export const catalogPaths = (root: string): CatalogPaths => ({
 });
 
 export class Catalog {
-  readonly db: DatabaseSync;
-  readonly paths: CatalogPaths;
   private closed = false;
 
-  constructor(root: string, options: { readonly?: boolean } = {}) {
-    this.paths = catalogPaths(root);
+  private constructor(
+    readonly paths: CatalogPaths,
+    readonly db: DatabaseSync,
+  ) {}
+
+  /**
+   * Open the catalog under `root`, creating and migrating it unless `readonly`. It blocks on the filesystem
+   * and SQLite, so a caller runs it before serving.
+   */
+  static openSync(root: string, options: { readonly?: boolean } = {}): Catalog {
+    const paths = catalogPaths(root);
     if (!options.readonly) {
-      for (const dir of [root, this.paths.objects, this.paths.conversations, this.paths.staging]) {
-        // eslint-disable-next-line no-restricted-syntax -- runs before serving: the catalog opens at startup
+      for (const dir of [root, paths.objects, paths.conversations, paths.staging]) {
         mkdirSync(dir, { recursive: true, mode: 0o700 });
         try {
-          // eslint-disable-next-line no-restricted-syntax -- runs before serving
           chmodSync(dir, 0o700);
         } catch {
           /* best effort */
         }
       }
-      // eslint-disable-next-line no-restricted-syntax -- a readonly open: only the debug CLI and tests open one
-    } else if (!existsSync(this.paths.database)) {
-      throw new Error(`no catalog at ${this.paths.database}`);
+    } else if (!existsSync(paths.database)) {
+      throw new Error(`no catalog at ${paths.database}`);
     }
-    this.db = new DatabaseSync(this.paths.database, { readOnly: options.readonly === true });
-    // SQLite requires each connection to opt into foreign-key enforcement.
-    this.db.exec("PRAGMA foreign_keys = ON");
-    if (!options.readonly) {
-      this.db.exec("PRAGMA journal_mode = WAL");
-      this.db.exec("PRAGMA synchronous = FULL");
-      this.migrate();
-      try {
-        // eslint-disable-next-line no-restricted-syntax -- runs before serving
-        chmodSync(this.paths.database, 0o600);
-      } catch {
-        /* best effort */
+    const catalog = new Catalog(
+      paths,
+      new DatabaseSync(paths.database, { readOnly: options.readonly === true }),
+    );
+    // A failed open closes the connection, so it leaves no handle (and no write-ahead log) behind.
+    try {
+      // SQLite requires each connection to opt into foreign-key enforcement.
+      catalog.db.exec("PRAGMA foreign_keys = ON");
+      if (!options.readonly) {
+        catalog.db.exec("PRAGMA journal_mode = WAL");
+        catalog.db.exec("PRAGMA synchronous = FULL");
+        catalog.migrate();
+        try {
+          chmodSync(paths.database, 0o600);
+        } catch {
+          /* best effort */
+        }
+      } else {
+        // A reader cannot migrate, but it must still refuse a catalog whose rows it would misread.
+        catalog.checkVersion(catalog.storedVersion() ?? "none");
       }
-    } else {
-      // A reader cannot migrate, but it must still refuse a catalog whose rows it would misread.
-      try {
-        this.checkVersion(this.storedVersion() ?? "none");
-      } catch (error) {
-        this.db.close();
-        throw error;
-      }
+    } catch (error) {
+      catalog.db.close();
+      throw error;
     }
+    return catalog;
   }
 
   private storedVersion(): number | undefined {

@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest";
 import {
   boundedRuntimeFileReader,
   hookEvidenceFrom,
-  probeStaticCapabilities,
+  probeStaticCapabilitiesSync,
   readRuntimeFile,
   writeLaunchFiles,
   type RuntimeFileRead,
@@ -204,13 +204,13 @@ describe("hookEvidenceFrom", () => {
   });
 });
 
-describe("probeStaticCapabilities", () => {
+describe("probeStaticCapabilitiesSync", () => {
   const probe = (
     env: NodeJS.ProcessEnv,
     executable = "mia-test-runtime-that-is-not-installed",
     configEnv: Record<string, string> = {},
   ) =>
-    probeStaticCapabilities(
+    probeStaticCapabilitiesSync(
       {
         kind: "claude-code",
         executable,

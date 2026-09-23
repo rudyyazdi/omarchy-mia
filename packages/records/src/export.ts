@@ -129,7 +129,7 @@ export const exportConversation = (
   let included = 0;
   for (const object of snapshot.tables.objects) {
     const digest = object.digest;
-    const status = store.verify(digest, object.byte_count);
+    const status = store.verifySync(digest, object.byte_count);
     objectStatus[digest] = status;
     if (status === "missing") {
       missing.push(digest);
@@ -490,7 +490,7 @@ export const reconcileObjects = (
   const missing: string[] = [];
   const corrupt: string[] = [];
   for (const object of objects) {
-    const status = store.verify(object.digest, object.byte_count);
+    const status = store.verifySync(object.digest, object.byte_count);
     if (status === "missing") missing.push(object.digest);
     if (status === "corrupt") corrupt.push(object.digest);
   }

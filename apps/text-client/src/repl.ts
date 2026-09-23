@@ -2,11 +2,11 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { clearLine, createInterface, cursorTo, type Interface } from "node:readline";
 import { match, P } from "ts-pattern";
-import { loadProfile } from "@mia/agent-adapter";
+import { loadProfileSync } from "@mia/agent-adapter";
 import { errorMessage, type Decision, type EventPayload, type ServerEventOf } from "@mia/protocol";
 import { describeAck, MiaClient } from "./client.ts";
 
-/** Where to connect: read from a server profile (loaded by `loadProfile`, whose placeholders `env` fills), or given directly. */
+/** Where to connect: read from a server profile (loaded by `loadProfileSync`, whose placeholders `env` fills), or given directly. */
 export type ConnectionOptions =
   { config: string; env: NodeJS.ProcessEnv } | { url: string; secretFile: string };
 
@@ -27,9 +27,9 @@ export interface TextClientIo {
   output: NodeJS.WritableStream & { isTTY?: boolean };
 }
 
-const resolveConnection = (options: ConnectionOptions): { url: string; secretFile: string } => {
+const resolveConnectionSync = (options: ConnectionOptions): { url: string; secretFile: string } => {
   if (!("config" in options)) return options;
-  const { server } = loadProfile(options.config, options.env);
+  const { server } = loadProfileSync(options.config, options.env);
   return { url: `ws://${server.host}:${server.port}`, secretFile: server.secretFile };
 };
 
@@ -242,7 +242,8 @@ export const runTextClient = async (
   io: TextClientIo,
   deadlines: TextClientDeadlines,
 ): Promise<void> => {
-  const { url, secretFile } = resolveConnection(options);
+  // eslint-disable-next-line no-restricted-syntax -- runs before connecting
+  const { url, secretFile } = resolveConnectionSync(options);
   // eslint-disable-next-line no-restricted-syntax -- runs before connecting
   if (!existsSync(secretFile))
     throw new Error(
@@ -253,7 +254,8 @@ export const runTextClient = async (
     spawnSync("git", ["rev-parse", "--short", "HEAD"], { encoding: "utf8" }).stdout?.trim() || null;
   const client = new MiaClient({
     url,
-    secret: MiaClient.readSecret(secretFile),
+    // eslint-disable-next-line no-restricted-syntax -- runs before connecting
+    secret: MiaClient.readSecretSync(secretFile),
     build: { name: "mia-text-client", version: "0.1.0", commit, dirty: null },
   });
   const session: Session = {

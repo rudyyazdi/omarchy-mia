@@ -14,16 +14,14 @@ export interface BuildInfo {
   source_root: string;
 }
 
-const git = (args: string[], cwd: string): string | null => {
-  // eslint-disable-next-line no-restricted-syntax -- runs before serving: startServer collects build info before it listens
+const gitSync = (args: string[], cwd: string): string | null => {
   const result = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 20_000 });
   return result.status === 0 ? result.stdout : null;
 };
 
 /** The `version` field of a package.json, when the file is readable and carries one. */
-const packageVersion = (packageJsonPath: string): string | undefined => {
+const packageVersionSync = (packageJsonPath: string): string | undefined => {
   try {
-    // eslint-disable-next-line no-restricted-syntax -- runs before serving
     const parsed: unknown = JSON.parse(readFileSync(packageJsonPath, "utf8"));
     if (
       typeof parsed === "object" &&
@@ -38,11 +36,24 @@ const packageVersion = (packageJsonPath: string): string | undefined => {
   return undefined;
 };
 
+/** One `sha256  path` line per untracked file, or `unreadable  path` for a file that cannot be read. */
+const digestUntrackedSync = (root: string, files: string[]): string => {
+  const lines: string[] = [];
+  for (const file of files) {
+    try {
+      lines.push(`${sha256Hex(readFileSync(resolve(root, file)))}  ${file}`);
+    } catch {
+      lines.push(`unreadable  ${file}`);
+    }
+  }
+  return lines.join("\n");
+};
+
 /** Identify the running source tree: commit, dirty flag and a retained snapshot of local changes. */
-export const collectBuildInfo = (name: string, sourceRoot: string): BuildInfo => {
+export const collectBuildInfoSync = (name: string, sourceRoot: string): BuildInfo => {
   const root = resolve(sourceRoot);
-  const version = packageVersion(resolve(root, "package.json")) ?? "0.0.0";
-  const commit = git(["rev-parse", "HEAD"], root)?.trim() ?? null;
+  const version = packageVersionSync(resolve(root, "package.json")) ?? "0.0.0";
+  const commit = gitSync(["rev-parse", "HEAD"], root)?.trim() ?? null;
   if (!commit)
     return {
       name,
@@ -53,24 +64,18 @@ export const collectBuildInfo = (name: string, sourceRoot: string): BuildInfo =>
       local_changes: null,
       source_root: root,
     };
-  const status = git(["status", "--porcelain"], root) ?? "";
+  const status = gitSync(["status", "--porcelain"], root) ?? "";
   const dirty = status.trim().length > 0;
   let localChanges: string | null = null;
   if (dirty) {
-    const diff = git(["diff", "HEAD", "--", ".", ":(exclude)*.sqlite"], root) ?? "";
+    const diff = gitSync(["diff", "HEAD", "--", ".", ":(exclude)*.sqlite"], root) ?? "";
     // Untracked files are outside `git diff`; retain their names and content digests so the build digest is content-sensitive.
-    const untracked = (git(["ls-files", "--others", "--exclude-standard"], root) ?? "")
-      .split("\n")
-      .filter(Boolean)
-      .map((file) => {
-        try {
-          // eslint-disable-next-line no-restricted-syntax -- runs before serving
-          return `${sha256Hex(readFileSync(resolve(root, file)))}  ${file}`;
-        } catch {
-          return `unreadable  ${file}`;
-        }
-      })
-      .join("\n");
+    const untracked = digestUntrackedSync(
+      root,
+      (gitSync(["ls-files", "--others", "--exclude-standard"], root) ?? "")
+        .split("\n")
+        .filter(Boolean),
+    );
     localChanges = `# git status --porcelain\n${status}\n# untracked files (sha256  path)\n${untracked}\n# git diff HEAD\n${diff}`;
   }
   return {

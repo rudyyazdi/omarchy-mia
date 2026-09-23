@@ -10,7 +10,7 @@ import { z } from "zod";
 import { startFixture } from "@mia/controlled-mcp";
 import { errorMessage, isRecord, type Effort } from "@mia/protocol";
 import { Catalog, exportConversation, snapshotConversation, verifyExport } from "@mia/records";
-import { loadProfile } from "@mia/agent-adapter";
+import { loadProfileSync } from "@mia/agent-adapter";
 import {
   EVIDENCE_READ_TIMEOUT_MS,
   SHUTDOWN_TURN_WAIT_MS,
@@ -139,7 +139,7 @@ interface ProfileRun {
 }
 
 const startProfile = async (name: string, index: number, run: ProfileRun): Promise<MiaServer> => {
-  const profile = loadProfile(
+  const profile = loadProfileSync(
     join(REPO_ROOT, "examples", "config", `${name}.json`),
     run.profileEnv,
   );
@@ -255,7 +255,7 @@ const readRows = ({
   const results = raw.results?.results ?? [];
   using opened = new DisposableStack();
   const catalogs = servers.map((server) =>
-    opened.adopt(new Catalog(server.profile.stateDirectory, { readonly: true }), (catalog) =>
+    opened.adopt(Catalog.openSync(server.profile.stateDirectory, { readonly: true }), (catalog) =>
       catalog.close(),
     ),
   );
@@ -323,7 +323,7 @@ const readRows = ({
           mkdirSync(join(outDir, "exports"), { recursive: true });
           try {
             const writable = opened.adopt(
-              new Catalog(catalog.paths.root, { readonly: false }),
+              Catalog.openSync(catalog.paths.root, { readonly: false }),
               (exporter) => exporter.close(),
             );
             const exported = exportConversation(writable, conversationId, target);
