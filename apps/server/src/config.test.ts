@@ -56,7 +56,7 @@ describe("loadProfile", () => {
 
   it("reports missing files as configuration errors", () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-missing-profile-"));
-    expect(() => loadProfile(join(directory.path, "absent.json"))).toThrow(ConfigurationError);
+    expect(() => loadProfile(join(directory.path, "absent.json"), {})).toThrow(ConfigurationError);
   });
 
   it.each([

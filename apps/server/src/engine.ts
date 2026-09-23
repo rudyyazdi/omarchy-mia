@@ -148,6 +148,8 @@ export interface EngineDeps {
   writer: RecordWriter;
   adapter: TurnRunner;
   sourceRoot: string;
+  /** The server process's environment; conversation provenance probes the runtime with it. */
+  env: NodeJS.ProcessEnv;
   log: (message: string) => void;
 }
 
@@ -387,6 +389,7 @@ export class Engine {
           profile,
           clientBuild: ctx.clientBuild,
           sourceRoot: this.deps.sourceRoot,
+          env: this.deps.env,
         });
         const runtimeConversationId = randomUUID();
         const conv = writer.createConversation({

@@ -143,7 +143,7 @@ const writeLiveResults = ({
 };
 
 const fixtureDir = join(outDir, "fixture");
-const fixture = await startFixture({ dir: fixtureDir });
+const fixture = await startFixture({ dir: fixtureDir, mcpLogFile: process.env.MIA_MCP_HTTP_LOG });
 log(`fixture ${fixture.mcpUrl} harness ${fixture.harnessUrl}`);
 const env = {
   ...process.env,
@@ -168,6 +168,8 @@ const startProfile = async (name: string, index: number): Promise<MiaServer> => 
   const logs: string[] = [];
   const server = await startServer({
     profile,
+    // The runtime inherits the runner's own environment, not the promptfoo one built above.
+    env: process.env,
     log: (message) => logs.push(`${new Date().toISOString()} ${message}`),
   });
   process.on("exit", () =>

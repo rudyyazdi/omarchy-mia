@@ -30,4 +30,4 @@ const program = new Command()
   .option("--debug <category>")
   .option("--debug-file <path>");
 program.parse();
-await runFakeClaude(program.opts<FakeClaudeFlags>());
+process.exit(await runFakeClaude(program.opts<FakeClaudeFlags>()));

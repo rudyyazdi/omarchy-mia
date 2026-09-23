@@ -88,25 +88,37 @@ const REQUIRED_FLAGS = [
   "--resume",
 ];
 
-/** Static checks: nothing here contacts a model. */
-export const probeStaticCapabilities = (config: RuntimeConfig): StaticCapabilities => {
+/**
+ * Static checks: nothing here contacts a model. `env` is the environment a launch passes on (see
+ * `LaunchInput.env`): the executable is looked up on its PATH and run with it, and the credential
+ * is detected from it.
+ */
+export const probeStaticCapabilities = (
+  config: RuntimeConfig,
+  env: NodeJS.ProcessEnv,
+): StaticCapabilities => {
   const errors: string[] = [];
   const which = spawnSync("sh", ["-c", `command -v ${JSON.stringify(config.executable)}`], {
     encoding: "utf8",
+    env,
   });
   const resolved = which.status === 0 ? which.stdout.trim() : null;
   if (!resolved) errors.push(`runtime executable "${config.executable}" not found on PATH`);
   let version: string | null = null;
   const flags: Record<string, boolean> = {};
   if (resolved) {
-    const versionProbe = spawnSync(resolved, ["--version"], { encoding: "utf8", timeout: 20_000 });
+    const versionProbe = spawnSync(resolved, ["--version"], {
+      encoding: "utf8",
+      timeout: 20_000,
+      env,
+    });
     version = versionProbe.status === 0 ? versionProbe.stdout.trim() : null;
     if (!version)
       errors.push(
         `"${resolved} --version" failed: ${versionProbe.stderr?.trim() || versionProbe.error?.message || "unknown"}`,
       );
     const help =
-      spawnSync(resolved, ["--help"], { encoding: "utf8", timeout: 20_000 }).stdout ?? "";
+      spawnSync(resolved, ["--help"], { encoding: "utf8", timeout: 20_000, env }).stdout ?? "";
     for (const flag of REQUIRED_FLAGS) {
       // help abbreviates paired flags as --append-system-prompt[-file]
       const abbreviated = flag.replace(/-file$/, "[-file]");
@@ -117,8 +129,8 @@ export const probeStaticCapabilities = (config: RuntimeConfig): StaticCapabiliti
       if (!present) errors.push(`required flag ${flag} not present in --help`);
   }
   let credential: StaticCapabilities["credential_source"] = "none_detected";
-  if (process.env.ANTHROPIC_API_KEY) credential = "ANTHROPIC_API_KEY";
-  else if (existsSync(join(process.env.HOME ?? "", ".claude", ".credentials.json")))
+  if (env.ANTHROPIC_API_KEY) credential = "ANTHROPIC_API_KEY";
+  else if (existsSync(join(env.HOME ?? "", ".claude", ".credentials.json")))
     credential = "claude_credentials_file";
   if (credential === "none_detected")
     errors.push(
@@ -137,12 +149,13 @@ export const probeStaticCapabilities = (config: RuntimeConfig): StaticCapabiliti
 
 /**
  * Claude Code adapter. One turn = one runtime process. The bridge is shared across turns and only
- * has a handler while a turn is active.
+ * has a handler while a turn is active. Each runtime process inherits `env` (see `LaunchInput.env`).
  */
 export class ClaudeCodeAdapter {
   constructor(
     readonly config: RuntimeConfig,
     readonly bridge: ApprovalBridge,
+    private readonly env: NodeJS.ProcessEnv,
   ) {}
 
   submitTurn(options: TurnOptions): TurnHandle {
@@ -154,6 +167,7 @@ export class ClaudeCodeAdapter {
       resume: !options.firstTurn,
       turnIndex: options.turnIndex,
       agentPromptFile: options.agentPromptFile ?? this.config.agentPromptFile,
+      env: this.env,
     });
     const streamLogPath = join(
       options.runtimeDir,

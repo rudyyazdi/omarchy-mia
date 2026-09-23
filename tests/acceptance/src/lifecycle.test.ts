@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,7 +47,12 @@ describe("server lifecycle", () => {
       expect(before).toBeGreaterThan(0); // the blocker itself, so the count below means something
 
       await expect(
-        startServer({ profile, adapter: new ScriptedRuntime(), log: () => undefined }),
+        startServer({
+          profile,
+          adapter: new ScriptedRuntime(),
+          log: () => undefined,
+          env: {},
+        }),
       ).rejects.toThrow();
 
       // The catalog is usable again right away: nothing holds the database open.
@@ -59,6 +64,33 @@ describe("server lifecycle", () => {
       await expect.poll(listeningServers, { timeout: 5_000 }).toBe(before);
     } finally {
       await closeServer(blocker.server);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("logs approval bridge requests to the MIA_MCP_HTTP_LOG of the environment it is given", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mia-lifecycle-"));
+    const logFile = join(dir, "bridge-requests.jsonl");
+    try {
+      const server = await startServer({
+        profile: testProfile(dir),
+        adapter: new ScriptedRuntime(),
+        log: () => undefined,
+        env: { MIA_MCP_HTTP_LOG: logFile },
+      });
+      try {
+        // The bridge refuses a GET, and logs the refusal before it answers.
+        const response = await fetch(server.bridge.url, { signal: AbortSignal.timeout(5_000) });
+        expect(response.status).toBe(405);
+        const entries: unknown[] = readFileSync(logFile, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        expect(entries).toEqual([expect.objectContaining({ ev: "request", http: "GET" })]);
+      } finally {
+        await server.close();
+      }
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });

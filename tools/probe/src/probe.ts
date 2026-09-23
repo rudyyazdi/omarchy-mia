@@ -52,19 +52,9 @@ const freezeExamples = (context: ProbeContext, staticReport: StaticCapabilities)
   }
 };
 
-/**
- * D1 capability probe: proves, against the real installed runtime, the behaviours the adapter relies on.
- * Every live turn is counted against the shared live-call budget. Evidence lands in an out directory;
- * redacted protocol examples are frozen under the examples directory. `env` supplies the live-call
- * budget's overrides, and `deadlines` bound each wait on the fixture.
- */
-export const runProbe = async (
-  options: ProbeOptions,
-  env: NodeJS.ProcessEnv,
-  deadlines: ProbeDeadlines,
-): Promise<never> => {
-  const context = await ProbeContext.start(options, env, deadlines);
-  const staticReport = probeStaticCapabilities(context.baseConfig());
+/** Runs the static probe and then every wanted live step; resolves to the process exit code. */
+const runSteps = async (context: ProbeContext): Promise<number> => {
+  const staticReport = probeStaticCapabilities(context.baseConfig(), context.env);
   context.save("static-capabilities", staticReport);
   log("static:", JSON.stringify(staticReport, null, 1));
   if (staticReport.errors.length > 0) {
@@ -72,7 +62,7 @@ export const runProbe = async (
       "Static probe found blockers:\n" +
         staticReport.errors.map((problem) => ` - ${problem}`).join("\n"),
     );
-    await context.shutdown(1);
+    return 1;
   }
 
   const s1 = randomUUID();
@@ -97,7 +87,27 @@ export const runProbe = async (
     live_calls_used: context.liveCallsUsed(),
   });
   log("done. evidence in", context.dirs.out);
-  return context.shutdown(0);
+  return 0;
+};
+
+/**
+ * D1 capability probe: proves, against the real installed runtime, the behaviours the adapter relies on.
+ * Every live turn is counted against the shared live-call budget. Evidence lands in an out directory;
+ * redacted protocol examples are frozen under the examples directory. `env` is the environment the
+ * runtime inherits and supplies the live-call budget's overrides, and `deadlines` bound each wait on
+ * the fixture. Resolves to the exit code once the fixture and bridge are released.
+ */
+export const runProbe = async (
+  options: ProbeOptions,
+  env: NodeJS.ProcessEnv,
+  deadlines: ProbeDeadlines,
+): Promise<number> => {
+  const context = await ProbeContext.start(options, env, deadlines);
+  try {
+    return await runSteps(context);
+  } finally {
+    await context.close();
+  }
 };
 
 export type { ProbeDeadlines, ProbeOptions };

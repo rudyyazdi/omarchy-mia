@@ -43,6 +43,9 @@ export class ApprovalBridge {
   private handler: PermissionHandler | null = null;
   private http: McpHttpServerHandle | null = null;
 
+  /** `logFile` receives the bridge's request/response lifecycle log; unset logs nothing. */
+  constructor(private readonly options: { logFile?: string } = {}) {}
+
   get url(): string {
     if (!this.http) throw new Error("bridge not started");
     return this.http.url;
@@ -56,6 +59,7 @@ export class ApprovalBridge {
     this.http = await startMcpHttpServer({
       host,
       port,
+      logFile: this.options.logFile,
       createServer: (ctx) => {
         const server = new McpServer(
           { name: BRIDGE_SERVER_NAME, version: "0.1.0" },

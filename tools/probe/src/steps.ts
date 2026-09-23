@@ -171,6 +171,7 @@ export const effortControl = async (context: ProbeContext): Promise<void> => {
     resume: false,
     turnIndex: 1,
     agentPromptFile: config.agentPromptFile,
+    env: context.env,
   });
   const idx = plan.args.indexOf("--effort");
   const args = [...plan.args];

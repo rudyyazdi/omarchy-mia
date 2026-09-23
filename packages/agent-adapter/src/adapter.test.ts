@@ -1,8 +1,8 @@
 import { mkdirSync, mkdtempDisposableSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { readHookEvidence } from "./adapter.ts";
+import { probeStaticCapabilities, readHookEvidence } from "./adapter.ts";
 
 describe("readHookEvidence", () => {
   it("returns no evidence when the hook never wrote a file", () => {
@@ -45,5 +45,56 @@ describe("readHookEvidence", () => {
       malformedLines: 0,
       readError: expect.stringContaining("ENOTDIR"),
     });
+  });
+});
+
+describe("probeStaticCapabilities", () => {
+  const probe = (env: NodeJS.ProcessEnv, executable = "mia-test-runtime-that-is-not-installed") =>
+    probeStaticCapabilities(
+      {
+        kind: "claude-code",
+        executable,
+        model: "m",
+        effort: "medium",
+        workingDirectory: "/work",
+        builtinTools: [],
+        mcpServers: {},
+        toolPolicy: {},
+        agentPromptFile: "/prompt.md",
+        outputDirectories: [],
+        env: {},
+        extraSettings: {},
+      },
+      env,
+    );
+
+  it("detects the runtime credential from the environment it is given", () => {
+    using home = mkdtempDisposableSync(join(tmpdir(), "mia-home-"));
+    expect(probe({ ANTHROPIC_API_KEY: "key", HOME: home.path }).credential_source).toBe(
+      "ANTHROPIC_API_KEY",
+    );
+    expect(probe({ HOME: home.path }).credential_source).toBe("none_detected");
+    mkdirSync(join(home.path, ".claude"));
+    writeFileSync(join(home.path, ".claude", ".credentials.json"), "{}");
+    expect(probe({ HOME: home.path }).credential_source).toBe("claude_credentials_file");
+  });
+
+  it("looks the runtime up on the given environment's PATH and runs it with that environment", () => {
+    using bin = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
+    using empty = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
+    // Prints the version only when the environment it runs with carries the marker. /bin stays on
+    // PATH for `sh`, which the probe runs the lookup in and the script's shebang already assumes.
+    writeFileSync(join(bin.path, "mia-fake-runtime"), '#!/bin/sh\necho "v-$MIA_MARKER"\n', {
+      mode: 0o755,
+    });
+    const found = probe(
+      { PATH: `${bin.path}${delimiter}/bin`, MIA_MARKER: "given" },
+      "mia-fake-runtime",
+    );
+    expect(found.executable_resolved).toBe(join(bin.path, "mia-fake-runtime"));
+    expect(found.runtime_version).toBe("v-given");
+    expect(
+      probe({ PATH: `${empty.path}${delimiter}/bin` }, "mia-fake-runtime").executable_resolved,
+    ).toBeNull();
   });
 });

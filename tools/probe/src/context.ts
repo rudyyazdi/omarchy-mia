@@ -28,7 +28,7 @@ const describeEvent = (event: RuntimeEvent): string =>
 
 /**
  * Owns one probe run's evidence directory, fixture, approval bridge and live-call budget, and the
- * records of every step run so far. `shutdown` releases the fixture and bridge and exits.
+ * records of every step run so far. `close` releases the fixture and bridge.
  */
 export class ProbeContext {
   readonly records: StepRecord[] = [];
@@ -42,6 +42,7 @@ export class ProbeContext {
       harness: FixtureHarness;
       bridge: ApprovalBridge;
       deadlines: ProbeDeadlines;
+      env: NodeJS.ProcessEnv;
     },
   ) {}
 
@@ -57,14 +58,19 @@ export class ProbeContext {
     mkdirSync(examples, { recursive: true });
     const budget = LiveCallBudget.fromEnv(env, resolve(".mia-state/live-calls.jsonl"));
     const fixtureDir = join(out, "fixture");
-    const fixture = await startFixture({ dir: fixtureDir });
+    const fixture = await startFixture({ dir: fixtureDir, mcpLogFile: env.MIA_MCP_HTTP_LOG });
     const harness = new FixtureHarness(fixture.harnessUrl);
-    const bridge = new ApprovalBridge();
-    await bridge.start();
+    const bridge = new ApprovalBridge({ logFile: env.MIA_MCP_HTTP_LOG });
+    try {
+      await bridge.start();
+    } catch (error) {
+      await fixture.close();
+      throw error;
+    }
     return new ProbeContext(
       options,
       { out, examples, fixture: fixtureDir },
-      { budget, fixture, harness, bridge, deadlines },
+      { budget, fixture, harness, bridge, deadlines, env },
     );
   }
 
@@ -74,6 +80,11 @@ export class ProbeContext {
 
   get deadlines(): ProbeDeadlines {
     return this.services.deadlines;
+  }
+
+  /** The probe process's environment, which every runtime it launches inherits. */
+  get env(): NodeJS.ProcessEnv {
+    return this.services.env;
   }
 
   runtimeDir(sessionId: string): string {
@@ -105,10 +116,13 @@ export class ProbeContext {
     }
   }
 
-  async shutdown(code: number): Promise<never> {
-    await this.services.bridge.close();
-    await this.services.fixture.close();
-    process.exit(code);
+  /** Closes the bridge and the fixture, the fixture even when closing the bridge fails. */
+  async close(): Promise<void> {
+    try {
+      await this.services.bridge.close();
+    } finally {
+      await this.services.fixture.close();
+    }
   }
 
   wants(name: string): boolean {
@@ -165,7 +179,7 @@ export class ProbeContext {
     };
     const { bridge, harness } = this.services;
     this.takeLiveCall(spec.name, spec.config.model);
-    const adapter = new ClaudeCodeAdapter(spec.config, bridge);
+    const adapter = new ClaudeCodeAdapter(spec.config, bridge, this.services.env);
     const handle = adapter.submitTurn({
       text: spec.prompt,
       runtimeConversationId: spec.sessionId,

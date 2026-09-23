@@ -37,6 +37,11 @@ export interface LaunchInput {
   turnIndex: number;
   /** Prompt file to append; the engine passes the conversation's retained snapshot so every turn uses the same bytes. */
   agentPromptFile: string;
+  /**
+   * The environment the runtime inherits before `config.env` is applied; the entry point passes its own.
+   * `MIA_RUNTIME_DEBUG` in it turns on the runtime's debug logging.
+   */
+  env: NodeJS.ProcessEnv;
 }
 
 /**
@@ -120,16 +125,15 @@ export const prepareLaunch = (input: LaunchInput): LaunchPlan => {
     sessionId,
   ];
   // Diagnostics only: MIA_RUNTIME_DEBUG=mcp adds the runtime's own debug logging (stderr) for that category.
-  if (process.env.MIA_RUNTIME_DEBUG)
+  if (input.env.MIA_RUNTIME_DEBUG)
     args.push(
       "--debug",
-      process.env.MIA_RUNTIME_DEBUG,
+      input.env.MIA_RUNTIME_DEBUG,
       "--debug-file",
       join(runtimeDir, "runtime-debug.log"),
     );
   const env: Record<string, string> = {};
-  for (const [name, value] of Object.entries(process.env))
-    if (value !== undefined) env[name] = value;
+  for (const [name, value] of Object.entries(input.env)) if (value !== undefined) env[name] = value;
   Object.assign(env, config.env);
   env.MCP_TOOL_TIMEOUT = String(MCP_TOOL_TIMEOUT_MS);
   // Claude Code 2.1.278 adds a separate idle timeout: a call with "no response or progress" for 300s is aborted. A held

@@ -11,7 +11,7 @@ const program = new Command()
 const { config } = program.opts<{ config: string }>();
 
 try {
-  const server = await startServer({ profilePath: config });
+  const server = await startServer({ profilePath: config, env: process.env });
   const shutdown = () => {
     server.close().then(
       () => process.exit(0),

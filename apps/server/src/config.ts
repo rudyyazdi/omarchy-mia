@@ -44,7 +44,7 @@ const substitute = (text: string, env: NodeJS.ProcessEnv): string =>
     return value;
   });
 
-export const loadProfile = (path: string, env: NodeJS.ProcessEnv = process.env): Profile => {
+export const loadProfile = (path: string, env: NodeJS.ProcessEnv): Profile => {
   const absolute = resolve(path);
   let raw: string;
   try {
