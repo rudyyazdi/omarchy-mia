@@ -5,6 +5,7 @@ import WebSocket from "ws";
 import {
   PROTOCOL_VERSION,
   ServerEventSchema,
+  type Cancellable,
   type ClientCommand,
   type ClientDiagnostics,
   type Decision,
@@ -22,14 +23,6 @@ export interface MiaClientOptions {
 
 export type AckPayload = ServerEventOf<"ack">["payload"];
 
-/**
- * How long an operation may take is the caller's to decide: the client never creates a deadline, it only listens
- * for `signal`, and an abort rejects the operation with the signal's reason.
- */
-export interface Cancellable {
-  signal?: AbortSignal;
-}
-
 /** A command's options; a resend passes the original command's `messageId`. */
 export interface SendOptions extends Cancellable {
   messageId?: string;
@@ -42,7 +35,8 @@ const isEventOf =
 
 /**
  * Programmatic Mia client used by the terminal UI, the acceptance harness and the promptfoo provider.
- * Every command gets a unique message_id; resends reuse it (the server deduplicates).
+ * Every command gets a unique message_id; resends reuse it (the server deduplicates). An abort while an
+ * operation is still waiting rejects it with the signal's reason.
  */
 export class MiaClient extends EventEmitter {
   readonly clientId: string;

@@ -13,7 +13,7 @@ import {
   startMcpHttpServer,
   type McpRequestContext,
 } from "@mia/mcp-http";
-import { sha256Hex } from "@mia/protocol";
+import { sha256Hex, type Cancellable } from "@mia/protocol";
 import { Ledger, LedgerEntrySchema } from "./ledger.ts";
 
 export const PendingSlowCallSchema = z.object({
@@ -347,11 +347,6 @@ const jsonOrUndefined = (text: string): unknown => {
 /** How often `waitForState` reads the fixture state. */
 const STATE_POLL_MS = 25;
 
-/** A harness wait ends when `signal` aborts; without one it has no deadline of its own. */
-export interface HarnessWaitOptions {
-  signal?: AbortSignal;
-}
-
 /** Client for the private harness API. */
 export class FixtureHarness {
   constructor(readonly baseUrl: string) {}
@@ -368,7 +363,7 @@ export class FixtureHarness {
    * 408 naming that), and polling again is what keeps the caller's signal the only deadline. Any
    * other failure, including a 408 from something that is not the fixture, rejects.
    */
-  async waitEntered({ signal }: HarnessWaitOptions = {}): Promise<{
+  async waitEntered({ signal }: Cancellable = {}): Promise<{
     call_id: string;
     mode: string;
   }> {
@@ -388,11 +383,11 @@ export class FixtureHarness {
    * state seen instead, so the caller's own assertion reports what was actually observed. The
    * fixture is a separate process: its ledger settles a moment after the event that caused it, so a
    * caller polls until it has, bounded by its own signal, rather than sleeping long enough "most of
-   * the time". Without a signal the poll has no end of its own.
+   * the time".
    */
   async waitForState(
     settled: (state: FixtureState) => boolean,
-    { signal }: HarnessWaitOptions = {},
+    { signal }: Cancellable = {},
   ): Promise<FixtureState> {
     for (;;) {
       const state = await this.state();

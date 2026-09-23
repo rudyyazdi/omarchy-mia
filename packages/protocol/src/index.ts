@@ -21,6 +21,7 @@ export type {
   ToolCallStatus,
   ToolPolicy,
 } from "./messages.ts";
+export type { Cancellable } from "./cancellable.ts";
 export { canonicalDigest, sha256Hex } from "./canonical.ts";
 export {
   isSensitiveKey,
