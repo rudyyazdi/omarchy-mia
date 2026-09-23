@@ -9,7 +9,12 @@ import { basename, join, resolve } from "node:path";
 import { z } from "zod";
 import { startFixture } from "@mia/controlled-mcp";
 import { errorMessage, isRecord, type Effort } from "@mia/protocol";
-import { Catalog, exportConversation, snapshotConversation, verifyExport } from "@mia/records";
+import {
+  Catalog,
+  exportConversationSync,
+  snapshotConversation,
+  verifyExportSync,
+} from "@mia/records";
 import { loadProfileSync } from "@mia/agent-adapter";
 import {
   EVIDENCE_READ_TIMEOUT_MS,
@@ -326,8 +331,8 @@ const readRows = ({
               Catalog.openSync(catalog.paths.root, { readonly: false }),
               (exporter) => exporter.close(),
             );
-            const exported = exportConversation(writable, conversationId, target);
-            const verification = verifyExport(target);
+            const exported = exportConversationSync(writable, conversationId, target);
+            const verification = verifyExportSync(target);
             exportResult = {
               directory: target,
               complete: exported.manifest.complete,

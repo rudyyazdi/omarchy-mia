@@ -7,10 +7,10 @@ import {
   Catalog,
   ObjectStore,
   RecordWriter,
-  exportConversation,
-  reconcileObjects,
+  exportConversationSync,
+  reconcileObjectsSync,
   snapshotConversation,
-  verifyExport,
+  verifyExportSync,
 } from "@mia/records";
 import type { MiaClient } from "@mia/text-client";
 import type { ScriptedRuntime } from "./scripted-runtime.ts";
@@ -162,10 +162,10 @@ describe("records, report and export", () => {
     const dump = JSON.stringify(snapshot.tables);
     expect(dump).not.toContain("sk-ant-api03");
     expect(dump).not.toContain("super-secret-value-123456");
-    const result = exportConversation(catalog, conversationId, exportDir);
+    const result = exportConversationSync(catalog, conversationId, exportDir);
     catalog.close();
     expect(result.manifest.complete).toBe(true);
-    const verification = verifyExport(exportDir);
+    const verification = verifyExportSync(exportDir);
     expect(verification.problems).toEqual([]);
     const report = readFileSync(join(exportDir, "report.html"), "utf8");
     expect(report).not.toContain("<script>alert(1)</script>");
@@ -176,7 +176,7 @@ describe("records, report and export", () => {
     // Edit the original generated file and the prompt after export: retained bytes still verify.
     writeFileSync(artifactFile, "changed later");
     writeFileSync(ts.profile.runtime.agentPromptFile, "edited prompt");
-    expect(verifyExport(exportDir).ok).toBe(true);
+    expect(verifyExportSync(exportDir).ok).toBe(true);
     const artifacts = jsonLines(join(exportDir, "records/artifacts.jsonl"), ExportedArtifactRow);
     const retained = must(
       artifacts.find((artifact) => artifact.logical_name === "result.txt"),
@@ -210,7 +210,7 @@ describe("records, report and export", () => {
     turn.text("c");
     await tick();
     const exportDir = join(ts.dir, "export-2");
-    const result = exportConversation(catalog, conversationId, exportDir);
+    const result = exportConversationSync(catalog, conversationId, exportDir);
     catalog.close();
     expect(result.manifest.cutoff_sequence).toBeGreaterThanOrEqual(before);
     const events = jsonLines(join(exportDir, "events.jsonl"), ExportedEventRow);
@@ -222,7 +222,7 @@ describe("records, report and export", () => {
     expect(report).toContain("ongoing tasks at cutoff");
     turn.end();
     await client.waitFor("task_finished");
-    expect(verifyExport(exportDir).ok).toBe(true);
+    expect(verifyExportSync(exportDir).ok).toBe(true);
   });
 
   it("shares prompt bytes between conversations without exporting the other conversation's records", async () => {
@@ -261,7 +261,7 @@ describe("records, report and export", () => {
       1,
     ); // one object
     const exportDir = join(ts.dir, "export-3");
-    const result = exportConversation(catalog, first, exportDir);
+    const result = exportConversationSync(catalog, first, exportDir);
     catalog.close();
     expect(result.manifest.complete).toBe(true);
     const all =
@@ -300,12 +300,12 @@ describe("records, report and export", () => {
     const { chmodSync } = await import("node:fs");
     chmodSync(provPath, 0o600);
     writeFileSync(provPath, "corrupted");
-    const reconciled = reconcileObjects(catalog);
+    const reconciled = reconcileObjectsSync(catalog);
     expect(reconciled.orphans).toContain(orphan.digest);
     expect(reconciled.missing).toContain(artifact.object_digest);
     expect(reconciled.corrupt).toContain(prov.object_digest);
     const exportDir = join(ts.dir, "export-4");
-    const result = exportConversation(
+    const result = exportConversationSync(
       catalog,
       must(client.conversationId, "conversation id"),
       exportDir,
@@ -315,7 +315,7 @@ describe("records, report and export", () => {
     expect(result.manifest.objects.missing).toEqual([artifact.object_digest]);
     expect(result.manifest.objects.corrupt).toEqual([prov.object_digest]);
     expect(result.manifest.partial_reasons.length).toBe(2);
-    const verification = verifyExport(exportDir);
+    const verification = verifyExportSync(exportDir);
     expect(verification.ok).toBe(true); // internally consistent
     expect(verification.complete).toBe(false); // but explicitly incomplete
     const report = readFileSync(join(exportDir, "report.html"), "utf8");
@@ -331,10 +331,10 @@ describe("records, report and export", () => {
     const conv = writer.createConversation({ provenanceSetId: prov, runtimeConversationId: "rt" });
     writer.appendEvent({ conversationId: conv.id, type: "task_submitted", payload: { a: 1 } });
     const exportDir = join(dir, "out");
-    exportConversation(catalog, conv.id, exportDir);
+    exportConversationSync(catalog, conv.id, exportDir);
     catalog.close();
     writeFileSync(join(exportDir, "events.jsonl"), "tampered\n");
-    const verification = verifyExport(exportDir);
+    const verification = verifyExportSync(exportDir);
     expect(verification.ok).toBe(false);
     expect(
       verification.problems.some((problem) => problem.includes("checksum mismatch: events.jsonl")),
