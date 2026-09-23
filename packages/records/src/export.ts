@@ -286,7 +286,8 @@ export const verifyExport = (dir: string): VerificationResult => {
   const inventory = files.inventory();
   problems.push(...inventory.problems);
   for (const rel of inventory.files) {
-    if (rel !== "manifest.json" && !manifest.files[rel]) problems.push(`unlisted file: ${rel}`);
+    if (rel !== "manifest.json" && !Object.hasOwn(manifest.files, rel))
+      problems.push(`unlisted file: ${rel}`);
   }
   // Validate only row identities and fields used below, not the full catalog schemas.
   const readTable = <Row>(table: ExportTable, schema: z.ZodType<Row>): Row[] => {
