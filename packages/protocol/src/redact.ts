@@ -30,9 +30,14 @@ export const redactString = (text: string): string => {
   return out;
 };
 
-/** A number under a `…tokens` key is a count (`input_tokens`, `inputTokens`), not a credential. */
+/**
+ * Whether a key can name a count of tokens (`input_tokens`, `MAX_THINKING_TOKENS`) rather than a credential.
+ * The key alone cannot tell (`API_TOKENS` may hold either), so a caller exempts it only when the value is a count too.
+ */
+export const isCountKey = (key: string): boolean => /tokens$/i.test(key);
+
 const isTokenCount = (key: string, value: unknown): boolean =>
-  typeof value === "number" && /tokens$/i.test(key);
+  typeof value === "number" && isCountKey(key);
 
 const walk = (value: unknown, key: string | undefined): unknown => {
   if (key !== undefined && isSensitiveKey(key) && !isTokenCount(key, value)) return REDACTED;

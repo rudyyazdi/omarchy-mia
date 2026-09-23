@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isSensitiveKey, ToolPolicySchema } from "@mia/protocol";
+import { isCountKey, isSensitiveKey, ToolPolicySchema } from "@mia/protocol";
 
 export { ToolPolicySchema, type ToolPolicy } from "@mia/protocol";
 
@@ -95,8 +95,9 @@ export const validateRuntimeConfig = (config: RuntimeConfig): void => {
       `builtinTools includes "${tool}", but D1 has no enforceable approval boundary for built-in tools; remove it or add a proven adapter boundary`,
     );
   }
-  for (const key of Object.keys(config.env)) {
-    if (isSensitiveKey(key))
+  for (const [key, value] of Object.entries(config.env)) {
+    // Env values are strings, so a token count (MAX_THINKING_TOKENS=8000) is one written in digits.
+    if (isSensitiveKey(key) && !(isCountKey(key) && /^\d+$/.test(value)))
       throw new ConfigurationError(`env must not carry credentials (found key ${key})`);
   }
 };
