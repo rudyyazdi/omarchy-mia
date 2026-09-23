@@ -38,10 +38,25 @@ describe("resolveExecutable", () => {
     expect(resolveExecutable("runtime", { path: "bin", cwd: work.path })).toBe(expected);
   });
 
+  it("treats an empty PATH entry as the working directory", () => {
+    using work = mkdtempDisposableSync(join(tmpdir(), "mia-work-"));
+    using empty = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
+    script(join(work.path, "runtime"));
+    expect(
+      resolveExecutable("runtime", { path: `${empty.path}${delimiter}`, cwd: work.path }),
+    ).toBe(join(work.path, "runtime"));
+  });
+
+  it("falls back to spawn's default search path when PATH is unset", () => {
+    expect(["/usr/bin/sh", "/bin/sh"]).toContain(
+      resolveExecutable("sh", { path: undefined, cwd: "/" }),
+    );
+  });
+
   it("finds nothing for a missing name", () => {
     using empty = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
-    expect(resolveExecutable("runtime", { path: empty.path, cwd: "/" })).toBeNull();
-    expect(resolveExecutable("runtime", { path: undefined, cwd: "/" })).toBeNull();
+    expect(resolveExecutable("mia-missing-runtime", { path: empty.path, cwd: "/" })).toBeNull();
+    expect(resolveExecutable("mia-missing-runtime", { path: undefined, cwd: "/" })).toBeNull();
     expect(
       resolveExecutable(join(empty.path, "runtime"), { path: undefined, cwd: "/" }),
     ).toBeNull();
@@ -49,12 +64,14 @@ describe("resolveExecutable", () => {
 
   it("treats shell syntax in the name as a literal file name and runs nothing", () => {
     using bin = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
-    const marker = join(bin.path, "ran");
-    for (const name of [`$(touch ${marker})`, `\`touch ${marker}\``, "runtime; touch ran"])
+    // Names without a slash, so they go through the PATH lookup; the marker lands in cwd if a shell ran them.
+    for (const name of ["$(touch ran)", "`touch ran`", "runtime; touch ran", "$HOME"])
       expect(
         resolveExecutable(name, { path: `${bin.path}${delimiter}/bin`, cwd: bin.path }),
       ).toBeNull();
-    expect(existsSync(marker)).toBe(false);
+    // With a slash, the name is a path relative to cwd, still never shell code.
+    expect(resolveExecutable("./$(touch ran)", { path: undefined, cwd: bin.path })).toBeNull();
+    expect(existsSync(join(bin.path, "ran"))).toBe(false);
     const literal = "$(runtime)";
     script(join(bin.path, literal));
     expect(resolveExecutable(literal, { path: bin.path, cwd: "/" })).toBe(join(bin.path, literal));

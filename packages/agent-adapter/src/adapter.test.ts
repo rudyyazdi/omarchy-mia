@@ -49,7 +49,11 @@ describe("readHookEvidence", () => {
 });
 
 describe("probeStaticCapabilities", () => {
-  const probe = (env: NodeJS.ProcessEnv, executable = "mia-test-runtime-that-is-not-installed") =>
+  const probe = (
+    env: NodeJS.ProcessEnv,
+    executable = "mia-test-runtime-that-is-not-installed",
+    configEnv: Record<string, string> = {},
+  ) =>
     probeStaticCapabilities(
       {
         kind: "claude-code",
@@ -62,7 +66,7 @@ describe("probeStaticCapabilities", () => {
         toolPolicy: {},
         agentPromptFile: "/prompt.md",
         outputDirectories: [],
-        env: {},
+        env: configEnv,
         extraSettings: {},
       },
       env,
@@ -103,6 +107,17 @@ describe("probeStaticCapabilities", () => {
     const missing = probe({ PATH: empty.path }, "mia-fake-runtime");
     expect(missing.executable_resolved).toBeNull();
     expect(missing.errors).toContain('runtime executable "mia-fake-runtime" not found on PATH');
+  });
+
+  it("looks the runtime up on the PATH the profile's env gives the launch", () => {
+    using bin = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
+    using empty = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
+    writeFileSync(join(bin.path, "mia-fake-runtime"), "#!/bin/sh\necho v\n", { mode: 0o755 });
+    const found = probe({ PATH: empty.path }, "mia-fake-runtime", {
+      PATH: `${bin.path}${delimiter}/bin`,
+    });
+    expect(found.executable_resolved).toBe(join(bin.path, "mia-fake-runtime"));
+    expect(found.runtime_version).toBe("v");
   });
 
   it("never runs the executable name as shell code", () => {
