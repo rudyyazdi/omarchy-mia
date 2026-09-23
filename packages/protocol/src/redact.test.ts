@@ -24,4 +24,24 @@ describe("redactValue", () => {
       redactValue({ authorization: { value: "anything" }, text: "key sk-ant-abcdefghijk" }),
     ).toEqual({ authorization: REDACTED, text: `key ${REDACTED}` });
   });
+
+  it("keeps token counts readable and still redacts credential tokens", () => {
+    expect(
+      redactValue({
+        usage: { input_tokens: 1200, cache_read_input_tokens: 3 },
+        access_token: "abc",
+        refresh_token: "def",
+        token: { value: "ghi" },
+        tokens: "a list of words",
+        token_count: 7,
+      }),
+    ).toEqual({
+      usage: { input_tokens: 1200, cache_read_input_tokens: 3 },
+      access_token: REDACTED,
+      refresh_token: REDACTED,
+      token: REDACTED,
+      tokens: "a list of words",
+      token_count: 7,
+    });
+  });
 });

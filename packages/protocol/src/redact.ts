@@ -1,7 +1,8 @@
 import { isRecord } from "./value.ts";
 
+/** `token(?!s)` keeps count keys such as `input_tokens` readable while `access_token` stays sensitive. */
 const SENSITIVE_KEY =
-  /(token|secret|password|passwd|api[-_]?key|authorization|credential|cookie|private[-_]?key|bearer)/i;
+  /(token(?!s)|secret|password|passwd|api[-_]?key|authorization|credential|cookie|private[-_]?key|bearer)/i;
 const SENSITIVE_VALUE: RegExp[] = [
   /sk-ant-[A-Za-z0-9_-]{8,}/g,
   /sk-[A-Za-z0-9_-]{20,}/g,
@@ -28,7 +29,9 @@ export const redactString = (text: string): string => {
 };
 
 const walk = (value: unknown, key: string | undefined): unknown => {
-  if (key !== undefined && SENSITIVE_KEY.test(key)) return REDACTED;
+  // A number or boolean under a sensitive key carries no credential; a string or subtree might.
+  const scalar = typeof value === "number" || typeof value === "boolean";
+  if (key !== undefined && SENSITIVE_KEY.test(key) && !scalar) return REDACTED;
   if (typeof value === "string") return redactString(value);
   if (Array.isArray(value)) return value.map((item) => walk(item, undefined));
   if (isRecord(value)) {
