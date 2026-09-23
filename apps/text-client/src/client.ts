@@ -35,8 +35,8 @@ const isEventOf =
 
 /**
  * Programmatic Mia client used by the terminal UI, the acceptance harness and the promptfoo provider.
- * Every command gets a unique message_id; resends reuse it (the server deduplicates). An operation taking a
- * `Cancellable` rejects with the signal's reason once it aborts.
+ * Every command gets a unique message_id; resends reuse it (the server deduplicates). An abort while an
+ * operation is still waiting rejects it with the signal's reason.
  */
 export class MiaClient extends EventEmitter {
   readonly clientId: string;

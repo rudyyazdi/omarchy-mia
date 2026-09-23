@@ -383,7 +383,7 @@ export class FixtureHarness {
    * state seen instead, so the caller's own assertion reports what was actually observed. The
    * fixture is a separate process: its ledger settles a moment after the event that caused it, so a
    * caller polls until it has, bounded by its own signal, rather than sleeping long enough "most of
-   * the time". Without a signal the poll has no end of its own.
+   * the time".
    */
   async waitForState(
     settled: (state: FixtureState) => boolean,
