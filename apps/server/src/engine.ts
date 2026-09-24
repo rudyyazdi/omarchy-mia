@@ -37,6 +37,7 @@ import {
   nowIso,
   type ArtifactKind,
   type Catalog,
+  type IdPrefix,
   type JournalEventType,
   type LinkRelation,
   type RecordWriter,
@@ -217,10 +218,11 @@ export interface EngineDeps {
   /** Captures a tool output a completed call declared: `collectArtifact`, or a test's own. */
   collectArtifact: ArtifactCollector;
   /**
-   * Names every record the engine creates, and every event it sends: `newId`. Injected randomness, so a
-   * transition's ids are chosen before its records are written and can refer to each other (RecordWriter).
+   * Names the conversations, tasks, executions, tool calls, approvals and events the engine creates (see
+   * RecordWriter), and every event it sends: `newId`. Injected randomness, so a transition's ids are chosen
+   * before its records are written and can refer to each other.
    */
-  newId: (prefix: string) => string;
+  newId: (prefix: IdPrefix) => string;
   log: (message: string) => void;
 }
 

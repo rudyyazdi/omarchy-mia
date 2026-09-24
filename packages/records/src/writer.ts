@@ -157,8 +157,9 @@ export interface ExecutionUsage {
  * tool calls, approvals and events) take their id from the caller, so a transition can name a record before it
  * is written: an approval_requested event carries its approval's id, and the approval row its requesting event's.
  * Callers generate them with `newId`; a reused id fails the insert, and with it the transaction. The other rows
- * (commands, provenance, artifacts, links, diagnostics) are still named here: they are written beside those
- * transitions, not decided by them.
+ * (commands, provenance, artifacts, links, diagnostics) are still named here, which holds only while whatever
+ * refers to one is written after it in the same transaction, as a conversation names its provenance set and an
+ * artifact_registered event its artifact.
  */
 export class RecordWriter {
   readonly objects: ObjectStore;
