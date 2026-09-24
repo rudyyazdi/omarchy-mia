@@ -17,19 +17,15 @@ import {
   type TurnResult,
 } from "@mia/agent-adapter";
 import { Holds } from "@mia/kernel";
-import type { BodyDirection } from "@mia/mcp-http";
 import {
   PROTOCOL_VERSION,
-  canonicalDigest,
   errorMessage,
-  redactValue,
   type ApprovalStatus,
   type ClientCommand,
   type ClientDiagnostics,
   type Decision,
   type ErrorCode,
   type ServerEvent,
-  type ToolCallPolicy,
 } from "@mia/protocol";
 import {
   type ArtifactKind,
@@ -37,7 +33,6 @@ import {
   type IdPrefix,
   type NewId,
   type LinkRelation,
-  type McpEventType,
   type RecordWriter,
   type StoredObject,
   mcpPayload,
@@ -53,33 +48,36 @@ import type { ArtifactCollector } from "./artifact-collector.ts";
 import {
   callById,
   callsOf,
-  otherPending,
-  withCall,
   withCallStatuses,
-  withPending,
-  withRevision,
   withTask,
-  withoutPending,
   type CallState,
   type ConversationState,
   type TaskState,
 } from "./conversation-state.ts";
 import {
   MAX_BODY_LOG_BYTES,
+  MCP_BODY_EVENT,
   mcpBodiesFrom,
   unrecordedBodies,
   type BodyReadPoint,
   type McpBody,
+  type McpBodyRecord,
 } from "./mcp-bodies.ts";
 import {
   abandonmentTransition,
   approvalDecisionTransition,
   interruptionTransition,
+  permissionRefusedTransition,
+  permissionRequestTransition,
   releasedBy,
+  runtimeEventTransition,
+  type CapturedOutput,
   type ConversationDecision,
   type ConversationTransition,
+  type OutputIds,
+  type RuntimeEventReads,
 } from "./decide-conversation.ts";
-import type { EngineEffect, OutgoingEvent } from "./engine-effects.ts";
+import type { EngineEffect, OutgoingEvent, PermissionAnswer } from "./engine-effects.ts";
 import { commitRecords, eventSequence, type CommittedChange } from "./engine-records.ts";
 import {
   nameProvenance,
@@ -99,20 +97,13 @@ import {
 } from "./transition-draft.ts";
 import {
   abandonedPromptDenial,
-  bindPermissionRequest,
-  bindStreamProposal,
   bindToolResult,
   classifyActions,
   classifyTask,
-  evaluatePermission,
   executionStatusFor,
   isReleased,
   noteAfterTurn,
   releasedWithoutResult,
-  statusAfterResult,
-  supersedeBinding,
-  type CallChange,
-  type PermissionRule,
 } from "./transitions.ts";
 
 /** Sends one event to one connection. */
@@ -152,12 +143,22 @@ const TURN_ENDED: PermissionDecision = {
   message: "Mia: the turn ended before the user decided; this call was not released.",
 };
 
-/**
- * What a recorded permission request answers the runtime: at once, or by holding its prompt, under the approval
- * the request recorded, until the user decides.
- */
-type PermissionAnswer =
-  { kind: "answer"; decision: PermissionDecision } | { kind: "hold"; approvalId: string };
+/** The answer to a permission request of a task that is no longer the active one. */
+const NO_ACTIVE_TASK: PermissionDecision = {
+  behavior: "deny",
+  message: "Mia has no active task for this call.",
+};
+
+/** The answer to a permission request whose records did not commit: nothing was requested, held or released. */
+const NOT_RECORDED: PermissionDecision = {
+  behavior: "deny",
+  message: "Mia could not record this call; it was not released.",
+};
+
+/** The permission request being committed, and the answer its `answer_permission` effect gave, once performed. */
+interface Asking {
+  answer: PermissionAnswer | null;
+}
 
 /**
  * What a task-scoped command is allowed to act on. `rejected` and `no_active_task` carry the answer
@@ -214,61 +215,12 @@ export interface EngineDeps {
   log: (message: string) => void;
 }
 
-interface NewCallInput {
-  /** The revision's id, drawn before the transaction. */
-  id: string;
-  runtimeCallId: string;
-  toolIdentity: string;
-  digest: string;
-  args: unknown;
-  policy: ToolCallPolicy;
-  proposalEventId: string | null;
-}
-
 const RUNTIME_IDENTITY = "claude-code";
 
 /** The ids of the rows that register one artifact and link it to its task. */
 interface ArtifactIds {
   artifact: string;
   link: string;
-}
-
-/**
- * The ids of the rows a declared tool output records: its artifact, its links to the call and (retained) to the
- * task, and (retained) its artifact_registered event.
- */
-interface OutputIds {
-  artifact: string;
-  resultLink: string;
-  outputLink: string;
-  registered: string;
-}
-
-/**
- * The ids a runtime event's transaction may record, drawn before it opens. Every event records `event`; a complete
- * proposal may also resolve the approval of the binding it supersedes (`resolved`) and propose a revision (`call`); a
- * result that binds no call records `unmatched`. A declared output's rows take the ids drawn with its capture.
- */
-interface RuntimeEventIds {
-  event: string;
-  resolved: string;
-  call: string;
-  unmatched: string;
-}
-
-/**
- * The ids a permission request's transaction may record, drawn before it opens: the approval_resolved event of the
- * approval the superseded binding held, the proposal and revision of a new binding, the policy evaluation, the event recording what the
- * rule decided (the configuration error of an unlisted tool, the dispatch, or the approval request), and the
- * approval a request that asks creates.
- */
-interface PermissionIds {
-  resolved: string;
-  proposal: string;
-  call: string;
-  evaluation: string;
-  outcome: string;
-  approval: string;
 }
 
 /** An artifact a finished turn retains for its task, with the object its bytes were stored as or why they were not. */
@@ -281,34 +233,16 @@ interface TurnEvidence {
   retention: Retention;
 }
 
-/** A tool output a tool result declared, what reading and storing it produced, and the ids of the rows recording it. */
-interface CapturedOutput {
-  ids: OutputIds;
-  declared: DeclaredArtifact;
-  retention: Retention;
-}
-
-/** One MCP message debug mode records for a call, with the id of the event recording it. */
-type McpBodyRecord = McpBody & { eventId: string };
-
 /** The MCP messages turn end records for a released call whose tool result never arrived. */
 interface UnresultedBodies {
   call: CallState;
   bodies: McpBodyRecord[];
 }
 
-/** What a runtime event read before its transaction: only a tool result reads anything. */
-interface ResultReads {
-  output: CapturedOutput | null;
-  bodies: McpBodyRecord[] | null;
-}
+/** What a runtime event read before it is decided: only a tool result reads anything. */
+type ResultReads = Pick<RuntimeEventReads, "output" | "bodies">;
 
 const NOTHING_READ: ResultReads = { output: null, bodies: null };
-
-const MCP_BODY_EVENT: Record<BodyDirection, McpEventType> = {
-  request: "mcp_request",
-  response: "mcp_response",
-};
 
 /** What a turn-end read gives to retain: the bytes read, or why they could not be. */
 const evidenceCapture = (content: Exclude<RuntimeFileRead, { status: "absent" }>): Capture =>
@@ -319,16 +253,6 @@ const evidenceCapture = (content: Exclude<RuntimeFileRead, { status: "absent" }>
       reason: `unreadable: ${reason}`,
     }))
     .exhaustive();
-
-/** A tool output a completed call declared, the tool_result event that declared it, and what storing it produced. */
-interface DeclaredOutput {
-  ids: OutputIds;
-  task: TaskState;
-  call: CallState;
-  declared: DeclaredArtifact;
-  eventId: string;
-  retention: Retention;
-}
 
 /**
  * The one conversation start awaiting its reads and stores. Shutdown abandons its I/O and refuses it. A disconnect
@@ -385,22 +309,12 @@ const effortLevels = (hooks: Record<string, unknown>[]): string[] => {
   return [...new Set(levels.filter((level): level is string => typeof level === "string"))];
 };
 
-const describeAction = (toolIdentity: string, args: unknown): string => {
-  const parsed = /^mcp__(.+?)__(.+)$/.exec(toolIdentity);
-  const argText = JSON.stringify(args ?? {});
-  const server = parsed?.[1];
-  const tool = parsed?.[2];
-  if (server !== undefined && tool !== undefined)
-    return `Call tool "${tool}" on MCP server "${server}" with arguments ${argText}`;
-  return `Call ${toolIdentity} with arguments ${argText}`;
-};
-
 /**
  * Conversation/task coordinator plus approval and interruption controller. One conversation, one task,
  * one active client. The rules live in ./transitions.ts, and ./decide-conversation.ts composes them into pure
- * transitions for how an approval ends; the engine commits what they decide, replaces its state with the next one
- * only after the commit, then performs the effects (see `commit`). The transitions not yet in that machine it builds
- * itself, through the same draft (see `tx`).
+ * transitions for how an approval ends, the runtime's permission requests and the events it reports; the engine
+ * commits what they decide, replaces its state with the next one only after the commit, then performs the effects
+ * (see `commit`). The transitions not yet in that machine it builds itself, through the same draft (see `tx`).
  */
 export class Engine {
   activeConnectionId: string | null = null;
@@ -437,6 +351,11 @@ export class Engine {
    * by an `answer_prompt` effect after a commit, by its abandonment, or once its turn has ended (submitText).
    */
   private readonly prompts = new Holds<PermissionDecision>(MAX_HELD_PROMPTS);
+  /**
+   * The permission request `handlePermission` is committing, or null outside that commit. The request's
+   * `answer_permission` effect writes its answer here; the commit is synchronous, so at most one is ever set.
+   */
+  private asking: Asking | null = null;
 
   constructor(private readonly deps: EngineDeps) {}
 
@@ -563,6 +482,10 @@ export class Engine {
       .with({ kind: "answer_prompt" }, ({ approvalId, decision }) =>
         this.prompts.reply(approvalId, decision),
       )
+      .with({ kind: "answer_permission" }, ({ answer }) => {
+        if (!this.asking) throw new Error("no permission request is being committed");
+        this.asking.answer = answer;
+      })
       .with({ kind: "interrupt_runtime" }, ({ taskId }) => {
         const turn = this.running;
         if (turn?.taskId !== taskId) return;
@@ -1341,382 +1264,102 @@ export class Engine {
 
   /**
    * Records one runtime event of task `taskId`, with the tool output its result declared already captured, against
-   * the task as it is now. An event handled after the task's runtime ended is dropped: the runtime hands over its
-   * exit before the turn ends, so only an event left pending when a stuck runtime was abandoned gets here, and the
-   * turn was recorded without it.
+   * the task as it is now (see `runtimeEventTransition`). An event decided after the task's runtime ended is dropped
+   * with a log line: the turn was recorded without it.
    */
   private recordRuntimeEvent(taskId: string, event: RuntimeEvent, read: ResultReads): void {
-    const { output } = read;
-    const task = this.taskOf(taskId);
-    if (!task || task.runtimeEnded) {
-      const captured = output ? ` (output ${output.declared.path} captured)` : "";
+    const decision = this.decide(runtimeEventTransition, {
+      kind: "runtime_event",
+      origin: this.origin,
+      taskId,
+      event,
+      reads: {
+        ...read,
+        policy:
+          event.type === "tool_proposed"
+            ? policyFor(this.deps.profile.runtime, event.toolIdentity)
+            : null,
+      },
+      ids: {
+        event: this.newId("evt"),
+        resolved: this.newId("evt"),
+        call: this.newId("call"),
+        unmatched: this.newId("evt"),
+      },
+    });
+    if (decision.kind === "rejected") {
+      const captured = read.output ? ` (output ${read.output.declared.path} captured)` : "";
       this.deps.log(
         `${event.type}${captured} for task ${taskId} handled after its runtime ended; not recorded`,
       );
       return;
     }
-    const conversation = this.activeConversation;
-    const links = taskLinks(task);
-    const ids: RuntimeEventIds = {
-      event: this.newId("evt"),
-      resolved: this.newId("evt"),
-      call: this.newId("call"),
-      unmatched: this.newId("evt"),
-    };
-    const opts = { ...links, id: ids.event };
     try {
-      this.tx(() =>
-        match(event)
-          .with({ type: "runtime_started" }, (started) => {
-            this.transition.record(
-              "runtime_started",
-              { pid: started.pid, launch: started.launch },
-              opts,
-            );
-          })
-          .with({ type: "runtime_init" }, ({ init }) => {
-            this.transition.record("runtime_init", init.evidence, opts);
-            this.transition.write({
-              kind: "update_execution",
-              id: task.executionId,
-              fields: { reportedModel: init.model },
-            });
-            this.transition.advance({ ...this.transition.draft, sessionStarted: true });
-            this.transition.advanceTask(task.id, (next) => ({
-              ...next,
-              reportedModel: init.model,
-            }));
-          })
-          .with({ type: "text_delta" }, (delta) => {
-            this.transition.emit(
-              {
-                type: "text_delta",
-                payload: {
-                  conversation_id: conversation.id,
-                  task_id: task.id,
-                  execution_id: task.executionId,
-                  text: delta.text,
-                },
-              },
-              opts,
-            );
-          })
-          .with({ type: "tool_proposed" }, (proposed) => {
-            if (!proposed.complete) {
-              this.transition.record(
-                "tool_proposal_started",
-                { runtime_call_id: proposed.runtimeCallId, tool_identity: proposed.toolIdentity },
-                opts,
-              );
-              return;
-            }
-            const digest = canonicalDigest(proposed.arguments);
-            this.transition.record(
-              "tool_proposed",
-              {
-                runtime_call_id: proposed.runtimeCallId,
-                tool_identity: proposed.toolIdentity,
-                redacted_arguments: redactValue(proposed.arguments),
-                argument_digest: digest,
-              },
-              opts,
-            );
-            const revisions = task.calls.get(proposed.runtimeCallId) ?? [];
-            const binding = bindStreamProposal(revisions, {
-              toolIdentity: proposed.toolIdentity,
-              digest,
-            });
-            if (binding.kind === "attach") {
-              this.transition.write({
-                kind: "update_tool_call",
-                id: binding.call.id,
-                fields: { updatedAt: this.transition.at, proposalEventId: ids.event },
-              });
-              return;
-            }
-            const last = revisions.at(-1);
-            if (last)
-              this.supersede(task, {
-                last,
-                next: { toolIdentity: proposed.toolIdentity, digest },
-                resolvedEventId: ids.resolved,
-              });
-            const policy = policyFor(this.deps.profile.runtime, proposed.toolIdentity);
-            const state = this.proposeCall(task, {
-              id: ids.call,
-              runtimeCallId: proposed.runtimeCallId,
-              toolIdentity: proposed.toolIdentity,
-              digest,
-              args: proposed.arguments,
-              policy,
-              proposalEventId: ids.event,
-            });
-            this.transition.notifyCall(task.id, state.id);
-          })
-          .with({ type: "assistant_message" }, (message) => {
-            this.transition.record("assistant_message", message.message, opts);
-          })
-          .with({ type: "tool_result" }, (toolResult) => {
-            this.transition.record(
-              "tool_result",
-              {
-                runtime_call_id: toolResult.runtimeCallId,
-                is_error: toolResult.isError,
-                content: toolResult.content,
-                raw: toolResult.raw,
-              },
-              opts,
-            );
-            const binding = bindToolResult(task.calls.get(toolResult.runtimeCallId) ?? []);
-            if (binding.kind === "unmatched") {
-              this.transition.record(
-                "tool_result_unmatched",
-                { runtime_call_id: toolResult.runtimeCallId },
-                { ...links, id: ids.unmatched },
-              );
-              return;
-            }
-            const { call } = binding;
-            const status = statusAfterResult(call.status, toolResult.isError);
-            this.transition.write({
-              kind: "update_tool_call",
-              id: call.id,
-              fields: { updatedAt: this.transition.at, status, resultEventId: ids.event },
-            });
-            if (status === "completed" && output)
-              this.registerToolOutput({ task, call, ...output, eventId: ids.event });
-            for (const body of read.bodies ?? [])
-              this.transition.record(
-                MCP_BODY_EVENT[body.direction],
-                mcpPayload({ toolCallId: call.id, runtimeCallId: call.runtimeCallId }, body),
-                {
-                  ...links,
-                  id: body.eventId,
-                  causedBy: ids.event,
-                },
-              );
-            this.transition.advanceTask(task.id, (next) => withCall(next, call.id, { status }));
-            this.transition.notifyCall(task.id, call.id);
-          })
-          .with({ type: "turn_result" }, ({ summary }) => {
-            this.transition.record("runtime_result", summary.evidence, opts);
-            this.transition.write({
-              kind: "update_execution",
-              id: task.executionId,
-              fields: {
-                usage: {
-                  usage: summary.usage,
-                  totalCostUsd: summary.totalCostUsd,
-                  durationMs: summary.durationMs,
-                  durationApiMs: summary.durationApiMs,
-                  numTurns: summary.numTurns,
-                },
-              },
-            });
-          })
-          .with({ type: "runtime_stderr" }, (stderr) => {
-            this.transition.record("runtime_stderr", { text: stderr.text }, opts);
-          })
-          .with({ type: "malformed_event" }, (malformed) => {
-            this.transition.emit(
-              {
-                type: "error",
-                payload: {
-                  code: "runtime_failure",
-                  message: `malformed runtime event: ${malformed.error}`,
-                  conversation_id: conversation.id,
-                  task_id: task.id,
-                },
-              },
-              opts,
-            );
-          })
-          .with({ type: "runtime_exit" }, (exit) => {
-            this.transition.record("runtime_exit", { code: exit.code, signal: exit.signal }, opts);
-          })
-          .exhaustive(),
-      );
+      this.commit(decision);
     } catch (error) {
       this.deps.log(`failed to record ${event.type}: ${errorMessage(error)}`);
     }
   }
 
-  /** Record a new binding revision, the latest of its runtime call id in the draft (inside tx). */
-  private proposeCall(task: TaskState, input: NewCallInput): CallState {
-    const { id, runtimeCallId, toolIdentity, digest, policy, proposalEventId } = input;
-    const revision = (task.calls.get(runtimeCallId)?.at(-1)?.revision ?? 0) + 1;
-    const redactedArguments = redactValue(input.args);
-    this.transition.write({
-      kind: "create_tool_call",
-      input: {
-        id,
-        createdAt: this.transition.at,
-        conversationId: this.activeConversation.id,
-        taskId: task.id,
-        executionId: task.executionId,
-        runtimeCallId,
-        bindingRevision: revision,
-        toolIdentity,
-        argumentDigest: digest,
-        redactedArguments,
-        policy,
-        status: "proposed",
-        proposalEventId,
-      },
-    });
-    const state: CallState = {
-      id,
-      runtimeCallId,
-      revision,
-      toolIdentity,
-      digest,
-      redactedArguments,
-      policy,
-      status: "proposed",
-      approvalId: null,
-    };
-    this.transition.advanceTask(task.id, (next) => withRevision(next, state));
-    return state;
-  }
-
-  /**
-   * Invalidate a held earlier binding and any pending approval it carries, recorded by the approval_resolved event
-   * `resolvedEventId` names (inside tx).
-   */
-  private supersede(
-    task: TaskState,
-    input: {
-      last: CallState;
-      next: { toolIdentity: string; digest: string };
-      resolvedEventId: string;
-    },
-  ): void {
-    const { last, next, resolvedEventId } = input;
-    const superseded = supersedeBinding({
-      call: last,
-      next,
-      task: { status: task.status, otherPending: otherPending(task, last.approvalId) },
-      resolvedEventId,
-    });
-    if (!superseded) return;
-    const { approval, call, taskStatus } = superseded;
-    if (approval) {
-      this.transition.recordApprovalChange(task, approval);
-      this.transition.advanceTask(task.id, (draft) => withoutPending(draft, approval.approvalId));
-    }
-    this.transition.recordCallChange(call);
-    this.transition.commitCallChange(task, call);
-    this.transition.recordTaskStatus(task, taskStatus);
-  }
-
   // ---------------------------------------------------------------- approval controller
 
+  /**
+   * Answers one permission request of task `taskId` (see `permissionRequestTransition`). A refused request is answered
+   * whether or not its refusal can be recorded; any other is answered only once its records commit, and denied at once
+   * when they do not, so nothing is held or released for a request that was never recorded.
+   */
   private async handlePermission(
     taskId: string,
     req: PermissionRequest,
   ): Promise<PermissionDecision> {
-    const task = this.taskOf(taskId);
-    if (!task) return { behavior: "deny", message: "Mia has no active task for this call." };
-    const opts = taskLinks(task);
-    const runtimeCallId = req.toolUseId;
-    if (!runtimeCallId)
-      return this.refuseRequest(task, {
-        detail: `permission request for ${req.toolName} carried no runtime call id; rejected`,
-        settle: {
-          behavior: "deny",
-          message: "Mia cannot bind this call to a runtime call id; rejected.",
-        },
-      });
-    const digest = canonicalDigest(req.input);
-    const last = task.calls.get(runtimeCallId)?.at(-1);
-    const binding = bindPermissionRequest(last, { toolIdentity: req.toolName, digest });
-    if (binding.kind === "duplicate")
-      return this.refuseRequest(task, {
-        detail: `permission request for ${req.toolName} (${runtimeCallId}) ${binding.detail}; denied`,
-        settle: binding.settle,
-      });
-    // Policy is exactly what the profile says. After an interruption the next turn's Mia note tells the model which
-    // effects are unknown; deciding whether a repeat is safe is the model's job, not a reason to re-prompt an allowed tool.
-    const policy = policyFor(this.deps.profile.runtime, req.toolName);
-    const ids: PermissionIds = {
-      resolved: this.newId("evt"),
-      proposal: this.newId("evt"),
-      call: this.newId("call"),
-      evaluation: this.newId("evt"),
-      outcome: this.newId("evt"),
-      approval: this.newId("appr"),
-    };
-    const rule = evaluatePermission({
-      policy,
-      gateOpen: task.gateOpen,
-      toolIdentity: req.toolName,
+    const decision = this.decide(permissionRequestTransition, {
+      kind: "permission_request",
+      origin: this.origin,
+      taskId,
+      request: {
+        runtimeCallId: req.toolUseId ?? null,
+        toolIdentity: req.toolName,
+        input: req.input,
+      },
+      policy: policyFor(this.deps.profile.runtime, req.toolName),
       promptsFull: this.prompts.full,
+      ids: {
+        resolved: this.newId("evt"),
+        proposal: this.newId("evt"),
+        call: this.newId("call"),
+        evaluation: this.newId("evt"),
+        outcome: this.newId("evt"),
+        approval: this.newId("appr"),
+      },
     });
-    let recorded: { callId: string; answer: PermissionAnswer };
+    if (decision.kind === "rejected")
+      return match(decision.rejection)
+        .with({ kind: "no_task" }, (): PermissionDecision => NO_ACTIVE_TASK)
+        .with({ kind: "refused" }, ({ detail, answer }) => {
+          this.recordRefusal(taskId, detail);
+          return answer;
+        })
+        .exhaustive();
+    const asking: Asking = { answer: null };
+    this.asking = asking;
     try {
-      recorded = this.tx(() => {
-        let bound: CallState;
-        if (binding.kind === "reuse") {
-          bound = binding.call;
-        } else {
-          if (last)
-            this.supersede(task, {
-              last,
-              next: { toolIdentity: req.toolName, digest },
-              resolvedEventId: ids.resolved,
-            });
-          this.transition.record(
-            "tool_proposed",
-            {
-              runtime_call_id: runtimeCallId,
-              tool_identity: req.toolName,
-              redacted_arguments: redactValue(req.input),
-              argument_digest: digest,
-              source: "permission_request",
-            },
-            { ...opts, id: ids.proposal },
-          );
-          bound = this.proposeCall(task, {
-            id: ids.call,
-            runtimeCallId,
-            toolIdentity: req.toolName,
-            digest,
-            args: req.input,
-            policy,
-            proposalEventId: ids.proposal,
-          });
-        }
-        this.transition.record(
-          "policy_evaluated",
-          {
-            tool_call_id: bound.id,
-            tool_identity: bound.toolIdentity,
-            policy,
-            gate_open: task.gateOpen,
-            execution_epoch: task.epoch,
-            binding_revision: bound.revision,
-          },
-          { ...opts, id: ids.evaluation },
-        );
-        const answer = this.recordPermission({
-          task,
-          call: bound,
-          rule,
-          evaluationId: ids.evaluation,
-          ids,
-        });
-        this.transition.notifyCall(task.id, bound.id);
-        return { callId: bound.id, answer };
-      });
+      this.commit(decision);
     } catch (error) {
       // Nothing was requested, so nothing is held: the runtime is denied at once.
       this.deps.log(`permission handling failed: ${errorMessage(error)}`);
-      return { behavior: "deny", message: "Mia could not record this call; it was not released." };
+      return NOT_RECORDED;
+    } finally {
+      this.asking = null;
     }
-    const { callId, answer } = recorded;
+    const { answer } = asking;
+    // Unreachable: a committed request's transition always queues its answer, and performing it cannot throw.
+    if (!answer) {
+      this.deps.log(`permission request for ${req.toolName} was recorded but not answered`);
+      return NOT_RECORDED;
+    }
     return match(answer)
-      .with({ kind: "answer" }, ({ decision }) => decision)
-      .with({ kind: "hold" }, ({ approvalId }) =>
+      .with({ kind: "answer" }, ({ decision: answered }) => answered)
+      .with({ kind: "hold" }, ({ approvalId, callId }) =>
         this.holdPrompt({ taskId, callId, approvalId, abandoned: req.abandoned }),
       )
       .exhaustive();
@@ -1750,143 +1393,24 @@ export class Engine {
   }
 
   /**
-   * Refuse a permission request that binds to no new call: nothing is proposed or approved, and the runtime
-   * gets the refusal even if recording it fails.
+   * Record a refused permission request as an error the client is told of: a follow-up to the refusal, which already
+   * holds the runtime's answer, so a record that fails only logs.
    */
-  private refuseRequest(
-    task: TaskState,
-    refusal: { detail: string; settle: PermissionDecision },
-  ): PermissionDecision {
-    const id = this.newId("evt");
+  private recordRefusal(taskId: string, detail: string): void {
+    const decision = this.decide(permissionRefusedTransition, {
+      kind: "permission_refused",
+      origin: this.origin,
+      taskId,
+      detail,
+      ids: { event: this.newId("evt") },
+    });
+    // Rejected, the task ended; unreachable, as the refusal was decided against it just before.
+    if (decision.kind === "rejected") return;
     try {
-      this.tx(() =>
-        this.transition.emit(
-          {
-            type: "error",
-            payload: {
-              code: "runtime_failure",
-              message: refusal.detail,
-              conversation_id: this.activeConversation.id,
-              task_id: task.id,
-            },
-          },
-          { ...taskLinks(task), id },
-        ),
-      );
+      this.commit(decision);
     } catch (error) {
       this.deps.log(`could not record a refused permission request: ${errorMessage(error)}`);
     }
-    return refusal.settle;
-  }
-
-  /**
-   * Record what the permission rule decided for a bound call (inside tx), and move the draft to the status the call
-   * takes: what that answers the runtime.
-   */
-  private recordPermission(input: {
-    task: TaskState;
-    call: CallState;
-    rule: PermissionRule;
-    evaluationId: string;
-    ids: Pick<PermissionIds, "outcome" | "approval">;
-  }): PermissionAnswer {
-    const { task, call, rule, evaluationId, ids } = input;
-    const conversation = this.activeConversation;
-    const opts = { ...taskLinks(task), id: ids.outcome };
-    return match(rule)
-      .with({ kind: "deny" }, (denial): PermissionAnswer => {
-        if (denial.unlisted)
-          this.transition.emit(
-            {
-              type: "error",
-              payload: {
-                code: "configuration_error",
-                message: `tool ${call.toolIdentity} is not listed in toolPolicy; call denied`,
-                conversation_id: conversation.id,
-                task_id: task.id,
-              },
-            },
-            opts,
-          );
-        const change: CallChange = {
-          callId: call.id,
-          status: denial.status,
-          detail: denial.detail,
-          settle: null,
-        };
-        this.transition.recordCallChange(change);
-        this.transition.commitCallChange(task, change);
-        const { message } = denial;
-        return {
-          kind: "answer",
-          decision: denial.interrupt
-            ? { behavior: "deny", message, interrupt: true }
-            : { behavior: "deny", message },
-        };
-      })
-      .with({ kind: "dispatch" }, (): PermissionAnswer => {
-        this.transition.recordDispatch(task, call, {
-          id: ids.outcome,
-          via: "policy",
-          causedBy: evaluationId,
-        });
-        this.transition.advanceTask(task.id, (next) =>
-          withCall(next, call.id, { status: "dispatched" }),
-        );
-        return { kind: "answer", decision: { behavior: "allow" } };
-      })
-      .with({ kind: "ask" }, (): PermissionAnswer => {
-        const approvalId = ids.approval;
-        this.transition.emit(
-          {
-            type: "approval_requested",
-            payload: {
-              conversation_id: conversation.id,
-              task_id: task.id,
-              approval_id: approvalId,
-              tool_call_id: call.id,
-              runtime_call_id: call.runtimeCallId,
-              binding_revision: call.revision,
-              execution_epoch: task.epoch,
-              tool_identity: call.toolIdentity,
-              intended_action: describeAction(call.toolIdentity, call.redactedArguments),
-              redacted_arguments: call.redactedArguments,
-              argument_digest: call.digest,
-              explainable: true,
-            },
-          },
-          opts,
-        );
-        // Durable pending approval bound to (conversation, task, runtime call, revision, tool, digest, epoch), and
-        // to the event that asked for it: its id was chosen first, so the event could name it before it existed.
-        this.transition.write(
-          {
-            kind: "create_approval",
-            input: {
-              id: approvalId,
-              requestedAt: this.transition.at,
-              toolCallId: call.id,
-              executionEpoch: task.epoch,
-              requestingEventId: ids.outcome,
-            },
-          },
-          {
-            kind: "update_tool_call",
-            id: call.id,
-            fields: { updatedAt: this.transition.at, status: "awaiting_approval" },
-          },
-        );
-        this.transition.advanceTask(task.id, (next) =>
-          withPending(
-            withCall(next, call.id, { status: "awaiting_approval", approvalId }),
-            approvalId,
-            call.id,
-          ),
-        );
-        this.transition.recordTaskStatus(task, "awaiting_approval");
-        return { kind: "hold", approvalId };
-      })
-      .exhaustive();
   }
 
   /**
@@ -2148,69 +1672,6 @@ export class Engine {
         },
       },
     );
-  }
-
-  /**
-   * Records a declared tool output whatever its capture status (inside tx), with the tool result that declared it.
-   * Retention was decided before the transaction opened (`store`), so these rows only record that outcome. Only a
-   * retained tool output becomes a task output and gets an artifact_registered event.
-   */
-  private registerToolOutput(output: DeclaredOutput): void {
-    const { ids, task, call, declared, eventId, retention } = output;
-    const conversationId = this.activeConversation.id;
-    const artifactId = ids.artifact;
-    this.transition.write(
-      {
-        kind: "register_artifact",
-        input: {
-          id: artifactId,
-          createdAt: this.transition.at,
-          kind: "tool_output",
-          logicalName: declared.name ?? declared.path,
-          mimeType: declared.mimeType ?? "application/octet-stream",
-          producerExecutionId: task.executionId,
-          producerEventId: eventId,
-          originalPath: declared.path,
-          externalLocator: retention.status === "retained" ? null : declared.path,
-          ...captureFields(retention),
-        },
-      },
-      {
-        kind: "link_artifact",
-        input: {
-          id: ids.resultLink,
-          conversationId,
-          artifactId,
-          relation: "tool_result",
-          toolCallId: call.id,
-          taskId: task.id,
-        },
-      },
-    );
-    if (retention.status === "retained") {
-      const { stored } = retention;
-      this.transition.write({
-        kind: "link_artifact",
-        input: {
-          id: ids.outputLink,
-          conversationId,
-          artifactId,
-          relation: "task_output",
-          taskId: task.id,
-        },
-      });
-      this.transition.record(
-        "artifact_registered",
-        {
-          artifact_id: artifactId,
-          tool_call_id: call.id,
-          digest: stored.digest,
-          size: stored.byteCount,
-          original_path: declared.path,
-        },
-        { id: ids.registered, taskId: task.id, executionId: task.executionId, causedBy: eventId },
-      );
-    }
   }
 
   /**

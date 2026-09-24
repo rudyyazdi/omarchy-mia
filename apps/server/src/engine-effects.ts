@@ -7,6 +7,14 @@ export type OutgoingEvent = {
 }[ServerEventType];
 
 /**
+ * What a recorded permission request answers the runtime: at once, or by holding its prompt, under the approval the
+ * request recorded for call `callId`, until the user decides.
+ */
+export type PermissionAnswer =
+  | { kind: "answer"; decision: PermissionDecision }
+  | { kind: "hold"; approvalId: string; callId: string };
+
+/**
  * One thing the engine does once a transition's records have committed and its state has moved on, as data: what a
  * transition decides can then be returned by a pure `decide` and performed by the kernel. When and in what order
  * they are performed, and what a throwing one leaves standing, is `Engine.commit`'s to say.
@@ -17,10 +25,15 @@ export type OutgoingEvent = {
  *   under it), so it has no sequence. Its payload is the call as the commit leaves it.
  * - `answer_prompt`: answer the runtime's prompt held under an approval, if it is still held; one already answered
  *   (abandoned, or denied at turn end) drops this answer.
+ * - `answer_permission`: answer the runtime's permission request that the transition decided. Only a permission
+ *   request's transition queues one, and exactly one, so it names no request: the boundary that is committing that
+ *   request takes the answer. It holds a prompt only once the commit has returned, so a request whose records did
+ *   not commit is never held, and is denied instead.
  * - `interrupt_runtime`: interrupt the runtime running a task's turn, if that task is still the active one.
  */
 export type EngineEffect =
   | { kind: "deliver_event"; eventId: string; event: OutgoingEvent }
   | { kind: "notify_tool_call"; payload: EventPayload<"tool_call"> }
   | { kind: "answer_prompt"; approvalId: string; decision: PermissionDecision }
+  | { kind: "answer_permission"; answer: PermissionAnswer }
   | { kind: "interrupt_runtime"; taskId: string };

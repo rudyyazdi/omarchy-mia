@@ -2,7 +2,7 @@ import { match } from "ts-pattern";
 import type { RuntimeFileRead } from "@mia/agent-adapter";
 import { bodyLogLinesFor, type BodyDirection } from "@mia/mcp-http";
 import { redactValue } from "@mia/protocol";
-import type { McpContent } from "@mia/records";
+import type { McpContent, McpEventType } from "@mia/records";
 
 /**
  * The most a body log may hold for Mia to read it, at a tool result or at turn end. The fixture's log only grows,
@@ -26,6 +26,15 @@ export type McpBody = { direction: BodyDirection } & McpContent;
  * handling a call the runtime gave up on, so a missing line only means none was written yet.
  */
 export type BodyReadPoint = "tool_result" | "turn_end";
+
+/** One MCP message debug mode records for a call, with the id of the event recording it, drawn at the boundary. */
+export type McpBodyRecord = McpBody & { eventId: string };
+
+/** The event that records a message of each direction. */
+export const MCP_BODY_EVENT: Record<BodyDirection, McpEventType> = {
+  request: "mcp_request",
+  response: "mcp_response",
+};
 
 const missingReason = (direction: BodyDirection, readAt: BodyReadPoint): string =>
   match(readAt)
