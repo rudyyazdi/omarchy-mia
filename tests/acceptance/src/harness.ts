@@ -42,6 +42,8 @@ export interface TestServer {
    * `started` resolves once the engine has asked for it. Once released, the file is captured for real.
    */
   holdArtifactCapture(path: string): HeldRead;
+  /** Replaces the clock the engine stamps its records and sent events with; the system clock until then. */
+  setClock(now: () => Date): void;
   connect(clientId?: string): Promise<MiaClient>;
   catalog(): Catalog;
   close(): Promise<void>;
@@ -185,6 +187,7 @@ export const startTestServer = async (
     await reachHold(captureHolds, declared.path);
     return collectArtifact(declared, outputDirectories);
   };
+  let clock = () => new Date();
   const server = await startServer({
     profile,
     ...(adapter ? { adapter } : {}),
@@ -192,6 +195,7 @@ export const startTestServer = async (
     evidenceReadDeadline: () => evidenceDeadline.signal,
     readEvidence,
     collectArtifact: captureArtifact,
+    now: () => clock(),
     env,
   });
   const clients: MiaClient[] = [];
@@ -216,6 +220,9 @@ export const startTestServer = async (
     },
     holdEvidenceRead: (path) => holdOn(holds, path),
     holdArtifactCapture: (path) => holdOn(captureHolds, path),
+    setClock: (now) => {
+      clock = now;
+    },
     connect: async (clientId?: string) => {
       const client = new MiaClient({
         url: server.gateway.url,

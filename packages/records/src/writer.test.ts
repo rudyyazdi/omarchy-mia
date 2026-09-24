@@ -6,6 +6,9 @@ import { Catalog } from "./catalog.ts";
 import type { CommandReply } from "./schema.ts";
 import { RecordWriter } from "./writer.ts";
 
+/** When the rows these tests write say they were recorded. */
+const AT = "2026-01-01T00:00:00.000Z";
+
 type CommandInput = Parameters<RecordWriter["recordCommand"]>[0];
 
 let dir: string;
@@ -22,11 +25,69 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+/**
+ * A tool call awaiting approval, with the conversation, task, execution and client it belongs to, each stamped with
+ * the time `at` gives it.
+ */
+const seedToolCall = (
+  at: { conversation: string; task: string; execution: string; call: string } = {
+    conversation: AT,
+    task: AT,
+    execution: AT,
+    call: AT,
+  },
+): void => {
+  const prov = writer.createProvenanceSet("test");
+  writer.createConversation({
+    id: "conv-1",
+    startedAt: at.conversation,
+    provenanceSetId: prov,
+    runtimeConversationId: "rt-1",
+  });
+  writer.ensureClient("client-1", "text-client");
+  writer.openConnection({ connectionId: "conn-1", clientId: "client-1", build: {} });
+  writer.createTask({
+    id: "task-1",
+    createdAt: at.task,
+    conversationId: "conv-1",
+    text: "t",
+    clientId: "client-1",
+  });
+  writer.createExecution({
+    id: "exec-1",
+    startedAt: at.execution,
+    taskId: "task-1",
+    conversationId: "conv-1",
+    runtimeIdentity: "claude-code",
+    runtimeConversationId: "rt-1",
+    requestedModel: "m",
+    requestedEffort: "medium",
+    provenanceSetId: prov,
+    executionEpoch: 1,
+  });
+  writer.createToolCall({
+    id: "call-1",
+    createdAt: at.call,
+    conversationId: "conv-1",
+    taskId: "task-1",
+    executionId: "exec-1",
+    runtimeCallId: "toolu_1",
+    bindingRevision: 1,
+    toolIdentity: "mcp__d1__change",
+    argumentDigest: "d",
+    redactedArguments: { delta: 1 },
+    policy: "ask",
+    status: "awaiting_approval",
+    proposalEventId: null,
+  });
+};
+
 describe("record writer", () => {
   it("enforces foreign keys and rolls back a failed transaction atomically", () => {
     const prov = writer.createProvenanceSet("test");
     writer.createConversation({
       id: "conv-1",
+      startedAt: AT,
       provenanceSetId: prov,
       runtimeConversationId: "rt-1",
     });
@@ -34,12 +95,14 @@ describe("record writer", () => {
       catalog.transaction(() => {
         writer.appendEvent({
           id: "evt-1",
+          receivedAt: AT,
           conversationId: "conv-1",
           type: "task_submitted",
           payload: { ok: true },
         });
         writer.createTask({
           id: "task-1",
+          createdAt: AT,
           conversationId: "conv_does_not_exist",
           text: "x",
           clientId: null,
@@ -52,6 +115,7 @@ describe("record writer", () => {
   it("records a conversation without creating its directory", () => {
     const conv = writer.createConversation({
       id: "conv-1",
+      startedAt: AT,
       provenanceSetId: writer.createProvenanceSet("test"),
       runtimeConversationId: "rt-1",
     });
@@ -64,17 +128,20 @@ describe("record writer", () => {
     const prov = writer.createProvenanceSet("test");
     writer.createConversation({
       id: "conv-1",
+      startedAt: AT,
       provenanceSetId: prov,
       runtimeConversationId: "rt-1",
     });
     const first = writer.appendEvent({
       id: "evt-1",
+      receivedAt: AT,
       conversationId: "conv-1",
       type: "task_submitted",
       payload: { api_key: "sk-ant-abcdefghijklmnop", text: "Bearer abcdefghijklmnopqrstuvwxyz" },
     });
     const second = writer.appendEvent({
       id: "evt-2",
+      receivedAt: AT,
       conversationId: "conv-1",
       type: "runtime_exit",
       payload: {},
@@ -97,13 +164,21 @@ describe("record writer", () => {
     const prov = writer.createProvenanceSet("test");
     writer.createConversation({
       id: "conv-1",
+      startedAt: AT,
       provenanceSetId: prov,
       runtimeConversationId: "rt-1",
     });
-    writer.createTask({ id: "task-1", conversationId: "conv-1", text: "t", clientId: null });
+    writer.createTask({
+      id: "task-1",
+      createdAt: AT,
+      conversationId: "conv-1",
+      text: "t",
+      clientId: null,
+    });
     const append = (taskId: string | null) =>
       writer.appendEvent({
         id: "evt-1",
+        receivedAt: AT,
         conversationId: "conv-1",
         type: "task_submitted",
         payload: {},
@@ -112,7 +187,13 @@ describe("record writer", () => {
     append("task-1");
     expect(() => append(null)).toThrow();
     expect(() =>
-      writer.createTask({ id: "task-1", conversationId: "conv-1", text: "u", clientId: null }),
+      writer.createTask({
+        id: "task-1",
+        createdAt: AT,
+        conversationId: "conv-1",
+        text: "u",
+        clientId: null,
+      }),
     ).toThrow();
     expect(catalog.all("SELECT id, task_id FROM events")).toEqual([
       { id: "evt-1", task_id: "task-1" },
@@ -142,42 +223,55 @@ describe("record writer", () => {
     expect(writer.objects.verifySync(one.digest)).toBe("verified");
   });
 
-  it("rejects duplicate approvals for the same binding and epoch, and duplicate command IDs", () => {
-    const prov = writer.createProvenanceSet("test");
-    writer.createConversation({
-      id: "conv-1",
-      provenanceSetId: prov,
-      runtimeConversationId: "rt-1",
+  it("stamps a transition's rows with the times its caller gives", () => {
+    const second = (index: number) => `2026-01-01T00:00:0${index}.000Z`;
+    seedToolCall({
+      conversation: second(1),
+      task: second(2),
+      execution: second(3),
+      call: second(4),
     });
-    writer.ensureClient("client-1", "text-client");
-    writer.openConnection({ connectionId: "conn-1", clientId: "client-1", build: {} });
-    writer.createTask({ id: "task-1", conversationId: "conv-1", text: "t", clientId: "client-1" });
-    writer.createExecution({
-      id: "exec-1",
-      taskId: "task-1",
-      conversationId: "conv-1",
-      runtimeIdentity: "claude-code",
-      runtimeConversationId: "rt-1",
-      requestedModel: "m",
-      requestedEffort: "medium",
-      provenanceSetId: prov,
+    writer.createApproval({
+      id: "appr-1",
+      requestedAt: second(5),
+      toolCallId: "call-1",
       executionEpoch: 1,
+      requestingEventId: null,
     });
-    writer.createToolCall({
-      id: "call-1",
+    writer.appendEvent({
+      id: "evt-1",
+      receivedAt: second(6),
       conversationId: "conv-1",
-      taskId: "task-1",
-      executionId: "exec-1",
-      runtimeCallId: "toolu_1",
-      bindingRevision: 1,
-      toolIdentity: "mcp__d1__change",
-      argumentDigest: "d",
-      redactedArguments: { delta: 1 },
-      policy: "ask",
-      status: "awaiting_approval",
-      proposalEventId: null,
+      type: "approval_resolved",
+      payload: {},
     });
-    const approval = { toolCallId: "call-1", executionEpoch: 1, requestingEventId: null };
+    writer.updateApproval("appr-1", { status: "approved", consumedAt: second(7) });
+    writer.updateToolCall("call-1", { updatedAt: second(8), status: "dispatched" });
+    expect([
+      catalog.get("SELECT started_at FROM conversations"),
+      catalog.get("SELECT created_at FROM tasks"),
+      catalog.get("SELECT started_at FROM executions"),
+      catalog.get("SELECT created_at, updated_at FROM tool_calls"),
+      catalog.get("SELECT requested_at, consumed_at FROM approvals"),
+      catalog.get("SELECT received_at FROM events"),
+    ]).toEqual([
+      { started_at: second(1) },
+      { created_at: second(2) },
+      { started_at: second(3) },
+      { created_at: second(4), updated_at: second(8) },
+      { requested_at: second(5), consumed_at: second(7) },
+      { received_at: second(6) },
+    ]);
+  });
+
+  it("rejects duplicate approvals for the same binding and epoch, and duplicate command IDs", () => {
+    seedToolCall();
+    const approval = {
+      requestedAt: AT,
+      toolCallId: "call-1",
+      executionEpoch: 1,
+      requestingEventId: null,
+    };
     writer.createApproval({ id: "appr-1", ...approval });
     expect(() => writer.createApproval({ id: "appr-2", ...approval })).toThrow();
     const command: CommandInput = {

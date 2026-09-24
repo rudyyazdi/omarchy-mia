@@ -24,6 +24,9 @@ import {
   type TestServer,
 } from "./harness.ts";
 
+/** When the rows these tests write say they were recorded. */
+const AT = "2026-01-01T00:00:00.000Z";
+
 let runtime: ScriptedRuntime;
 let ts: TestServer;
 let client: MiaClient;
@@ -334,11 +337,13 @@ describe("records, report and export", () => {
     const conversationId = newId("conv");
     writer.createConversation({
       id: conversationId,
+      startedAt: AT,
       provenanceSetId: prov,
       runtimeConversationId: "rt",
     });
     writer.appendEvent({
       id: newId("evt"),
+      receivedAt: AT,
       conversationId,
       type: "task_submitted",
       payload: { a: 1 },

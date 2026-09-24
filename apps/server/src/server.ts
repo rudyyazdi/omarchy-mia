@@ -77,6 +77,8 @@ export const startServer = async (input: {
   readEvidence?: RuntimeFileReader;
   /** Captures a declared tool output; defaults to `collectArtifact`. A test injects one that holds a capture. */
   collectArtifact?: ArtifactCollector;
+  /** The clock the engine stamps its records and events with, and acks read; defaults to the system clock. */
+  now?: () => Date;
   /**
    * The server process's environment: fills a profile's `${ENV}` placeholders, is what the runtime
    * inherits and is probed with at startup, and names the bridge's request log (`MIA_MCP_HTTP_LOG`).
@@ -100,6 +102,7 @@ export const startServer = async (input: {
   const catalog = Catalog.openSync(profile.stateDirectory);
   try {
     const writer = new RecordWriter(catalog);
+    const now = input.now ?? (() => new Date());
     const bridge = new ApprovalBridge({ logFile: input.env.MIA_MCP_HTTP_LOG });
     await bridge.start();
     try {
@@ -115,6 +118,7 @@ export const startServer = async (input: {
         readEvidence: input.readEvidence ?? readRuntimeFile,
         collectArtifact: input.collectArtifact ?? collectArtifact,
         newId,
+        now,
         log,
       });
       const gateway = await startGateway({
@@ -123,6 +127,7 @@ export const startServer = async (input: {
         secretFile: profile.server.secretFile,
         engine,
         writer,
+        now,
         log,
       });
       log(
