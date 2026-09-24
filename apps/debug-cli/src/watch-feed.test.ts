@@ -1,5 +1,6 @@
 import { match } from "ts-pattern";
 import { describe, expect, it } from "vitest";
+import type { BodyLogServers } from "@mia/agent-adapter";
 import type { WatchRows } from "@mia/records";
 import {
   messagesAfter,
@@ -32,9 +33,12 @@ const conversation = (): WatchRows =>
     ],
   });
 
+/** The fixture's calls go to d1, which writes a body log unless a test says otherwise. */
+const FIXTURE_SERVERS: BodyLogServers = { status: "known", servers: new Map([["d1", "body_log"]]) };
+
 /** One poll, its messages read out as the server sends them. */
-const poll = (rows: WatchRows, sent: Sent) => {
-  const polled = messagesAfter(rows, sent);
+const poll = (rows: WatchRows, sent: Sent, servers: BodyLogServers = FIXTURE_SERVERS) => {
+  const polled = messagesAfter(rows, sent, servers);
   return { messages: [...polled.messages], sent: polled.sent };
 };
 
@@ -133,7 +137,7 @@ describe("messagesAfter", () => {
     });
   });
 
-  it("marks a dispatched call's MCP bodies as not recorded unless the conversation recorded the debug-mode flag", () => {
+  it("marks a fixture call's MCP bodies as not recorded unless the conversation recorded the debug-mode flag", () => {
     const marked = (rows: WatchRows) =>
       poll(rows, NOTHING_SENT)
         .messages.filter((message) => message.op === "node" && message.kind === "tool_call")

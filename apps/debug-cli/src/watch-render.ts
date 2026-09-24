@@ -8,6 +8,7 @@ import {
   type ToolCallStatus,
 } from "@mia/protocol";
 import { match } from "ts-pattern";
+import { serverBodyLog, type BodyLogServers } from "@mia/agent-adapter";
 import type {
   ApprovalRow,
   ConversationRow,
@@ -92,12 +93,37 @@ const STOPPED_CALLS: ReadonlySet<ToolCallStatus> = new Set([
 ]);
 
 /**
- * What only debug mode records, marked where it would appear in a conversation captured with debug mode off, so
- * the page never shows a silent gap (issue #6). Only a dispatched call has MCP bodies: a call denied, blocked or
- * cancelled before dispatch never reached a server. A dispatched call is always an MCP call, since only listed
+ * What the watch knows about which detail a conversation's capture left out: whether it was captured in debug mode
+ * (`capturedInDebugMode`), and which of its MCP servers write a body log, from its retained tool contracts.
+ */
+export interface Capture {
+  debugMode: boolean;
+  bodyLogServers: BodyLogServers;
+}
+
+/**
+ * Why a dispatched call's MCP request and response are missing, marked where their nodes would appear so the page
+ * never shows a silent gap (issue #6), or null where debug mode records them. Only a server that writes a body log
+ * (the controlled MCP fixture) has its bodies recorded, and only in debug mode: a real server's are never recorded,
+ * so "(debug mode off)" would promise what `--debug` does not add. A call denied, blocked or cancelled before
+ * dispatch never reached a server and has no bodies. A dispatched call is always an MCP call, since only listed
  * `mcp__…` identities are permitted and the runtime is launched with no built-in tools.
  */
-const NOT_RECORDED = `<p class="not-recorded">MCP request and response: not recorded (debug mode off)</p>`;
+const mcpBodiesGap = (call: ToolCallRow, capture: Capture): string | null => {
+  if (call.dispatch_event_id === null) return null;
+  return match(serverBodyLog(capture.bodyLogServers, call.tool_identity))
+    .with({ kind: "none" }, () => "not recorded")
+    .with({ kind: "writes" }, () => (capture.debugMode ? null : "not recorded (debug mode off)"))
+    .with({ kind: "unknown" }, ({ reason }) =>
+      capture.debugMode
+        ? `not recorded unless shown below (whether its server records bodies is unknown: ${reason})`
+        : `not recorded (debug mode off, and whether its server records bodies is unknown: ${reason})`,
+    )
+    .exhaustive();
+};
+
+const gapHtml = (gap: string | null): string =>
+  gap === null ? "" : `<p class="not-recorded">MCP request and response: ${shown(gap)}</p>`;
 
 /** `debugMode` is whether the conversation was captured in debug mode (`capturedInDebugMode`). */
 export const conversationView = (conversation: ConversationRow, debugMode: boolean): NodeView => ({
@@ -123,11 +149,10 @@ export const taskView = (task: TaskRow, executions: readonly ExecutionRow[]): No
   };
 };
 
-/** `debugMode` is whether the conversation was captured in debug mode (`capturedInDebugMode`). */
 export const toolCallView = (
   call: ToolCallRow,
   approvals: readonly ApprovalRow[],
-  debugMode: boolean,
+  capture: Capture,
 ): NodeView => {
   const args = JSON.stringify(redactValue(parseStored(call.redacted_arguments)));
   const outcome = call.detail
@@ -139,7 +164,7 @@ export const toolCallView = (
     body: [
       fieldsHtml({ ...call, redacted_arguments: parseStored(call.redacted_arguments) }),
       ...approvals.map((row) => `<h4>approval ${shown(row.id)}</h4>${fieldsHtml({ ...row })}`),
-      !debugMode && call.dispatch_event_id !== null ? NOT_RECORDED : "",
+      gapHtml(mcpBodiesGap(call, capture)),
     ].join(""),
   };
 };

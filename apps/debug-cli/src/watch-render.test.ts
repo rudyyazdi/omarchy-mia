@@ -1,9 +1,23 @@
 import { describe, expect, it } from "vitest";
+import type { RetainedBodyLog } from "@mia/agent-adapter";
 import type { WatchMcpMessage } from "@mia/records";
-import { conversationView, eventView, mcpView, taskView, toolCallView } from "./watch-render.ts";
+import {
+  conversationView,
+  eventView,
+  mcpView,
+  taskView,
+  toolCallView,
+  type Capture,
+} from "./watch-render.ts";
 import { conversationRow, eventRow, executionRow, taskRow, toolCallRow } from "./watch-fixture.ts";
 
 const SECRET = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+/** A capture whose d1 server, where the fixture's calls go, retained `d1` of its body log. */
+const capture = (debugMode: boolean, d1: RetainedBodyLog = "body_log"): Capture => ({
+  debugMode,
+  bodyLogServers: { status: "known", servers: new Map([["d1", d1]]) },
+});
 
 describe("watch views", () => {
   it("escapes markup from the catalog, so recorded text never becomes page structure", () => {
@@ -20,7 +34,7 @@ describe("watch views", () => {
     const call = toolCallView(
       toolCallRow({ redacted_arguments: JSON.stringify({ token: "super-secret-value-123456" }) }),
       [],
-      false,
+      capture(false),
     );
     const event = eventView(eventRow({ sequence: 1, payload: `{"password": "hunter2hunter2` }));
     const shown = JSON.stringify([task, call, event]);
@@ -44,22 +58,68 @@ describe("watch views", () => {
     const view = toolCallView(
       toolCallRow({ status: "denied", detail: "Mia denied mcp__d1__forbidden by policy" }),
       [],
-      false,
+      capture(false),
     );
     expect(view.summary).toContain("denied");
     expect(view.summary).toContain("✗ Mia denied mcp__d1__forbidden by policy");
   });
 
-  it("marks a dispatched call's MCP bodies as not recorded when the conversation was captured with debug mode off", () => {
-    const marker = "not recorded (debug mode off)";
+  it("marks a fixture call's MCP bodies as not recorded when the conversation was captured with debug mode off", () => {
+    const marker = "MCP request and response: not recorded (debug mode off)";
     const dispatched = toolCallRow({ status: "completed", dispatch_event_id: "e5" });
-    expect(toolCallView(dispatched, [], false).body).toContain(marker);
-    expect(toolCallView(dispatched, [], true).body).not.toContain(marker);
+    expect(toolCallView(dispatched, [], capture(false)).body).toContain(marker);
+    // Debug mode recorded its bodies, which the page shows as nodes under it.
+    expect(toolCallView(dispatched, [], capture(true)).body).not.toContain("not recorded");
+  });
+
+  it("marks a real server's call as not recorded whatever the mode, since debug mode never records its bodies", () => {
+    const dispatched = toolCallRow({ status: "completed", dispatch_event_id: "e5" });
+    for (const debugMode of [false, true]) {
+      const { body } = toolCallView(dispatched, [], capture(debugMode, "no_body_log"));
+      expect(body).toContain('<p class="not-recorded">MCP request and response: not recorded</p>');
+      expect(body).not.toContain("debug mode off");
+    }
+  });
+
+  it("tells a server from another only by its whole name", () => {
+    const call = toolCallRow({ tool_identity: "mcp__d1x__read", dispatch_event_id: "e5" });
+    const servers = new Map<string, RetainedBodyLog>([
+      ["d1", "body_log"],
+      ["d1x", "no_body_log"],
+    ]);
+    const view = toolCallView(call, [], {
+      debugMode: false,
+      bodyLogServers: { status: "known", servers },
+    });
+    expect(view.body).toContain("MCP request and response: not recorded</p>");
+  });
+
+  it("says why it cannot tell whether a call's bodies were recorded, escaped, when the tool contracts are unreadable", () => {
+    const dispatched = toolCallRow({ status: "completed", dispatch_event_id: "e5" });
+    const unknown = (debugMode: boolean): Capture => ({
+      debugMode,
+      bodyLogServers: { status: "unknown", reason: "its <tool_contracts> object is missing" },
+    });
+    expect(toolCallView(dispatched, [], unknown(true)).body).toContain(
+      "not recorded unless shown below (whether its server records bodies is unknown: its &lt;tool_contracts&gt; object is missing)",
+    );
+    // With debug mode off nothing is ever shown below.
+    expect(toolCallView(dispatched, [], unknown(false)).body).toContain(
+      "not recorded (debug mode off, and whether its server records bodies is unknown: its &lt;tool_contracts&gt; object is missing)",
+    );
+  });
+
+  it("cannot tell a server whose retained entry was redacted whole from the fixture, and says so", () => {
+    const dispatched = toolCallRow({ status: "completed", dispatch_event_id: "e5" });
+    expect(toolCallView(dispatched, [], capture(true, "redacted")).body).toContain(
+      "unless shown below (whether its server records bodies is unknown: its server&#39;s retained entry was redacted)",
+    );
   });
 
   it("marks nothing on a call that never reached an MCP server", () => {
     const denied = toolCallRow({ status: "denied", detail: "Mia denied it by policy" });
-    expect(toolCallView(denied, [], false).body).not.toContain("not recorded");
+    for (const shown of [capture(false), capture(false, "no_body_log")])
+      expect(toolCallView(denied, [], shown).body).not.toContain("not recorded");
   });
 
   it("shows on the conversation's line whether it was captured in debug mode", () => {

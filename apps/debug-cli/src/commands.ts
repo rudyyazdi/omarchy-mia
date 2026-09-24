@@ -133,10 +133,17 @@ export const watch = async (
       signal: run.signal,
       timers: WATCH_TIMERS,
     });
-    if (started.kind === "unknown_conversation") {
-      console.error(`mia debug watch: conversation ${conversationId} not found`);
-      return 1;
-    }
+    if (started.kind !== "watching")
+      return match(started)
+        .with({ kind: "unknown_conversation" }, () => {
+          console.error(`mia debug watch: conversation ${conversationId} not found`);
+          return 1;
+        })
+        .with({ kind: "interrupted" }, () => {
+          out(`stopped watching ${conversationId}`);
+          return 0;
+        })
+        .exhaustive();
     out(`watching ${conversationId} at ${started.watch.url} (Ctrl-C to stop)`);
     if (run.open) openInBrowser(started.watch.url);
     return match(await started.watch.ended)

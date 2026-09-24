@@ -6,6 +6,7 @@ import {
   type RuntimeFileRead,
   type RuntimeFileReader,
   type StaticCapabilities,
+  toolContracts,
 } from "@mia/agent-adapter";
 import { PROTOCOL_VERSION, redactValue, sha256Hex } from "@mia/protocol";
 import type {
@@ -176,16 +177,8 @@ export const planConversationProvenance = (input: {
     retained("configuration", { bytes: Buffer.from(configText, "utf8"), version: profile.profile }),
   );
 
-  // Tool contracts: configured servers and per-tool policy (runtime-reported tool lists are recorded per execution).
   items.push(
-    retained("tool_contracts", {
-      bytes: json({
-        mcpServers: redactValue(profile.runtime.mcpServers),
-        toolPolicy: profile.runtime.toolPolicy,
-        builtinTools: profile.runtime.builtinTools,
-      }),
-      version: "d1",
-    }),
+    retained("tool_contracts", { bytes: json(toolContracts(profile.runtime)), version: "d1" }),
   );
 
   // Requested model identities and effort; reported values live on executions.
