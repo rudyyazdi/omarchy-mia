@@ -2089,6 +2089,64 @@ describe("conversation start", () => {
     expect(ackError(await again.send("interrupt_task", address)).code).toBe("not_found");
   });
 
+  it("makes another client's started conversation the active one, its own, before telling it", async () => {
+    const previous = must(client.conversationId, "conversation id");
+    const closed = ts.waitForLog((line) => line.endsWith(" closed"));
+    client.close();
+    await closed;
+    const { engine, gateway } = ts.server;
+    const active: { conversation: string | null; client: string | null }[] = [];
+    engine.attachDelivery((connectionId, event) => {
+      if (event.type === "conversation_started")
+        active.push({
+          conversation: engine.conversation?.id ?? null,
+          client: engine.activeClientId,
+        });
+      gateway.send(connectionId, event);
+    });
+    const other = await ts.connect("client-B");
+    const started = mustString(
+      ackResult(await other.send("start_conversation", {})).conversation_id,
+      "conversation id",
+    );
+    expect(started).not.toBe(previous);
+    expect(active).toEqual([{ conversation: started, client: "client-B" }]);
+    expect((await other.waitFor("conversation_started")).payload.conversation_id).toBe(started);
+  });
+
+  it("gives a first start whose client disconnects during its reads no other client's connection", async () => {
+    const fresh = await startTestServer(new ScriptedRuntime());
+    try {
+      const bystander = await fresh.connect("client-B");
+      // Its first command makes its connection the active one: there is no conversation for anyone to own yet.
+      expect((await bystander.sendDiagnostics()).disposition).toBe("accepted");
+      const starter = await fresh.connect("client-A");
+      const held = fresh.holdEvidenceRead(fresh.profile.runtime.agentPromptFile);
+      const unanswered = starter
+        .send("start_conversation", {}, { messageId: "cmd-first" })
+        .catch(() => undefined);
+      await held.started;
+      const closed = fresh.waitForLog((line) => line.endsWith(" closed"));
+      starter.close();
+      await Promise.all([unanswered, closed]);
+      const again = await fresh.connect("client-A");
+      const resent = again.send("start_conversation", {}, { messageId: "cmd-first" });
+      held.release();
+      const conversationId = mustString(ackResult(await resent).conversation_id, "conversation id");
+      // The conversation is client A's, reached through no connection until A adopts one: B is not told it started,
+      // and cannot act on it.
+      expect(bystander.events.map((event) => event.type)).not.toContain("conversation_started");
+      const address = { conversation_id: conversationId, task_id: "task_none" };
+      expect(ackError(await bystander.send("interrupt_task", address))).toEqual({
+        code: "busy",
+        message: "the conversation belongs to another client",
+      });
+      expect(ackError(await again.send("interrupt_task", address)).code).toBe("not_found");
+    } finally {
+      await fresh.close();
+    }
+  });
+
   it("refuses a start whose prompt is a FIFO or too large, without waiting on it", async () => {
     const promptFile = ts.profile.runtime.agentPromptFile;
     rmSync(promptFile);

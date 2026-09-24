@@ -9,19 +9,9 @@ import {
   type ConversationState,
   type TaskState,
 } from "./conversation-state.ts";
-import type { EngineEffect, OutgoingEvent } from "./engine-effects.ts";
+import type { EngineEffect, Origin, OutgoingEvent } from "./engine-effects.ts";
 import type { EngineRecord } from "./engine-records.ts";
 import type { ApprovalChange, CallChange } from "./transitions.ts";
-
-/**
- * The client and the connection a transition's events are recorded under: the conversation's active ones when the
- * transition was decided. They are not part of the conversation's state (they belong with the client lifecycle), so
- * the boundary reads them and hands them in with the event, as it does the ids.
- */
-export interface Origin {
-  clientId: string | null;
-  connectionId: string | null;
-}
 
 /** Linkage recorded with an event: the task and execution it belongs to and the event that caused it. */
 export interface EventLinks {

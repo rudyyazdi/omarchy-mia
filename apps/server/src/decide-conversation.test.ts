@@ -113,6 +113,7 @@ const labels = (records: readonly EngineRecord[]): string[] =>
 const effectLabels = (effects: readonly EngineEffect[]): string[] =>
   effects.map((effect) =>
     match(effect)
+      .with({ kind: "activate_conversation" }, ({ origin }) => `activate ${origin.connectionId}`)
       .with({ kind: "deliver_event" }, ({ event }) => `deliver ${event.type}`)
       .with(
         { kind: "notify_tool_call" },
@@ -1418,7 +1419,9 @@ describe("conversation start", () => {
         },
       },
     ]);
+    // The conversation becomes the active one, under its start's client and connection, before the client is told.
     expect(effects).toMatchObject([
+      { kind: "activate_conversation", origin: ORIGIN },
       { kind: "deliver_event", eventId: "evt_started", event: { type: "conversation_started" } },
     ]);
     expect(next).toEqual({
