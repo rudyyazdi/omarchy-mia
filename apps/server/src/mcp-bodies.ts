@@ -2,6 +2,7 @@ import { match } from "ts-pattern";
 import type { RuntimeFileRead } from "@mia/agent-adapter";
 import { bodyLogLinesFor, type BodyDirection } from "@mia/mcp-http";
 import { redactValue } from "@mia/protocol";
+import type { McpContent } from "@mia/records";
 
 /**
  * The most a body log may hold for a tool result to read it. The fixture's log only grows, and each read is the
@@ -17,9 +18,7 @@ export const MAX_BODY_LOG_BYTES = 16 * 1024 * 1024;
  * whose result never arrives (its turn interrupted or its runtime gone mid-call) records none; the call itself
  * ends `unknown`.
  */
-export type McpBody =
-  | { direction: BodyDirection; status: "recorded"; body: unknown }
-  | { direction: BodyDirection; status: "unrecorded"; reason: string };
+export type McpBody = { direction: BodyDirection } & McpContent;
 
 const DIRECTIONS: readonly BodyDirection[] = ["request", "response"];
 

@@ -1,13 +1,12 @@
 import { match } from "ts-pattern";
 import { z } from "zod";
 import { parseJson } from "./catalog.ts";
-import { isRecord } from "@mia/protocol";
+import { isMcpEventType, mcpContentOf, type McpContent, type McpEventType } from "./mcp-payload.ts";
 import type {
   ApprovalRow,
   ConversationRow,
   EventRow,
   ExecutionRow,
-  JournalEventType,
   SnapshotTables,
   TaskRow,
   ToolCallRow,
@@ -33,18 +32,11 @@ export type WatchToolCallParent = { level: "tool_call"; task_id: string; tool_ca
 /** The tree node an entry is appended under. */
 export type WatchParent = WatchConversationParent | WatchTaskParent | WatchToolCallParent;
 
-/** The events debug mode records for one MCP message of a call (the server's `mcpBodyPayload`). */
-export type McpEventType = Extract<JournalEventType, "mcp_request" | "mcp_response">;
-
-/** What one MCP message event holds: the body as recorded (already redacted), or why none was. */
-export type WatchMcpContent =
-  { status: "recorded"; body: unknown } | { status: "unrecorded"; reason: string };
-
 /** One MCP request or response node under a tool call: the event that recorded it, and what it holds. */
 export interface WatchMcpMessage {
   type: McpEventType;
   event: EventRow;
-  content: WatchMcpContent;
+  content: McpContent;
 }
 
 /**
@@ -116,31 +108,13 @@ const Proposal = z.object({
   argument_digest: z.string(),
 });
 
-const MCP_EVENT_TYPES: ReadonlySet<JournalEventType> = new Set<McpEventType>([
-  "mcp_request",
-  "mcp_response",
-]);
-const isMcpEventType = (type: JournalEventType): type is McpEventType => MCP_EVENT_TYPES.has(type);
-
-/** An `mcp_request` / `mcp_response` payload that records why it holds no body. */
-const Unrecorded = z.object({ unrecorded: z.string() });
-
-/** What an MCP message payload holds, or null for a payload of neither shape, which stays a raw event. */
-const mcpContentOf = (payload: unknown): WatchMcpContent | null => {
-  const unrecorded = Unrecorded.safeParse(payload);
-  if (unrecorded.success) return { status: "unrecorded", reason: unrecorded.data.unrecorded };
-  if (isRecord(payload) && Object.hasOwn(payload, "body"))
-    return { status: "recorded", body: payload.body };
-  return null;
-};
-
 /**
  * The MCP message an event is, or null when it is not one: another type, or a payload the view cannot read, which
  * it keeps as a raw event so nothing recorded is hidden. Only an event of a known call becomes its node.
  */
-const mcpMessageOf = (event: EventRow): WatchMcpMessage | null => {
+const mcpMessageOf = (event: EventRow, payload: unknown): WatchMcpMessage | null => {
   if (!isMcpEventType(event.type)) return null;
-  const content = mcpContentOf(parseJson(event.payload));
+  const content = mcpContentOf(payload);
   return content ? { type: event.type, event, content } : null;
 };
 
@@ -158,7 +132,7 @@ const bindingKey = (binding: {
   ]);
 
 /**
- * Which tool call each event belongs to, taking the first of these that is a call of the event's
+ * Which tool call an event belongs to, given its parsed payload, taking the first of these that is a call of the event's
  * own (known) task: the call its payload names; the call whose row references it (the proposal and
  * the result, whose payloads carry only the runtime's call id); for a `tool_proposed` event, the
  * only call of its execution with the binding it announces.
@@ -169,10 +143,10 @@ const bindingKey = (binding: {
  * sequence a view already showed. Events recorded before the call exists (`tool_proposal_started`)
  * stay with the task, for the same reason.
  */
-const toolCallOfEvents = (
+const toolCallOwner = (
   rows: WatchRows,
   taskIds: ReadonlySet<string>,
-): Map<string, ToolCallRow> => {
+): ((event: EventRow, payload: unknown) => ToolCallRow | undefined) => {
   const calls = new Map(
     rows.tool_calls.filter((call) => taskIds.has(call.task_id)).map((call) => [call.id, call]),
   );
@@ -189,18 +163,14 @@ const toolCallOfEvents = (
     );
     return matches?.length === 1 ? matches[0] : undefined;
   };
-  const owners = new Map<string, ToolCallRow>();
-  for (const event of rows.events) {
-    const payload = parseJson(event.payload);
+  return (event, payload) => {
     const named = NamesToolCall.safeParse(payload);
-    const call = [
+    return [
       named.success ? calls.get(named.data.tool_call_id) : undefined,
       referenced.get(event.id),
       announced(event, payload),
     ].find((candidate) => candidate?.task_id === event.task_id);
-    if (call) owners.set(event.id, call);
-  }
-  return owners;
+  };
 };
 
 const parentOf = (call: ToolCallRow | undefined, taskId: string | null): WatchParent => {
@@ -230,15 +200,17 @@ const firstSequences = () => {
  */
 const allEntries = (rows: WatchRows): WatchEntry[] => {
   const taskIds = new Set(rows.tasks.map((task) => task.id));
-  const owners = toolCallOfEvents(rows, taskIds);
+  const ownerOf = toolCallOwner(rows, taskIds);
   const taskFirst = firstSequences();
   const callFirst = firstSequences();
   const eventEntries = rows.events.map((event): WatchEntry => {
-    const call = owners.get(event.id);
+    // Parsed once per event, and dropped with it: a payload can be a large MCP body.
+    const payload = parseJson(event.payload);
+    const call = ownerOf(event, payload);
     const taskId = event.task_id !== null && taskIds.has(event.task_id) ? event.task_id : null;
     if (taskId !== null) taskFirst.note(taskId, event.sequence);
     if (call) callFirst.note(call.id, event.sequence);
-    const mcp = mcpMessageOf(event);
+    const mcp = mcpMessageOf(event, payload);
     if (call && mcp)
       return {
         kind: "mcp",

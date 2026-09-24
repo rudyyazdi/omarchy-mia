@@ -188,6 +188,17 @@ describe("messagesAfter: MCP messages", () => {
     );
     expect(poll(rows, sent).messages.map(placement)).toEqual(["node mcp:e6 under tool_call:c1"]);
   });
+
+  it("does not send an MCP message again when only its call's header changes", () => {
+    const { sent } = poll(withRequest(), NOTHING_SENT);
+    const completed = withRequest();
+    completed.tool_calls = [
+      toolCallRow({ proposal_event_id: "e3", dispatch_event_id: "e3", status: "completed" }),
+    ];
+    expect(poll(completed, sent).messages.map(placement)).toEqual([
+      "node tool_call:c1 under task:t1",
+    ]);
+  });
 });
 
 describe("sseRecord", () => {

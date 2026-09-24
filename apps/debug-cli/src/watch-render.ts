@@ -41,8 +41,10 @@ const shown = (text: string): string => escapeHtml(redactString(text));
 
 /** The first `length` characters of already-redacted text, so a cut never splits a secret out of view. */
 const clipped = (text: string, length = 80): string => {
-  // By code point, so a cut never splits a surrogate pair.
-  const points = Array.from(text);
+  // By code point, so a cut never splits a surrogate pair, and no further than the cut: an MCP body can be megabytes.
+  const points = Iterator.from(text)
+    .take(length + 1)
+    .toArray();
   return points.length > length ? `${points.slice(0, length).join("")}…` : text;
 };
 

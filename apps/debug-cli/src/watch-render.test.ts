@@ -83,13 +83,15 @@ describe("watch views", () => {
   });
 
   it("shows why an MCP message holds no body", () => {
-    const reason = "the body log has no response for this call";
+    const reason = "the body log has no <response> for this call";
     const view = mcpView({
       type: "mcp_response",
       event: eventRow({ sequence: 8, type: "mcp_response" }),
       content: { status: "unrecorded", reason },
     });
     expect(view.summary).toContain("<b>MCP response</b>");
-    expect(view.summary).toContain(`not recorded: ${reason}`);
+    expect(view.summary).toContain(
+      "not recorded: the body log has no &lt;response&gt; for this call",
+    );
   });
 });

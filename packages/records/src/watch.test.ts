@@ -54,6 +54,7 @@ const fixtureRows = () => {
   return { conversations: tables.conversations, task, call, approval, execution };
 };
 
+const REQUEST = { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "read" } };
 const READ = { runtime_call_id: "r1", tool_identity: "gmail.search", argument_digest: "d1" };
 const WRITE = { runtime_call_id: "r2", tool_identity: "fs.write", argument_digest: "d2" };
 
@@ -89,7 +90,7 @@ const commits = (): Commit[] => {
     execution_id: "x2",
     ...WRITE,
     status: "proposed",
-    proposal_event_id: "e15",
+    proposal_event_id: "e17",
   } satisfies ToolCallRow;
   return [
     { events: [eventsOf(null)(1, "conversation_started")] },
@@ -125,7 +126,16 @@ const commits = (): Commit[] => {
       approvals: [{ ...approval1, status: "approved", decision_event_id: "e8" }],
     },
     {
-      events: [first(10, "tool_result", { runtime_call_id: "r1" })],
+      // Debug mode records the call's MCP messages with its result: here a body, and a reason for the missing one.
+      events: [
+        first(10, "tool_result", { runtime_call_id: "r1" }),
+        first(11, "mcp_request", { tool_call_id: "call-1", runtime_call_id: "r1", body: REQUEST }),
+        first(12, "mcp_response", {
+          tool_call_id: "call-1",
+          runtime_call_id: "r1",
+          unrecorded: "the body log has no response for this call",
+        }),
+      ],
       tool_calls: [
         {
           ...call1,
@@ -137,32 +147,32 @@ const commits = (): Commit[] => {
       ],
     },
     {
-      events: [first(11, "task_finished")],
+      events: [first(13, "task_finished")],
       tasks: [{ ...task, id: "first", status: "completed" }],
     },
     {
-      events: [second(12, "task_submitted"), second(13, "task_started")],
+      events: [second(14, "task_submitted"), second(15, "task_started")],
       tasks: [{ ...task, id: "second", status: "running" }],
       executions: [{ ...execution, id: "x2", task_id: "second" }],
     },
-    { events: [second(14, "tool_proposal_started", { runtime_call_id: "r2" })] },
-    { events: [second(15, "tool_proposed", WRITE)], tool_calls: [call2] },
+    { events: [second(16, "tool_proposal_started", { runtime_call_id: "r2" })] },
+    { events: [second(17, "tool_proposed", WRITE)], tool_calls: [call2] },
     {
-      events: [second(16, "tool_proposed", WRITE)],
-      tool_calls: [{ ...call2, proposal_event_id: "e16" }],
+      events: [second(18, "tool_proposed", WRITE)],
+      tool_calls: [{ ...call2, proposal_event_id: "e18" }],
     },
     {
       events: [
-        second(17, "policy_evaluated", { tool_call_id: "call-2" }),
-        second(18, "error", { message: "tool fs.write is not listed" }),
+        second(19, "policy_evaluated", { tool_call_id: "call-2" }),
+        second(20, "error", { message: "tool fs.write is not listed" }),
       ],
       tool_calls: [
-        { ...call2, proposal_event_id: "e16", status: "denied", detail: "policy: deny" },
+        { ...call2, proposal_event_id: "e18", status: "denied", detail: "policy: deny" },
       ],
     },
-    { events: [eventsOf("no-such-task")(19, "error")] },
+    { events: [eventsOf("no-such-task")(21, "error")] },
     {
-      events: [second(20, "task_finished")],
+      events: [second(22, "task_finished")],
       tasks: [{ ...task, id: "second", status: "completed" }],
     },
   ];
@@ -198,7 +208,7 @@ const rowsAt = (cutoff: number): WatchRows =>
       },
     );
 
-const LAST = 20;
+const LAST = 22;
 const finalRows = () => rowsAt(LAST);
 
 const sequences = (events: EventRow[]) => events.map((row) => row.sequence);
@@ -238,22 +248,35 @@ describe("watchTree", () => {
   it("nests each event under the task and tool call it belongs to", () => {
     expect(watchTree(finalRows()).conversation.id).toBe("conversation");
     expect(treeShape(finalRows())).toEqual({
-      events: [1, 19],
+      events: [1, 21],
       tasks: [
         {
           id: "first",
           executions: ["x1"],
-          events: [2, 3, 11],
+          events: [2, 3, 13],
           calls: [
-            { id: "call-1", approvals: ["approval-1"], mcp: [], events: [4, 5, 6, 7, 8, 9, 10] },
+            {
+              id: "call-1",
+              approvals: ["approval-1"],
+              // Nodes of their own, not among the call's raw events.
+              mcp: [
+                ["mcp_request", 11, { status: "recorded", body: REQUEST }],
+                [
+                  "mcp_response",
+                  12,
+                  { status: "unrecorded", reason: "the body log has no response for this call" },
+                ],
+              ],
+              events: [4, 5, 6, 7, 8, 9, 10],
+            },
           ],
         },
         {
           id: "second",
           executions: ["x2"],
           // The partial proposal comes before the call exists; the policy error names no call.
-          events: [12, 13, 14, 18, 20],
-          calls: [{ id: "call-2", approvals: [], mcp: [], events: [15, 16, 17] }],
+          events: [14, 15, 16, 20, 22],
+          calls: [{ id: "call-2", approvals: [], mcp: [], events: [17, 18, 19] }],
         },
       ],
     });
@@ -265,11 +288,11 @@ describe("watchTree", () => {
     if (!call2) throw new Error("fixture call missing");
     rows.tool_calls.push({ ...call2, id: "call-3", binding_revision: 2, proposal_event_id: null });
     const secondTask = treeShape(rows).tasks[1];
-    expect(secondTask?.events).toEqual([12, 13, 14, 15, 18, 20]);
+    expect(secondTask?.events).toEqual([14, 15, 16, 17, 20, 22]);
     // The call with no event of its own enters with its task, so before the one proposed later.
     expect(secondTask?.calls.map((call) => [call.id, call.events])).toEqual([
       ["call-3", []],
-      ["call-2", [16, 17]],
+      ["call-2", [18, 19]],
     ]);
   });
 
@@ -277,9 +300,9 @@ describe("watchTree", () => {
     const rows = finalRows();
     // The payload names a call of another task; the row that references the event is its own.
     rows.events = rows.events.map((row) =>
-      row.id === "e16" ? { ...row, payload: JSON.stringify({ tool_call_id: "call-1" }) } : row,
+      row.id === "e18" ? { ...row, payload: JSON.stringify({ tool_call_id: "call-1" }) } : row,
     );
-    expect(treeShape(rows).tasks[1]?.calls[0]?.events).toEqual([15, 16, 17]);
+    expect(treeShape(rows).tasks[1]?.calls[0]?.events).toEqual([17, 18, 19]);
   });
 
   it("keeps a task and a tool call that have no events of their own", () => {
@@ -307,7 +330,7 @@ describe("watchTree", () => {
     const rows = finalRows();
     rows.tasks = rows.tasks.filter((task) => task.id !== "second");
     const shape = treeShape(rows);
-    expect(shape.events).toEqual([1, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+    expect(shape.events).toEqual([1, 14, 15, 16, 17, 18, 19, 20, 21, 22]);
     expect(shape.tasks.map((task) => task.id)).toEqual(["first"]);
   });
 
@@ -319,17 +342,10 @@ describe("watchTree", () => {
 });
 
 describe("MCP messages", () => {
-  const REQUEST = { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "read" } };
-  /** The final rows, then the MCP events debug mode records after the first call's result, and two it cannot place. */
-  const withMcp = (): WatchRows => {
+  /** The final rows, and two MCP events the view cannot place as nodes. */
+  const withUnplaced = (): WatchRows => {
     const rows = finalRows();
     rows.events.push(
-      first(21, "mcp_request", { tool_call_id: "call-1", runtime_call_id: "r1", body: REQUEST }),
-      first(22, "mcp_response", {
-        tool_call_id: "call-1",
-        runtime_call_id: "r1",
-        unrecorded: "the body log has no response for this call",
-      }),
       // Neither a body nor a reason: kept as a raw event, so nothing recorded is hidden.
       first(23, "mcp_request", { tool_call_id: "call-1" }),
       // Of no known call: kept with its task.
@@ -338,28 +354,18 @@ describe("MCP messages", () => {
     return rows;
   };
 
-  it("nests each MCP request and response under its call, apart from the call's raw events", () => {
-    const [firstTask, secondTask] = treeShape(withMcp()).tasks;
-    expect(firstTask?.calls[0]).toMatchObject({
-      mcp: [
-        ["mcp_request", 21, { status: "recorded", body: REQUEST }],
-        [
-          "mcp_response",
-          22,
-          { status: "unrecorded", reason: "the body log has no response for this call" },
-        ],
-      ],
-      events: [4, 5, 6, 7, 8, 9, 10, 23],
-    });
-    expect(secondTask?.events).toEqual([12, 13, 14, 18, 20, 24]);
+  it("keeps an MCP event it cannot read, or of no known call, as a raw event", () => {
+    const [firstTask, secondTask] = treeShape(withUnplaced()).tasks;
+    expect(firstTask?.calls[0]?.mcp.map(([type]) => type)).toEqual(["mcp_request", "mcp_response"]);
+    expect(firstTask?.calls[0]?.events).toEqual([4, 5, 6, 7, 8, 9, 10, 23]);
+    expect(secondTask?.events).toEqual([14, 15, 16, 20, 22, 24]);
   });
 
-  it("adds an MCP message once, as an entry under its call, after the sequence a view has shown", () => {
+  it("adds an MCP message as an entry under its call, after the sequence a view has shown", () => {
     const call = { level: "tool_call", task_id: "first", tool_call_id: "call-1" };
-    expect(watchEntriesAfter(withMcp(), 21).map(shown)).toEqual([
-      { kind: "mcp", id: "e22", sequence: 22, parent: call },
-      { kind: "event", id: "e23", sequence: 23, parent: call },
-      { kind: "event", id: "e24", sequence: 24, parent: { level: "task", task_id: "second" } },
+    expect(watchEntriesAfter(finalRows(), 11).map(shown).slice(0, 2)).toEqual([
+      { kind: "mcp", id: "e12", sequence: 12, parent: call },
+      { kind: "event", id: "e13", sequence: 13, parent: { level: "task", task_id: "first" } },
     ]);
   });
 });
@@ -368,7 +374,7 @@ describe("capturedInDebugMode", () => {
   it("tells whether the conversation was captured in debug mode", () => {
     const rows = finalRows();
     expect(capturedInDebugMode(rows)).toBe(false);
-    rows.events.push(eventsOf(null)(21, "captured_in_debug_mode"));
+    rows.events.push(eventsOf(null)(LAST + 1, "captured_in_debug_mode"));
     expect(capturedInDebugMode(rows)).toBe(true);
   });
 });
@@ -390,11 +396,17 @@ describe("watchEntriesAfter", () => {
     ]);
   });
 
-  it.each([0, 1, 3, 4, 10, 17, LAST])(
+  it.each([0, 1, 3, 4, 10, 11, 12, 19, LAST])(
     "after sequence %i returns every later event once and no earlier one",
     (after) => {
       const entries = watchEntriesAfter(finalRows(), after);
-      const events = entries.flatMap((entry) => (entry.kind === "event" ? [entry.event] : []));
+      const events = entries.flatMap((entry) =>
+        match(entry)
+          .with({ kind: "event" }, ({ event }) => [event])
+          .with({ kind: "mcp" }, ({ mcp }) => [mcp.event])
+          .with({ kind: "task" }, { kind: "tool_call" }, () => [])
+          .exhaustive(),
+      );
       expect(sequences(events)).toEqual(
         sequences(finalRows().events).filter((sequence) => sequence > after),
       );
