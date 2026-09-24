@@ -1,0 +1,90 @@
+:root {
+  color-scheme: light dark;
+  --muted: #777;
+  --stopped: #c0392b;
+  --done: #2e7d32;
+}
+
+body {
+  margin: 1rem;
+  font:
+    13px/1.45 ui-monospace,
+    "JetBrains Mono",
+    Menlo,
+    monospace;
+}
+
+#state {
+  color: var(--muted);
+}
+
+details {
+  margin-left: 1.25rem;
+}
+
+main > details {
+  margin-left: 0;
+}
+
+summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.fields,
+.children,
+.events {
+  margin-left: 1.25rem;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0 1rem;
+  margin: 0.25rem 0;
+}
+
+dt {
+  color: var(--muted);
+}
+
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+pre {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+h4 {
+  margin: 0.5rem 0 0;
+  font-size: inherit;
+}
+
+.ids,
+time {
+  color: var(--muted);
+}
+
+.status {
+  font-weight: bold;
+}
+
+.status-denied,
+.status-blocked_gate,
+.status-invalidated,
+.status-failed,
+.status-cancelled,
+.status-rejected,
+.status-expired,
+.status-interrupted,
+.status-outcome_unknown {
+  color: var(--stopped);
+}
+
+.status-completed,
+.status-approved {
+  color: var(--done);
+}
