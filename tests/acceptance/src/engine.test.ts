@@ -24,7 +24,7 @@ import {
   type ToolCallStatus,
 } from "@mia/protocol";
 import { ObjectStore, type CaptureStatus, type LinkRelation } from "@mia/records";
-import { MAX_CONVERSATION_FILE_BYTES } from "@mia/server";
+import { MAX_CONVERSATION_FILE_BYTES, MAX_HELD_PROMPTS } from "@mia/server";
 import type { AckPayload, MiaClient } from "@mia/text-client";
 import { ScriptedRuntime, type ScriptedTurn } from "./scripted-runtime.ts";
 import {
@@ -1060,6 +1060,92 @@ describe("approval path", () => {
         must(rows<{ status: ToolCallStatus }>("SELECT status FROM tool_calls")[0]).status,
       ).toBe("invalidated");
       expect(approvalStatuses()).toEqual(["expired"]);
+    });
+  });
+
+  it("expires at once an approval whose prompt the runtime abandoned before Mia got it", async () => {
+    const { turn, taskId } = await submit("change");
+    turn.init();
+    const decision = await turn.requestAbandoned("mcp__d1__change", { delta: 1 }, "toolu_1");
+    expect(decision).toMatchObject({
+      behavior: "deny",
+      message: expect.stringContaining("was abandoned before the user decided"),
+    });
+    const requested = await client.waitFor("approval_requested");
+    expect(approvalStatuses()).toEqual(["expired"]);
+    const late = await decide(taskId, requested.payload.approval_id, "approve");
+    expect(ackError(late).code).toBe("invalid_state");
+    expect(rows("SELECT id FROM events WHERE type = 'tool_dispatched'")).toHaveLength(0);
+    await expectResumed(taskId);
+    await expectAbandonedAtTurnEnd(turn);
+  });
+
+  describe("with as many prompts held as the server holds at once", () => {
+    /** Hold MAX_HELD_PROMPTS calls in one turn, each awaiting its own approval. */
+    const holdAll = async () => {
+      const { turn, taskId } = await submit("change everything");
+      turn.init();
+      const held = Array.from({ length: MAX_HELD_PROMPTS }, (_, index) =>
+        turn.request("mcp__d1__change", { delta: index }, `toolu_${index}`),
+      );
+      await client.waitFor(
+        "approval_requested",
+        (event) => event.payload.runtime_call_id === `toolu_${MAX_HELD_PROMPTS - 1}`,
+      );
+      expect(approvalStatuses()).toHaveLength(MAX_HELD_PROMPTS);
+      return { turn, taskId, held };
+    };
+
+    it("denies one more call without asking, still dispatches an allowed one, and asks again once one is decided", async () => {
+      const { turn, taskId, held } = await holdAll();
+      const extra = await turn.request("mcp__d1__change", { delta: -1 }, "toolu_extra");
+      expect(extra).toMatchObject({
+        behavior: "deny",
+        message: expect.stringContaining("too many approval prompts are already waiting"),
+      });
+      expect(approvalStatuses()).toHaveLength(MAX_HELD_PROMPTS);
+      expect(
+        rows("SELECT status, detail FROM tool_calls WHERE runtime_call_id = 'toolu_extra'"),
+      ).toEqual([
+        { status: "denied", detail: "not asked: too many approval prompts already waiting" },
+      ]);
+      expect((await turn.request("mcp__d1__read", {}, "toolu_read")).behavior).toBe("allow");
+      const first = await client.waitFor(
+        "approval_requested",
+        (event) => event.payload.runtime_call_id === "toolu_0",
+      );
+      await decide(taskId, first.payload.approval_id, "reject");
+      expect((await must(held[0], "first held prompt")).behavior).toBe("deny");
+      const again = turn.request("mcp__d1__change", { delta: -1 }, "toolu_again");
+      const asked = await client.waitFor(
+        "approval_requested",
+        (event) => event.payload.runtime_call_id === "toolu_again",
+      );
+      await decide(taskId, asked.payload.approval_id, "approve");
+      expect((await again).behavior).toBe("allow");
+      turn.end();
+      await client.waitFor("task_finished");
+    });
+
+    it("answers every prompt still held when the turn ends, so the next turn can ask", async () => {
+      const { turn, held } = await holdAll();
+      turn.end();
+      await client.waitFor("task_finished");
+      const answers = await Promise.all(held);
+      expect(answers.every((answer) => answer.behavior === "deny")).toBe(true);
+      expect(answers[0]).toMatchObject({ message: expect.stringContaining("the turn ended") });
+      expect(new Set(approvalStatuses())).toEqual(new Set(["expired"]));
+      const { turn: next, taskId } = await submit("try again");
+      next.init();
+      const retry = next.request("mcp__d1__change", { delta: 1 }, "toolu_next");
+      const asked = await client.waitFor(
+        "approval_requested",
+        (event) => event.payload.task_id === taskId,
+      );
+      await decide(taskId, asked.payload.approval_id, "approve");
+      expect((await retry).behavior).toBe("allow");
+      next.end();
+      await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
     });
   });
 

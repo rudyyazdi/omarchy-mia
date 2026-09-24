@@ -230,12 +230,16 @@ describe("evaluatePermission", () => {
   const toolIdentity = "mcp__d1__change";
 
   it("denies by policy before looking at the gate", () => {
-    expect(evaluatePermission({ policy: "deny", gateOpen: false, toolIdentity })).toMatchObject({
+    expect(
+      evaluatePermission({ policy: "deny", gateOpen: false, toolIdentity, promptsFull: false }),
+    ).toMatchObject({
       kind: "deny",
       status: "denied",
       interrupt: false,
     });
-    expect(evaluatePermission({ policy: "unlisted", gateOpen: true, toolIdentity })).toMatchObject({
+    expect(
+      evaluatePermission({ policy: "unlisted", gateOpen: true, toolIdentity, promptsFull: false }),
+    ).toMatchObject({
       kind: "deny",
       unlisted: true,
     });
@@ -244,7 +248,9 @@ describe("evaluatePermission", () => {
   it("blocks an allowed or asked call once the gate is closed", () => {
     const permitted: ToolCallPolicy[] = ["allow", "ask"];
     for (const policy of permitted)
-      expect(evaluatePermission({ policy, gateOpen: false, toolIdentity })).toMatchObject({
+      expect(
+        evaluatePermission({ policy, gateOpen: false, toolIdentity, promptsFull: false }),
+      ).toMatchObject({
         kind: "deny",
         status: "blocked_gate",
         interrupt: true,
@@ -252,11 +258,32 @@ describe("evaluatePermission", () => {
   });
 
   it("dispatches an allowed call and asks for an asked one while the gate is open", () => {
-    expect(evaluatePermission({ policy: "allow", gateOpen: true, toolIdentity })).toEqual({
+    expect(
+      evaluatePermission({ policy: "allow", gateOpen: true, toolIdentity, promptsFull: false }),
+    ).toEqual({
       kind: "dispatch",
     });
-    expect(evaluatePermission({ policy: "ask", gateOpen: true, toolIdentity })).toEqual({
+    expect(
+      evaluatePermission({ policy: "ask", gateOpen: true, toolIdentity, promptsFull: false }),
+    ).toEqual({
       kind: "ask",
+    });
+  });
+
+  it("denies an asked call without asking while the held prompts are full, and still dispatches an allowed one", () => {
+    expect(
+      evaluatePermission({ policy: "ask", gateOpen: true, toolIdentity, promptsFull: true }),
+    ).toMatchObject({
+      kind: "deny",
+      status: "denied",
+      interrupt: false,
+      unlisted: false,
+      message: expect.stringContaining("too many approval prompts"),
+    });
+    expect(
+      evaluatePermission({ policy: "allow", gateOpen: true, toolIdentity, promptsFull: true }),
+    ).toEqual({
+      kind: "dispatch",
     });
   });
 });

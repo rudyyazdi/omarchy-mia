@@ -214,11 +214,17 @@ const deny = (
   ...fields,
 });
 
-/** Policy first, then the action gate: a denied tool stays denied whatever the gate. */
+/**
+ * Policy first, then the action gate: a denied tool stays denied whatever the gate. A call that would ask is
+ * denied at once while the held prompts are at their cap, before any approval is recorded, so no approval is
+ * ever requested that Mia cannot hold for the user's decision.
+ */
 export const evaluatePermission = (input: {
   policy: ToolCallPolicy;
   gateOpen: boolean;
   toolIdentity: string;
+  /** As many prompts as the server holds at once are already waiting for a decision. */
+  promptsFull: boolean;
 }): PermissionRule => {
   if (input.policy === "unlisted")
     return deny({
@@ -238,7 +244,13 @@ export const evaluatePermission = (input: {
       detail: "action gate closed by interruption",
       message: "Mia blocked this call: the task is being interrupted.",
     });
-  return input.policy === "allow" ? { kind: "dispatch" } : { kind: "ask" };
+  if (input.policy === "allow") return { kind: "dispatch" };
+  if (input.promptsFull)
+    return deny({
+      detail: "not asked: too many approval prompts already waiting",
+      message: `Mia denied ${input.toolIdentity} without asking: too many approval prompts are already waiting for the user. Ask again once they are decided.`,
+    });
+  return { kind: "ask" };
 };
 
 // ---------------------------------------------------------------- approval
