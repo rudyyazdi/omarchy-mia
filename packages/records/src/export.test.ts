@@ -39,7 +39,12 @@ const createExport = async (root: string) => {
   const catalog = Catalog.openSync(join(root, "catalog"));
   try {
     const writer = new RecordWriter(catalog);
-    const provenanceSetId = writer.createProvenanceSet("export verification fixture");
+    const provenanceSetId = newId("prov");
+    writer.createProvenanceSet({
+      id: provenanceSetId,
+      createdAt: AT,
+      description: "export verification fixture",
+    });
     const conversationId = newId("conv");
     writer.createConversation({
       id: conversationId,
@@ -63,20 +68,27 @@ const createExport = async (root: string) => {
       type: "task_started",
       payload: {},
     });
-    const artifact = writer.registerArtifact({
+    const artifactId = newId("art");
+    writer.registerArtifact({
+      id: artifactId,
+      createdAt: AT,
       kind: "tool_output",
       logicalName: "result.txt",
       stored: await writer.objects.put(Buffer.from("retained result"), live()),
     });
-    const dependency = writer.registerArtifact({
+    const dependencyId = newId("art");
+    writer.registerArtifact({
+      id: dependencyId,
+      createdAt: AT,
       kind: "tool_output",
       logicalName: "source.txt",
       stored: await writer.objects.put(Buffer.from("retained source"), live()),
     });
-    writer.addDependency(artifact.artifactId, dependency.artifactId, "local_changes");
+    writer.addDependency(artifactId, dependencyId, "local_changes");
     writer.linkArtifact({
+      id: newId("link"),
       conversationId,
-      artifactId: artifact.artifactId,
+      artifactId,
       relation: "event_payload",
       eventId: event.id,
     });

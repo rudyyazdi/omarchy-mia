@@ -65,10 +65,11 @@ describe("savepoint", () => {
       rmSync(path, { recursive: true, force: true });
     });
     const writer = new RecordWriter(catalog);
+    writer.createProvenanceSet({ id: "prov-1", createdAt: AT, description: "test" });
     writer.createConversation({
       id: "conv-1",
       startedAt: AT,
-      provenanceSetId: writer.createProvenanceSet("test"),
+      provenanceSetId: "prov-1",
       runtimeConversationId: "rt-1",
     });
     const append = (type: JournalEventType) =>

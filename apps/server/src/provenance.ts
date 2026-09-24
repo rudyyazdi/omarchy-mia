@@ -8,6 +8,7 @@ import {
 } from "@mia/agent-adapter";
 import { PROTOCOL_VERSION, redactValue, sha256Hex } from "@mia/protocol";
 import type {
+  IdPrefix,
   ObjectStore,
   ProvenanceEntryRow,
   ProvenanceRole,
@@ -287,18 +288,28 @@ export const storeProvenance = async (
   return { ...plan, items };
 };
 
+/** How the rows of one commit are named and stamped: fresh ids, and the commit's one reading of the clock. */
+export interface RowNaming {
+  newId: (prefix: IdPrefix) => string;
+  createdAt: string;
+}
+
 /** Records a stored provenance plan (inside the start's transaction); it does no file I/O. */
 export const recordConversationProvenance = (
   writer: RecordWriter,
   plan: ProvenancePlan<StoredObject>,
+  naming: RowNaming,
 ): ProvenanceSummary => {
-  const setId = writer.createProvenanceSet(plan.description);
+  const { newId, createdAt } = naming;
+  const setId = newId("prov");
+  writer.createProvenanceSet({ id: setId, createdAt, description: plan.description });
   const entries: ProvenanceSummary["entries"] = [];
   const artifacts = new Map<ProvenanceRole, string>();
   let promptDigest: string | null = null;
   for (const item of plan.items) {
     if (item.availability === "unavailable") {
       writer.addProvenanceEntry({
+        id: newId("pe"),
         provenanceSetId: setId,
         role: item.role,
         availability: "unavailable",
@@ -312,7 +323,10 @@ export const recordConversationProvenance = (
       });
       continue;
     }
-    const art = writer.registerArtifact({
+    const artifactId = newId("art");
+    writer.registerArtifact({
+      id: artifactId,
+      createdAt,
       kind: "snapshot",
       logicalName: item.logicalName,
       mimeType: item.mime,
@@ -320,19 +334,20 @@ export const recordConversationProvenance = (
       stored: item.content,
     });
     writer.addProvenanceEntry({
+      id: newId("pe"),
       provenanceSetId: setId,
       role: item.role,
       version: item.version,
-      artifactId: art.artifactId,
+      artifactId,
       availability: "retained",
     });
     entries.push({
       role: item.role,
       availability: "retained",
-      artifact_id: art.artifactId,
+      artifact_id: artifactId,
       reason: null,
     });
-    artifacts.set(item.role, art.artifactId);
+    artifacts.set(item.role, artifactId);
     // The digest the object was stored under, so the engine can hand the runtime that very object.
     if (item.role === "agent_prompt") promptDigest = item.content.digest;
   }
@@ -346,4 +361,22 @@ export const recordConversationProvenance = (
     ...plan.summary,
     entries,
   };
+};
+
+/** Links every artifact a recorded provenance set retained into its conversation (inside the start's transaction). */
+export const linkConversationProvenance = (
+  writer: RecordWriter,
+  input: { conversationId: string; provenance: ProvenanceSummary },
+  newId: RowNaming["newId"],
+): void => {
+  const { conversationId, provenance } = input;
+  for (const entry of provenance.entries)
+    if (entry.artifact_id !== null)
+      writer.linkArtifact({
+        id: newId("link"),
+        conversationId,
+        artifactId: entry.artifact_id,
+        relation: "provenance",
+        provenanceSetId: provenance.provenance_set_id,
+      });
 };

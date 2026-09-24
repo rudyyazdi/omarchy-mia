@@ -1320,6 +1320,69 @@ describe("record times", () => {
     expect(times.toSorted()).toEqual(times);
     expect(new Set(times).size).toBe(times.length);
   });
+
+  it("stamps provenance, tool-output and evidence artifacts with the reading of the commit that records them", async () => {
+    let reading = Date.parse("2031-01-01T00:00:00.000Z");
+    ts.setClock(() => new Date((reading += 1000)));
+    const conversationId = await client.startConversation();
+    const conversation = must(
+      rows<{ started_at: string; provenance_set_id: string }>(
+        "SELECT started_at, provenance_set_id FROM conversations WHERE id = ?",
+        conversationId,
+      )[0],
+      "conversation row",
+    );
+    const { file, turn, taskId } = await approvedArtifactCall();
+    await declareOutput(turn, file);
+    turn.end();
+    await client.waitFor("task_finished");
+    const createdAt = (sql: string, id: string): string[] =>
+      rows<{ created_at: string }>(sql, id).map((row) => row.created_at);
+    // The start's commit: the provenance set and every snapshot it retained.
+    const snapshots = createdAt(
+      "SELECT a.created_at FROM artifacts a JOIN provenance_entries e ON e.artifact_id = a.id WHERE e.provenance_set_id = ?",
+      conversation.provenance_set_id,
+    );
+    expect(snapshots.length).toBeGreaterThan(0);
+    expect([
+      ...createdAt(
+        "SELECT created_at FROM provenance_sets WHERE id = ?",
+        conversation.provenance_set_id,
+      ),
+      ...snapshots,
+    ]).toEqual(Array(snapshots.length + 1).fill(conversation.started_at));
+    // The tool result's commit: the output artifact and its artifact_registered event.
+    const registered = must(
+      rows<{ received_at: string }>(
+        "SELECT received_at FROM events WHERE task_id = ? AND type = 'artifact_registered'",
+        taskId,
+      )[0],
+      "artifact_registered event",
+    ).received_at;
+    expect(
+      createdAt(
+        "SELECT a.created_at FROM artifacts a JOIN artifact_links l ON l.artifact_id = a.id WHERE l.task_id = ? AND l.relation = 'task_output'",
+        taskId,
+      ),
+    ).toEqual([registered]);
+    // The turn end's commit: the evidence retained with the finished task.
+    const finishedAt = must(
+      rows<{ finished_at: string }>("SELECT finished_at FROM tasks WHERE id = ?", taskId)[0],
+      "task row",
+    ).finished_at;
+    const evidence = createdAt(
+      "SELECT a.created_at FROM artifacts a JOIN artifact_links l ON l.artifact_id = a.id WHERE l.task_id = ? AND a.kind <> 'tool_output'",
+      taskId,
+    );
+    expect(evidence.length).toBeGreaterThan(0);
+    expect(evidence).toEqual(Array(evidence.length).fill(finishedAt));
+    expect([conversation.started_at, registered, finishedAt].toSorted()).toEqual([
+      conversation.started_at,
+      registered,
+      finishedAt,
+    ]);
+    expect(new Set([conversation.started_at, registered, finishedAt]).size).toBe(3);
+  });
 });
 
 describe("interruption path", () => {

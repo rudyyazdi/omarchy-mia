@@ -118,6 +118,10 @@ export type ArtifactCapture =
   | { captureStatus: Exclude<CaptureStatus, "retained">; captureReason: string };
 
 export type ArtifactInput = ArtifactCapture & {
+  /** Given by the caller (see RecordWriter). */
+  id: string;
+  /** Given by the caller (see RecordWriter); also the time of an object row this registration first records. */
+  createdAt: string;
   kind: ArtifactKind;
   logicalName: string;
   mimeType?: string | null;
@@ -130,6 +134,8 @@ export type ArtifactInput = ArtifactCapture & {
 };
 
 export interface LinkInput {
+  /** Given by the caller (see RecordWriter). */
+  id: string;
   conversationId: string;
   artifactId: string;
   relation: LinkRelation;
@@ -155,16 +161,16 @@ export interface ExecutionUsage {
  * Callers wrap related writes in catalog.transaction so events and state rows commit together.
  *
  * The rows a state transition creates and refers to within one transaction (conversations, tasks, executions,
- * tool calls, approvals and events) take their id from the caller, so a transition can name a record before it
- * is written: an approval_requested event carries its approval's id, and the approval row its requesting event's.
- * Callers generate them with `newId`; a reused id fails the insert, and with it the transaction. The other rows
- * (commands, provenance, artifacts, links, diagnostics) are still named here, which holds only while whatever
- * refers to one is written after it in the same transaction, as a conversation names its provenance set and an
- * artifact_registered event its artifact.
+ * tool calls, approvals and events, and the provenance sets, provenance entries, artifacts and artifact links
+ * recorded with them) take their id from the caller, so a transition can name a record before it is written: an
+ * approval_requested event carries its approval's id, the approval row its requesting event's, and a conversation
+ * its provenance set's. Callers generate them with `newId`; a reused id fails the insert, and with it the
+ * transaction. The rows a client's report or command creates (commands, diagnostics) are still named here.
  *
  * The same rows take their timestamps from the caller too (`startedAt`, `createdAt`, `receivedAt`, `updatedAt`,
  * `requestedAt`, `consumedAt`), as ISO strings: a pure transition decides with the time it is handed, so the
- * records it returns carry that time rather than whenever the writer runs. The rows named here stamp themselves.
+ * records it returns carry that time rather than whenever the writer runs. The rows named here, and clients and
+ * connections, stamp themselves.
  */
 export class RecordWriter {
   readonly objects: ObjectStore;
@@ -278,18 +284,16 @@ export class RecordWriter {
 
   // ---- provenance & artifacts ----
 
-  createProvenanceSet(description: string): string {
-    const id = newId("prov");
-    this.catalog.insert("provenance_sets", { id, created_at: nowIso(), description });
-    return id;
+  createProvenanceSet(input: { id: string; createdAt: string; description: string }): void {
+    this.catalog.insert("provenance_sets", {
+      id: input.id,
+      created_at: input.createdAt,
+      description: input.description,
+    });
   }
 
-  registerArtifact(input: ArtifactInput): {
-    artifactId: string;
-    digest: string | null;
-    byteSize: number | null;
-  } {
-    const id = newId("art");
+  /** Records an artifact, and the object its bytes were stored as unless an earlier artifact recorded it. */
+  registerArtifact(input: ArtifactInput): { digest: string | null; byteSize: number | null } {
     const stored = "stored" in input ? input.stored : null;
     const capture: { capture_status: CaptureStatus; capture_reason: string | null } =
       "stored" in input
@@ -301,16 +305,16 @@ export class RecordWriter {
         byte_count: stored.byteCount,
         storage_key: stored.storageKey,
         integrity: "verified",
-        created_at: nowIso(),
+        created_at: input.createdAt,
       });
     }
     this.catalog.insert("artifacts", {
-      id,
+      id: input.id,
       kind: input.kind,
       mime_type: input.mimeType ?? null,
       schema_version: input.schemaVersion ?? null,
       logical_name: input.logicalName,
-      created_at: nowIso(),
+      created_at: input.createdAt,
       producer_execution_id: input.producerExecutionId ?? null,
       producer_event_id: input.producerEventId ?? null,
       object_digest: stored?.digest ?? null,
@@ -320,10 +324,11 @@ export class RecordWriter {
       redaction: input.redaction ?? null,
       original_path: input.originalPath ?? null,
     });
-    return { artifactId: id, digest: stored?.digest ?? null, byteSize: stored?.byteCount ?? null };
+    return { digest: stored?.digest ?? null, byteSize: stored?.byteCount ?? null };
   }
 
   addProvenanceEntry(input: {
+    id: string;
     provenanceSetId: string;
     role: ProvenanceRole;
     ordinal?: number;
@@ -331,10 +336,9 @@ export class RecordWriter {
     artifactId?: string | null;
     availability: ProvenanceEntryRow["availability"];
     reason?: string | null;
-  }): string {
-    const id = newId("pe");
+  }): void {
     this.catalog.insert("provenance_entries", {
-      id,
+      id: input.id,
       provenance_set_id: input.provenanceSetId,
       role: input.role,
       ordinal: input.ordinal ?? 0,
@@ -343,13 +347,11 @@ export class RecordWriter {
       availability: input.availability,
       reason: input.reason ?? null,
     });
-    return id;
   }
 
-  linkArtifact(input: LinkInput): string {
-    const id = newId("link");
+  linkArtifact(input: LinkInput): void {
     this.catalog.insert("artifact_links", {
-      id,
+      id: input.id,
       conversation_id: input.conversationId,
       artifact_id: input.artifactId,
       relation: input.relation,
@@ -359,7 +361,6 @@ export class RecordWriter {
       diagnostic_id: input.diagnosticId ?? null,
       provenance_set_id: input.provenanceSetId ?? null,
     });
-    return id;
   }
 
   addDependency(
@@ -372,21 +373,6 @@ export class RecordWriter {
       required_artifact_id: requiredArtifactId,
       relation,
     });
-  }
-
-  /** Link every artifact referenced by a provenance set into a conversation (shared snapshots get a link per conversation). */
-  linkProvenanceSet(conversationId: string, provenanceSetId: string): void {
-    const entries = this.catalog.all<{ artifact_id: string }>(
-      "SELECT artifact_id FROM provenance_entries WHERE provenance_set_id = ? AND artifact_id IS NOT NULL",
-      provenanceSetId,
-    );
-    for (const entry of entries)
-      this.linkArtifact({
-        conversationId,
-        artifactId: entry.artifact_id,
-        relation: "provenance",
-        provenanceSetId,
-      });
   }
 
   // ---- conversations, tasks, executions ----
