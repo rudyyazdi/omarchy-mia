@@ -144,9 +144,23 @@ const UNANSWERED: PermissionDecision = {
   message: "Mia could not answer this call; it was not released.",
 };
 
-/** The permission request being committed, and the answer its `answer_permission` effect gave, once performed. */
+/**
+ * The permission request `decidePermission` is dispatching, as its `answer_permission` effect takes it: the effect
+ * holds the prompt, if it asks, before anything else of the commit is performed, and leaves the runtime's answer here.
+ */
 interface Asking {
-  answer: PermissionAnswer | null;
+  taskId: string;
+  /** Aborted once the runtime drops the prompt. */
+  abandoned: AbortSignal;
+  /** True until the request's dispatch returns: an abandonment meanwhile is deferred (see `abandon`). */
+  dispatching: boolean;
+  /** What answers the runtime, once `answer_permission` has been performed: at once, or when the held prompt settles. */
+  answer: Promise<PermissionDecision> | null;
+  /**
+   * The call whose prompt was abandoned while the request was being dispatched: its expiry is a follow-up event,
+   * dispatched once that dispatch returns, because dispatching it from inside the request's effects would be nested.
+   */
+  expireAfter: string | null;
 }
 
 /** The task submission being committed, and the turn its `start_turn` effect gave, once performed. */
@@ -317,13 +331,15 @@ export class Engine {
    */
   private starting: PendingStart | null = null;
   /**
-   * The runtime's permission prompts waiting for the user's decision, keyed by approval id. Each is answered once:
-   * by an `answer_prompt` effect after a commit, by its abandonment, or once its turn has ended (startTurn).
+   * The runtime's permission prompts waiting for the user's decision, keyed by approval id, each held by the first
+   * effect of the commit that requested its approval. Each is answered once: by an `answer_prompt` effect after a
+   * commit, by its abandonment, or once its turn has ended (startTurn).
    */
   private readonly prompts = new Holds<PermissionDecision>(MAX_HELD_PROMPTS);
   /**
-   * The permission request `handlePermission` is committing, or null outside that commit. The request's
-   * `answer_permission` effect writes its answer here; the commit is synchronous, so at most one is ever set.
+   * The permission request `decidePermission` is dispatching, or null outside that dispatch. The request's
+   * `answer_permission` effect holds its prompt and writes its answer here; the dispatch is synchronous, so at most
+   * one is ever set.
    */
   private asking: Asking | null = null;
   /**
@@ -449,9 +465,10 @@ export class Engine {
         this.prompts.reply(approvalId, decision),
       )
       .with({ kind: "answer_permission" }, ({ answer }) => {
-        if (!this.asking) throw new Error("no permission request is being committed");
-        if (this.asking.answer) throw new Error("a permission request is answered once");
-        this.asking.answer = answer;
+        const asking = this.asking;
+        if (!asking) throw new Error("no permission request is being committed");
+        if (asking.answer) throw new Error("a permission request is answered once");
+        asking.answer = this.takeAnswer(asking, answer);
       })
       .with({ kind: "start_turn" }, ({ turn }) => {
         if (!this.submitting) throw new Error("no task submission is being committed");
@@ -1216,31 +1233,33 @@ export class Engine {
     taskId: string,
     req: PermissionRequest,
   ): Promise<PermissionDecision> {
-    let answer: PermissionAnswer;
+    let answer: Promise<PermissionDecision>;
     try {
       answer = this.decidePermission(taskId, req);
     } catch (error) {
-      // Nothing was requested, so nothing is held: the runtime is denied at once.
+      // A transition that threw is a bug: nothing is released, and the runtime is denied at once.
       this.deps.log(`permission handling failed: ${errorMessage(error)}`);
       return NOT_RECORDED;
     }
-    return match(answer)
-      .with({ kind: "answer" }, ({ decision }) => decision)
-      .with({ kind: "hold" }, ({ approvalId, callId }) =>
-        this.holdPrompt({ taskId, callId, approvalId, abandoned: req.abandoned }),
-      )
-      .exhaustive();
+    return answer;
   }
 
   /**
    * Dispatch one permission request, returning what answers the runtime: the answer its committed transition gave
-   * through `answer_permission` (taken through `asking`), the one a rejection carries, or a denial when its records
-   * did not commit. It throws only when the transition does.
+   * through `answer_permission` (taken through `asking`, with the prompt already held if it asks), the one a rejection
+   * carries, or a denial when its records did not commit. A prompt abandoned while the request was dispatched has its
+   * expiry dispatched here, once the request's dispatch has returned. It throws only when a transition does.
    */
-  private decidePermission(taskId: string, req: PermissionRequest): PermissionAnswer {
+  private decidePermission(taskId: string, req: PermissionRequest): Promise<PermissionDecision> {
     // Restored, not cleared, so a dispatch nested inside this one's effects could not take the outer request's slot.
     const previous = this.asking;
-    const asking: Asking = { answer: null };
+    const asking: Asking = {
+      taskId,
+      abandoned: req.abandoned,
+      dispatching: true,
+      answer: null,
+      expireAfter: null,
+    };
     this.asking = asking;
     let dispatched: Dispatched<ConversationRejection, EventChange>;
     try {
@@ -1265,54 +1284,67 @@ export class Engine {
         },
       });
     } finally {
+      asking.dispatching = false;
       this.asking = previous;
     }
     if (dispatched.kind === "rejected")
       return match(expectRejection(dispatched.rejection, ["no_task", "refused"]))
-        .with({ kind: "no_task" }, (): PermissionAnswer => ({
-          kind: "answer",
-          decision: NO_ACTIVE_TASK,
-        }))
-        .with({ kind: "refused" }, ({ detail, answer }): PermissionAnswer => {
+        .with({ kind: "no_task" }, () => Promise.resolve(NO_ACTIVE_TASK))
+        .with({ kind: "refused" }, ({ detail, answer }) => {
           this.recordRefusal(taskId, detail);
-          return { kind: "answer", decision: answer };
+          return Promise.resolve(answer);
         })
         .exhaustive();
     if (dispatched.kind === "failed") {
       // Nothing was requested, so nothing is held: the runtime is denied at once.
       this.deps.log(`permission handling failed: ${errorMessage(dispatched.error)}`);
-      return { kind: "answer", decision: NOT_RECORDED };
+      return Promise.resolve(NOT_RECORDED);
     }
+    // After the request's own events, so its approval_resolved follows its approval_requested.
+    if (asking.expireAfter !== null) this.expireAbandoned(taskId, asking.expireAfter);
     if (asking.answer) return asking.answer;
     // Unreachable: a committed request's transition always queues its answer, and taking it cannot fail. The request
     // was recorded, so this denial does not claim otherwise.
     this.deps.log(`permission request for ${req.toolName} was recorded but not answered`);
-    return { kind: "answer", decision: UNANSWERED };
+    return Promise.resolve(UNANSWERED);
+  }
+
+  /**
+   * Take a committed permission request's answer, as its `answer_permission` effect is performed: the first effect of
+   * the commit, so a prompt that asks is held before its approval_requested is delivered, and a decision can never
+   * arrive for a prompt not held yet.
+   */
+  private takeAnswer(asking: Asking, answer: PermissionAnswer): Promise<PermissionDecision> {
+    return match(answer)
+      .with({ kind: "answer" }, ({ decision }) => Promise.resolve(decision))
+      .with({ kind: "hold" }, ({ approvalId, callId }) =>
+        this.holdPrompt(asking, { approvalId, callId }),
+      )
+      .exhaustive();
   }
 
   /**
    * Hold the runtime's prompt for a call whose approval request has committed, until the user decides or the
    * runtime abandons it. Held only after the commit, so a request that could not be recorded is never held. A
-   * prompt the runtime abandoned before this (a signal already aborted) is abandoned at once. The cap was checked
-   * before the request was recorded and nothing ran since, so a refusal here is a bug; its approval is expired as
-   * abandoned, so no decision can release a call whose runtime was denied.
+   * prompt the runtime abandoned before this (a signal already aborted) is abandoned at once, and its expiry follows
+   * the request's dispatch (see `abandon`). The cap was checked before the request was recorded and nothing ran
+   * since, so a refusal here is a bug; its approval is expired as abandoned in the same way, so no decision can
+   * release a call whose runtime was denied.
    */
-  private holdPrompt(input: {
-    taskId: string;
-    callId: string;
-    approvalId: string;
-    abandoned: AbortSignal;
-  }): Promise<PermissionDecision> {
-    const { taskId, callId, approvalId, abandoned } = input;
+  private holdPrompt(
+    asking: Asking,
+    hold: { approvalId: string; callId: string },
+  ): Promise<PermissionDecision> {
+    const { approvalId, callId } = hold;
     const held = this.prompts.hold(approvalId, {
-      signal: abandoned,
-      onAbort: () => this.abandon(taskId, callId),
+      signal: asking.abandoned,
+      onAbort: () => this.abandon(asking, callId),
     });
     return match(held)
       .with({ kind: "held" }, ({ reply }) => reply)
       .with({ kind: "refused" }, ({ refusal }) => {
         this.deps.log(`prompt for approval ${approvalId} could not be held (${refusal})`);
-        return Promise.resolve(this.abandon(taskId, callId));
+        return Promise.resolve(this.abandon(asking, callId));
       })
       .exhaustive();
   }
@@ -1338,13 +1370,23 @@ export class Engine {
 
   /**
    * The runtime dropped the held prompt (process gone or turn aborted): the pending approval can never release
-   * anything. Returns the runtime's answer; `prompts` calls this at most once per hold, and never after a reply.
+   * anything. Returns the runtime's answer; `prompts` calls this at most once per hold, and never after a reply. The
+   * expiry is dispatched at once, unless the request that asked is still being dispatched (the prompt was dropped
+   * before Mia held it, or while its commit's effects ran): a dispatch from there would be nested, so the expiry is
+   * left to `decidePermission` as a follow-up, and until then no decision can arrive.
    */
-  private abandon(taskId: string, callId: string): PermissionDecision {
-    const task = this.taskOf(taskId);
+  private abandon(asking: Asking, callId: string): PermissionDecision {
+    const task = this.taskOf(asking.taskId);
     const call = task ? callById(task, callId) : undefined;
     // Unreachable while the turn's end answers every prompt still held before its task is cleared (startTurn).
     if (!task || !call) return TURN_ENDED;
+    if (asking.dispatching) asking.expireAfter = callId;
+    else this.expireAbandoned(task.id, callId);
+    return abandonedPromptDenial(call.toolIdentity);
+  }
+
+  /** Expire the approval of call `callId`, whose prompt the runtime abandoned, and invalidate the call. */
+  private expireAbandoned(taskId: string, callId: string): void {
     const abandoned: PromptAbandonedEvent = {
       kind: "prompt_abandoned",
       origin: this.origin,
@@ -1356,11 +1398,10 @@ export class Engine {
     const dispatched = this.dispatch(abandoned);
     if (dispatched.kind === "failed") {
       this.deps.log(`could not record abandoned approval: ${String(dispatched.error)}`);
-      // The runtime is denied below whatever the records say, so memory takes the expiry anyway (#165). Nothing
-      // has run since the failed commit, so it is decided from the state the expiry was decided from.
+      // The runtime is denied whatever the records say, so memory takes the expiry anyway (#165). Nothing has run
+      // since the failed commit, so it is decided from the state the expiry was decided from.
       this.dispatchMemoryOnly({ ...abandoned, kind: "abandonment_unrecorded" });
     }
-    return abandonedPromptDenial(call.toolIdentity);
   }
 
   // ---------------------------------------------------------------- turn completion

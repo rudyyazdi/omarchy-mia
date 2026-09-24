@@ -883,8 +883,9 @@ const recordPermission = (
  * The runtime asks whether it may run a tool call. The request binds to its runtime call id: it reuses a revision
  * the stream only proposed, or supersedes a changed one and proposes a new revision. Then the permission rule
  * (policy, the action gate, the held prompts' cap) decides, and its evaluation and outcome are recorded. The
- * runtime's answer is the one `answer_permission` effect, queued last: a denial or a release at once, or a hold
- * under the approval requested, which the boundary places only once the request has committed.
+ * runtime's answer is the one `answer_permission` effect, queued first: a denial or a release at once, or a hold
+ * under the approval requested, which the boundary places once the request has committed and before any of its
+ * events is delivered.
  */
 const permissionRequestTransition: ConversationTransition<
   PermissionRequestEvent,
@@ -964,8 +965,9 @@ const permissionRequestTransition: ConversationTransition<
   );
   const answer = recordPermission(draft, { task, call: bound, rule, ids });
   draft.notifyCall(task.id, bound.id);
-  draft.effect({ kind: "answer_permission", answer });
-  return draft.accepted();
+  const built = draft.accepted();
+  // First, so a prompt that asks is held before the client can be told of its approval.
+  return { ...built, effects: [{ kind: "answer_permission", answer }, ...built.effects] };
 };
 
 /** Tell the client of a refused permission request: a runtime failure, recorded under the task. */

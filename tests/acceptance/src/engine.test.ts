@@ -1252,6 +1252,58 @@ describe("approval path", () => {
     await expectAbandonedAtTurnEnd(turn);
   });
 
+  /**
+   * The client is told of the approval's expiry only after its request, in delivery and in sequence order; the
+   * expired approval released nothing and cannot be decided; the task resumes, and its turn ends with the call
+   * abandoned.
+   */
+  const expectExpiredAfterRequest = async (turn: ScriptedTurn, taskId: string): Promise<void> => {
+    const resolved = await client.waitFor("approval_resolved");
+    const requested = must(
+      client.events.find((event) => event.type === "approval_requested"),
+      "approval_requested",
+    );
+    expect(client.events.indexOf(requested)).toBeLessThan(client.events.indexOf(resolved));
+    expect(must(requested.sequence)).toBeLessThan(must(resolved.sequence));
+    expect(resolved.payload).toMatchObject({
+      approval_id: requested.payload.approval_id,
+      status: "expired",
+    });
+    await expectResumed(taskId);
+    expect(ackError(await decide(taskId, requested.payload.approval_id, "approve"))).toMatchObject({
+      code: "invalid_state",
+      message: expect.stringContaining("is expired, not pending"),
+    });
+    expect(rows("SELECT id FROM events WHERE type = 'tool_dispatched'")).toHaveLength(0);
+    await expectAbandonedAtTurnEnd(turn);
+  };
+
+  it("tells the client of an approval abandoned before Mia got it only after telling it of the request", async () => {
+    const { turn, taskId } = await submit("change");
+    turn.init();
+    await turn.requestAbandoned("mcp__d1__change", { delta: 1 }, "toolu_1");
+    await expectExpiredAfterRequest(turn, taskId);
+  });
+
+  it("expires an approval whose prompt the runtime drops while the client is told of it", async () => {
+    // The prompt is held before approval_requested is delivered, so dropping it then abandons a held prompt from
+    // inside the request's own dispatch: the expiry must follow that dispatch, not nest in it (the harness fails
+    // any test whose server refused a nested dispatch).
+    const { engine, gateway } = ts.server;
+    const { turn, taskId } = await submit("change");
+    engine.attachDelivery((connectionId, event) => {
+      if (event.type === "approval_requested") must(turn.pendingAbandons[0], "prompt").abort();
+      gateway.send(connectionId, event);
+    });
+    turn.init();
+    const decision = await turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
+    expect(decision).toMatchObject({
+      behavior: "deny",
+      message: expect.stringContaining("was abandoned before the user decided"),
+    });
+    await expectExpiredAfterRequest(turn, taskId);
+  });
+
   describe("with as many prompts held as the server holds at once", () => {
     /** Hold MAX_HELD_PROMPTS calls in one turn, each awaiting its own approval. */
     const holdAll = async () => {
