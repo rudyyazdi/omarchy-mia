@@ -36,9 +36,13 @@ export interface CallChange {
   settle: PermissionDecision | null;
 }
 
-/** A pending approval resolved without a user decision. */
+/**
+ * A pending approval resolved without a user decision, and the id of the approval_resolved event that records it:
+ * drawn before the decision, like every id a transition records, so the rule names the event without creating it.
+ */
 export interface ApprovalChange {
   approvalId: string;
+  eventId: string;
   callId: string;
   status: Exclude<ApprovalStatus, "pending" | "approved" | "rejected">;
   reason: string;
@@ -161,18 +165,27 @@ export interface PendingTask {
  * The task status that results: invalidating the task's last pending approval resumes it, and a new
  * revision that asks again sets it back to awaiting_approval later in the same transaction.
  */
-export const supersedeBinding = (
-  call: CallFacts & BindingKey & { approvalId: string | null },
-  next: BindingKey,
-  task: PendingTask,
-): { approval: ApprovalChange | null; call: CallChange; taskStatus: TaskStatus } | null => {
+export const supersedeBinding = (input: {
+  call: CallFacts & BindingKey & { approvalId: string | null };
+  next: BindingKey;
+  task: PendingTask;
+  /** The approval_resolved event that records the invalidated approval, if the call holds one. */
+  resolvedEventId: string;
+}): { approval: ApprovalChange | null; call: CallChange; taskStatus: TaskStatus } | null => {
+  const { call, next, task } = input;
   if (!isHeld(call.status)) return null;
   const changed = call.toolIdentity === next.toolIdentity ? "arguments" : "tool";
   const reason = `${changed} changed`;
   return {
     taskStatus: taskStatusAfterResolving(task.status, task.otherPending),
     approval: call.approvalId
-      ? { approvalId: call.approvalId, callId: call.id, status: "invalidated", reason }
+      ? {
+          approvalId: call.approvalId,
+          eventId: input.resolvedEventId,
+          callId: call.id,
+          status: "invalidated",
+          reason,
+        }
       : null,
     call: {
       callId: call.id,
@@ -335,7 +348,8 @@ export const decideInterruption = <Call extends CallFacts>(input: {
   /** The runtime's turn has ended, though the task is not yet recorded finished. */
   runtimeEnded: boolean;
   conversationEpoch: number;
-  pending: readonly { approvalId: string; call: Call }[];
+  /** Each pending approval, with the approval_resolved event that records its invalidation. */
+  pending: readonly { approvalId: string; call: Call; resolvedEventId: string }[];
 }): InterruptionOutcome<Call> => {
   if (input.taskStatus === "interrupting") return { kind: "already_interrupting" };
   if (input.runtimeEnded) return { kind: "runtime_ended" };
@@ -345,8 +359,9 @@ export const decideInterruption = <Call extends CallFacts>(input: {
     kind: "interrupt",
     epoch: input.conversationEpoch + 1,
     task: { status: "interrupting", gateOpen: false, interrupted: true },
-    approvals: input.pending.map(({ approvalId, call }) => ({
+    approvals: input.pending.map(({ approvalId, call, resolvedEventId }) => ({
       approvalId,
+      eventId: resolvedEventId,
       callId: call.id,
       status: "invalidated",
       reason: "interrupted",
@@ -380,6 +395,8 @@ export const decideAbandonment = (input: {
   approvalId: string | null;
   pending: boolean;
   task: PendingTask;
+  /** The approval_resolved event that records the expiry, if the approval is still pending. */
+  resolvedEventId: string;
 }): {
   expire: { approval: ApprovalChange; call: CallChange; taskStatus: TaskStatus } | null;
   settle: PermissionDecision;
@@ -394,6 +411,7 @@ export const decideAbandonment = (input: {
       taskStatus: taskStatusAfterResolving(input.task.status, input.task.otherPending),
       approval: {
         approvalId: input.approvalId,
+        eventId: input.resolvedEventId,
         callId: input.call.id,
         status: "expired",
         reason: "runtime abandoned the prompt",
