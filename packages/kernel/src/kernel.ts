@@ -41,8 +41,9 @@ export interface Machine<State, Event, Rejection, Change> {
 export interface KernelDeps<Rec, Change extends Sequenced, Effect> {
   /**
    * Write `records` in one transaction and return the changes it committed, in increasing sequence order; a
-   * record may commit no change. It throws when nothing committed. Every commit a subscriber should see live goes
-   * through here: the feed publishes only what this returns.
+   * record may commit no change, and no records may commit nothing at all without throwing. It throws when the
+   * transaction failed, so that nothing committed. Every commit a subscriber should see live goes through here: the
+   * feed publishes only what this returns.
    */
   commit: (records: readonly Rec[]) => readonly Change[];
   /** Perform one effect (deliver to a client, answer the runtime) once its commit landed and the state moved on. */

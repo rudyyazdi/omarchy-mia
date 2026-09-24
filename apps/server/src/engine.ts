@@ -15,7 +15,7 @@ import {
   type TurnOptions,
   type TurnResult,
 } from "@mia/agent-adapter";
-import { Holds } from "@mia/kernel";
+import { createKernel, Holds, type Dispatched, type FeedLimits, type Machine } from "@mia/kernel";
 import {
   PROTOCOL_VERSION,
   errorMessage,
@@ -50,33 +50,25 @@ import {
   type McpBodyRecord,
 } from "./mcp-bodies.ts";
 import {
-  abandonmentTransition,
-  abandonmentUnrecordedTransition,
-  approvalDecisionTransition,
-  conversationStart,
-  diagnosticsTransition,
-  disconnectTransition,
-  interruptionTransition,
-  permissionRefusedTransition,
-  permissionRequestTransition,
+  decideConversation,
   releasedBy,
-  runtimeEventTransition,
-  runtimeExitTransition,
-  taskClearedTransition,
-  taskSubmissionTransition,
-  turnEndTransition,
-  turnUnrecordedTransition,
   type CapturedOutput,
-  type ConversationDecision,
+  type ConversationEvent,
+  type ConversationRejection,
   type ConversationStartEvent,
-  type ConversationTransition,
   type OutputIds,
   type PromptAbandonedEvent,
   type RuntimeReport,
   type UnresultedBodies,
 } from "./decide-conversation.ts";
 import type { EngineEffect, OutgoingEvent, PermissionAnswer, TurnStart } from "./engine-effects.ts";
-import { commitRecords, eventSequence, type CommittedChange } from "./engine-records.ts";
+import {
+  commitEvents,
+  committedEvents,
+  eventSequence,
+  type EngineRecord,
+  type EventChange,
+} from "./engine-records.ts";
 import {
   agentPromptObject,
   nameProvenance,
@@ -86,7 +78,7 @@ import {
   type ProvenancePlan,
   type ServerIdentity,
 } from "./provenance.ts";
-import type { BuiltTransition, Origin } from "./transition-draft.ts";
+import type { Origin } from "./transition-draft.ts";
 import {
   abandonedPromptDenial,
   bindToolResult,
@@ -161,6 +153,41 @@ interface Asking {
 interface Submitting {
   turn: TurnStart | null;
 }
+
+/**
+ * One conversation's machine (see `decideConversation`), on a kernel of its own: the catalog numbers events per
+ * conversation, and a kernel's change feed needs one order across everything it carries (see `Sequenced`).
+ */
+type ConversationMachine = Machine<
+  ConversationState | null,
+  ConversationEvent,
+  ConversationRejection,
+  EventChange
+>;
+
+/**
+ * Bounds of each conversation's change feed (see `FeedLimits`). Nothing subscribes yet: reconnect replay (D3) and the
+ * debug watch (#6) will. A few readers of one conversation at once, each a page of events behind at most before it
+ * reads the catalog again.
+ */
+const CONVERSATION_FEED_LIMITS: FeedLimits = { subscribers: 8, buffered: 256 };
+
+/**
+ * A dispatch's rejection, narrowed to the `kinds` the event's own transition refuses with. The other kinds cannot
+ * reach the engine's machine, which is always started and never started twice (`not_started`, `already_started`), so
+ * one that does is a bug, and it throws.
+ */
+const expectRejection = <Kind extends ConversationRejection["kind"]>(
+  rejection: ConversationRejection,
+  kinds: readonly Kind[],
+): Extract<ConversationRejection, { kind: Kind }> => {
+  const isExpected = (
+    candidate: ConversationRejection,
+  ): candidate is Extract<ConversationRejection, { kind: Kind }> =>
+    new Set<string>(kinds).has(candidate.kind);
+  if (isExpected(rejection)) return rejection;
+  throw new Error(`unexpected conversation rejection: ${rejection.kind}`);
+};
 
 /**
  * What a task-scoped command is allowed to act on. `rejected` and `no_active_task` carry the answer
@@ -261,18 +288,18 @@ interface ActiveTurn {
 /**
  * Conversation/task coordinator plus approval and interruption controller. One conversation, one task,
  * one active client. The rules live in ./transitions.ts, and ./decide-conversation.ts composes them into pure
- * transitions for every change to a conversation, its start and the few memory-only changes included; the engine
- * commits what they decide, replaces its state with the next one only after the commit, then performs the effects
- * (see `commit`).
+ * transitions for every change to a conversation, its start and the few memory-only changes included. Each
+ * conversation is one kernel machine (see `openConversation`): a dispatch decides, commits the records, moves the
+ * machine's state on, then performs the effects, so the engine never changes a conversation's state itself.
  */
 export class Engine {
   activeConnectionId: string | null = null;
   activeClientId: string | null = null;
   /**
-   * The active conversation's state, replaced whole by the next state a transition decided once its records commit
-   * (see ConversationState), and never mutated; only `commit` replaces it. A memory-only transition commits no records.
+   * The active conversation's machine, null before the first start. Its state moves only through its dispatches (see
+   * `dispatch`), and is never null: a machine replaces this one only once its start has committed.
    */
-  private current: ConversationState | null = null;
+  private machine: ConversationMachine | null = null;
   /** The runtime running the active task's turn, if one has started (see ActiveTurn). */
   private running: ActiveTurn | null = null;
   /** Delivers events to a connection while one is attached (attachDelivery); until then nothing is sent. */
@@ -307,9 +334,9 @@ export class Engine {
 
   constructor(private readonly deps: EngineDeps) {}
 
-  /** The active conversation's state as it is now (see `current`); null before the first start. */
+  /** The active conversation's state as it is now (see `machine`); null before the first start. */
   get conversation(): ConversationState | null {
-    return this.current;
+    return this.machine?.state ?? null;
   }
 
   /** The runtime running the active task's turn, if any. */
@@ -319,7 +346,7 @@ export class Engine {
 
   /** The active task, if there is one. */
   private get task(): TaskState | null {
-    return this.current?.task ?? null;
+    return this.conversation?.task ?? null;
   }
 
   /** The active task if it is still the one `taskId` names: a callback of a task that has ended gets null. */
@@ -335,70 +362,74 @@ export class Engine {
 
   /** The conversation every guarded command and runtime callback operates on; callers check for one first. */
   private get activeConversation(): ConversationState {
-    if (!this.current) throw new Error("engine has no active conversation");
-    return this.current;
+    const conversation = this.conversation;
+    if (!conversation) throw new Error("engine has no active conversation");
+    return conversation;
   }
 
   // ---------------------------------------------------------------- event plumbing
 
   /**
-   * Decide one transition of the active conversation with the pure machine (see ./decide-conversation.ts), reading
-   * the clock once for it, as a kernel dispatch hands its `decide` one `now`, so the transition rows of one commit
-   * (see `EngineDeps.now`) agree on when it happened; an accepted decision is committed with `commit`.
+   * A new conversation's machine, at null until its start is dispatched into it, on a kernel of its own (see
+   * `ConversationMachine`). The kernel commits the records with `commitEvents` in one catalog transaction and reads the
+   * clock once per dispatch, so the transition rows of one commit (see `EngineDeps.now`) agree on when it happened. A
+   * commit that throws keeps the state and performs no effect, so nothing is released or delivered. After a commit
+   * each effect runs on its own: one that throws is logged as a delivery failure, never reported as a persistence
+   * failure, and the records, the state and the remaining effects stand. An effect may not dispatch: the kernel
+   * fails a nested dispatch without committing it.
    */
-  private decide<Event, Rejection>(
-    transition: ConversationTransition<Event, Rejection>,
-    event: Event,
-  ): ConversationDecision<Rejection> {
-    return transition({ state: this.activeConversation, event, now: this.deps.now() });
+  private openConversation(conversationId: string): ConversationMachine {
+    const kernel = createKernel<EngineRecord, EventChange, EngineEffect>({
+      commit: (records) => commitEvents(this.deps.writer, records),
+      perform: (effect, changes) => this.perform(effect, { conversationId, changes }),
+      reportEffectFailure: (error) =>
+        this.deps.log(`delivery failed after commit; records stand: ${errorMessage(error)}`),
+      replay: committedEvents(this.deps.catalog, conversationId),
+      now: () => this.deps.now(),
+      limits: CONVERSATION_FEED_LIMITS,
+    });
+    return kernel.machine(decideConversation, null);
+  }
+
+  /** Dispatch one event into the active conversation's machine; callers check for a conversation first. */
+  private dispatch(event: ConversationEvent): Dispatched<ConversationRejection, EventChange> {
+    if (!this.machine) throw new Error("engine has no active conversation");
+    return this.machine.dispatch(event);
   }
 
   /**
-   * Commit what one transition built: `commitRecords` writes its records in one catalog transaction. A commit that
-   * throws keeps the state it started from and performs no effect, so nothing is released or delivered. After a
-   * commit the next state becomes the state, then each effect runs on its own: one that throws is logged as a
-   * delivery failure, never reported as a persistence failure, and the records, the state, and the remaining effects
-   * stand.
+   * Dispatch a memory-only transition (see `memoryOnly` in ./decide-conversation.ts): it records nothing, so a
+   * catalog that cannot commit does not refuse it, and only a dispatch nested inside another's effects fails it. A
+   * rejection (the task or call it names is gone, or nothing is pending) changes nothing.
    */
-  private commit(built: BuiltTransition): void {
-    const changes = commitRecords(this.deps.writer, built.records);
-    this.current = built.next;
-    for (const effect of built.effects) {
-      try {
-        this.perform(effect, changes);
-      } catch (error) {
-        this.deps.log(`delivery failed after commit; records stand: ${errorMessage(error)}`);
-      }
-    }
+  private dispatchMemoryOnly(event: ConversationEvent): void {
+    const dispatched = this.dispatch(event);
+    if (dispatched.kind === "failed")
+      this.deps.log(`could not apply ${event.kind}: ${errorMessage(dispatched.error)}`);
   }
 
   /**
-   * Decide and commit a memory-only transition (see `memoryOnly` in ./decide-conversation.ts): it records nothing, so a
-   * catalog that cannot commit does not refuse it. A rejection (the task or call it names is gone, or nothing is
-   * pending) changes nothing. It reads the clock once, as every decision does, though no memory-only transition uses it.
+   * Perform one effect of a committed transition of conversation `conversationId`, once its machine's state has moved
+   * on. It reads the connection, the held prompts and the active turn as they are now, not as they were when the
+   * effect was queued.
    */
-  private commitMemoryOnly<Event, Rejection>(
-    transition: ConversationTransition<Event, Rejection>,
-    event: Event,
+  private perform(
+    effect: EngineEffect,
+    committed: { conversationId: string; changes: readonly EventChange[] },
   ): void {
-    const decision = this.decide(transition, event);
-    if (decision.kind === "accepted") this.commit(decision);
-  }
-
-  /**
-   * Perform one effect of a committed transition, once its next state has replaced the engine's (see `commit`). It
-   * reads the connection, the held prompts and the active turn as they are now, not as they were when the effect
-   * was queued.
-   */
-  private perform(effect: EngineEffect, changes: readonly CommittedChange[]): void {
+    const { conversationId, changes } = committed;
     match(effect)
       .with({ kind: "deliver_event" }, ({ eventId, event }) =>
-        this.deliver(event, { id: eventId, sequence: eventSequence(changes, eventId) }),
+        this.deliver(event, {
+          id: eventId,
+          conversationId,
+          sequence: eventSequence(changes, eventId),
+        }),
       )
       .with({ kind: "notify_tool_call" }, ({ payload }) =>
         this.deliver(
           { type: "tool_call", payload },
-          { id: this.deps.newId("evt"), sequence: null },
+          { id: this.deps.newId("evt"), conversationId, sequence: null },
         ),
       )
       .with({ kind: "answer_prompt" }, ({ approvalId, decision }) =>
@@ -415,6 +446,7 @@ export class Engine {
         this.submitting.turn = turn;
       })
       .with({ kind: "interrupt_runtime" }, ({ taskId }) => {
+        // A task whose turn never started (the adapter threw as it submitted it) has no runtime to interrupt.
         const turn = this.running;
         if (turn?.taskId !== taskId) return;
         turn.handle
@@ -424,13 +456,16 @@ export class Engine {
       .exhaustive();
   }
 
-  private deliver(event: OutgoingEvent, envelope: { id: string; sequence: number | null }): void {
+  private deliver(
+    event: OutgoingEvent,
+    envelope: { id: string; conversationId: string; sequence: number | null },
+  ): void {
     const connectionId = this.activeConnectionId;
     if (!connectionId || !this.delivery) return;
     this.delivery(connectionId, {
       protocol_version: PROTOCOL_VERSION,
       message_id: envelope.id,
-      conversation_id: this.current?.id ?? null,
+      conversation_id: envelope.conversationId,
       sequence: envelope.sequence,
       server_time: this.deps.now().toISOString(),
       ...event,
@@ -559,7 +594,7 @@ export class Engine {
         clientId: ctx.clientId,
         connectionId: connected ? ctx.connectionId : this.activeConnectionId,
       },
-      closes: this.current?.id ?? null,
+      closes: this.conversation?.id ?? null,
       provenance,
       promptFile: prompt === null ? null : this.deps.writer.objects.pathFor(prompt.digest),
       conversationsRoot: this.deps.catalog.paths.conversations,
@@ -573,28 +608,39 @@ export class Engine {
       },
     };
     const previous = { connection: this.activeConnectionId, client: this.activeClientId };
+    // Unlike the conversation, which becomes the active one only once its start commits, the active connection and
+    // client are set before the dispatch, because the start's effects deliver conversation_started to the connection
+    // active when they run; they are restored below if the start does not commit.
+    this.activeConnectionId = event.origin.connectionId;
+    this.activeClientId = event.origin.clientId;
+    // The conversation starting has a machine of its own, from no state (see ./decide-conversation.ts); the one it
+    // closes is named by id. A start that does not commit drops the new machine, and the previous one stays active.
+    const machine = this.openConversation(event.ids.conversation);
+    let error: unknown;
     try {
-      // Built from no state: the conversation starting has none until its start commits, and the one it closes is
-      // named by id (see ./decide-conversation.ts).
-      const decision = conversationStart({ event, now: this.deps.now() });
-      // Unlike the conversation, which moves with the commit, the active connection and client are set before it,
-      // because the start's effects deliver conversation_started to the connection active when they run; the catch
-      // below restores them if the commit throws.
-      this.activeConnectionId = event.origin.connectionId;
-      this.activeClientId = event.origin.clientId;
-      this.commit(decision);
-      return {
-        ok: true,
-        result: {
-          conversation_id: decision.next.id,
-          provenance_set_id: decision.next.provenanceSetId,
-        },
-      };
-    } catch (error) {
-      this.activeConnectionId = previous.connection;
-      this.activeClientId = previous.client;
-      return fail("record_failure", `could not create conversation: ${errorMessage(error)}`);
+      const dispatched = machine.dispatch(event);
+      if (dispatched.kind === "committed") {
+        this.machine = machine;
+        const conversation = this.activeConversation;
+        return {
+          ok: true,
+          result: {
+            conversation_id: conversation.id,
+            provenance_set_id: conversation.provenanceSetId,
+          },
+        };
+      }
+      error =
+        dispatched.kind === "failed"
+          ? dispatched.error
+          : // Unreachable: a machine at null decides a start.
+            new Error(`start refused: ${dispatched.rejection.kind}`);
+    } catch (thrown) {
+      error = thrown;
     }
+    this.activeConnectionId = previous.connection;
+    this.activeClientId = previous.client;
+    return fail("record_failure", `could not create conversation: ${errorMessage(error)}`);
   }
 
   submitText(
@@ -603,45 +649,45 @@ export class Engine {
   ): CommandResult {
     const guard = this.guard(ctx, payload.conversation_id);
     if (guard) return guard;
-    const decision = this.decide(taskSubmissionTransition, {
-      kind: "submit_task",
-      origin: this.origin,
-      text: payload.text,
-      clientId: ctx.clientId,
-      commandId: ctx.commandId,
-      requested: {
-        model: this.deps.profile.runtime.model,
-        effort: this.deps.profile.runtime.effort,
-      },
-      ids: {
-        task: this.deps.newId("task"),
-        execution: this.deps.newId("exec"),
-        submitted: this.deps.newId("evt"),
-        started: this.deps.newId("evt"),
-      },
-    });
-    if (decision.kind === "rejected") {
-      const { taskId, status, pendingApprovals } = decision.rejection;
+    // Restored, not cleared, so a dispatch nested inside this one's effects could not take the outer submission's slot.
+    const previous = this.submitting;
+    const submitting: Submitting = { turn: null };
+    this.submitting = submitting;
+    let dispatched: Dispatched<ConversationRejection, EventChange>;
+    try {
+      dispatched = this.dispatch({
+        kind: "submit_task",
+        origin: this.origin,
+        text: payload.text,
+        clientId: ctx.clientId,
+        commandId: ctx.commandId,
+        requested: {
+          model: this.deps.profile.runtime.model,
+          effort: this.deps.profile.runtime.effort,
+        },
+        ids: {
+          task: this.deps.newId("task"),
+          execution: this.deps.newId("exec"),
+          submitted: this.deps.newId("evt"),
+          started: this.deps.newId("evt"),
+        },
+      });
+    } finally {
+      this.submitting = previous;
+    }
+    if (dispatched.kind === "rejected") {
+      const { taskId, status, pendingApprovals } = expectRejection(dispatched.rejection, ["busy"]);
       const hint =
         pendingApprovals.length > 0
           ? `approve or reject ${pendingApprovals.join(", ")}, or interrupt it`
           : "wait for it to finish or interrupt it";
       return fail("busy", `task ${taskId} is ${status}; ${hint}`);
     }
-    // Restored, not cleared, so a commit nested inside this one's effects could not take the outer submission's slot.
-    const previous = this.submitting;
-    const submitting: Submitting = { turn: null };
-    this.submitting = submitting;
-    try {
-      this.commit(decision);
-    } catch (error) {
-      return fail("record_failure", `could not record task: ${errorMessage(error)}`);
-    } finally {
-      this.submitting = previous;
-    }
+    if (dispatched.kind === "failed")
+      return fail("record_failure", `could not record task: ${errorMessage(dispatched.error)}`);
     // Unreachable: a committed submission's transition always queues its turn, and taking it cannot fail.
     if (!submitting.turn) throw new Error("a task submission committed without its turn");
-    return this.startTurn(decision.next, submitting.turn);
+    return this.startTurn(this.activeConversation, submitting.turn);
   }
 
   /**
@@ -682,7 +728,7 @@ export class Engine {
           const ended = this.taskOf(taskId);
           for (const call of ended ? callsOf(ended) : []) this.answerPrompt(call, TURN_ENDED);
           // The task's end was recorded (or failed to be) by finishTurn.
-          if (ended) this.commitMemoryOnly(taskClearedTransition, { kind: "task_cleared", taskId });
+          if (ended) this.dispatchMemoryOnly({ kind: "task_cleared", taskId });
         } catch (error) {
           // Not expected, as nothing here touches the catalog; caught so the turn still settles below, and so this
           // chain, which nothing awaits, cannot reject.
@@ -717,7 +763,7 @@ export class Engine {
     }
     const { task } = addressed;
     const approvalId = payload.approval_id;
-    const decision = this.decide(approvalDecisionTransition, {
+    const dispatched = this.dispatch({
       kind: "approval_decision",
       origin: this.origin,
       taskId: task.id,
@@ -726,28 +772,25 @@ export class Engine {
       deciderClientId: ctx.clientId,
       ids: { resolved: this.deps.newId("evt"), dispatched: this.deps.newId("evt") },
     });
-    if (decision.kind === "rejected")
-      return match(decision.rejection)
+    if (dispatched.kind === "rejected")
+      return match(expectRejection(dispatched.rejection, ["no_task", "not_owner", "not_pending"]))
         .with({ kind: "no_task" }, () => notActiveTask(payload.task_id))
         .with({ kind: "not_owner" }, () =>
           fail("unauthenticated", "decision must come from the client that owns the task"),
         )
         .with({ kind: "not_pending" }, () => this.notPending(task, approvalId))
         .exhaustive();
-    try {
-      this.commit(decision);
-    } catch (error) {
-      // Record failure: the call stays held and pending; nothing is released.
+    // Record failure: the call stays held and pending; nothing is released.
+    if (dispatched.kind === "failed")
       return fail(
         "record_failure",
-        `decision not recorded; call remains held: ${errorMessage(error)}`,
+        `decision not recorded; call remains held: ${errorMessage(dispatched.error)}`,
       );
-    }
     return {
       ok: true,
       result: {
         approval_id: approvalId,
-        released: releasedBy(decision.next, approvalId),
+        released: releasedBy(this.activeConversation, approvalId),
         decision: payload.decision,
       },
     };
@@ -791,7 +834,7 @@ export class Engine {
    */
   private interrupt(task: TaskState): CommandResult {
     const requested = this.deps.newId("evt");
-    const decision = this.decide(interruptionTransition, {
+    const dispatched = this.dispatch({
       kind: "interrupt_task",
       origin: this.origin,
       taskId: task.id,
@@ -802,8 +845,15 @@ export class Engine {
         ),
       },
     });
-    if (decision.kind === "rejected")
-      return match(decision.rejection)
+    if (dispatched.kind === "rejected")
+      return match(
+        expectRejection(dispatched.rejection, [
+          "no_task",
+          "already_interrupting",
+          "runtime_ended",
+          "invalid",
+        ]),
+      )
         .with({ kind: "no_task" }, () => notActiveTask(task.id))
         .with({ kind: "already_interrupting" }, (): CommandResult => ({
           ok: true,
@@ -817,12 +867,9 @@ export class Engine {
           fail("invalid_state", `task is ${taskStatus}`),
         )
         .exhaustive();
-    try {
-      this.commit(decision);
-    } catch (error) {
-      return fail("record_failure", `interruption not recorded: ${errorMessage(error)}`);
-    }
-    return { ok: true, result: { execution_epoch: decision.next.epoch } };
+    if (dispatched.kind === "failed")
+      return fail("record_failure", `interruption not recorded: ${errorMessage(dispatched.error)}`);
+    return { ok: true, result: { execution_epoch: this.activeConversation.epoch } };
   }
 
   /**
@@ -839,15 +886,15 @@ export class Engine {
     const ids = { event: this.deps.newId("evt"), diagnostics: this.deps.newId("diag") };
     try {
       if (about) {
-        const decision = this.decide(diagnosticsTransition, {
+        // Never rejected: a report about the conversation is always recorded.
+        const dispatched = this.dispatch({
           kind: "client_diagnostics",
           origin: this.origin,
           from: { clientId: ctx.clientId, connectionId: ctx.connectionId },
           diagnostics: payload.diagnostics,
           ids,
         });
-        // Never rejected: a report about the conversation is always recorded.
-        if (decision.kind === "accepted") this.commit(decision);
+        if (dispatched.kind === "failed") return fail("record_failure", String(dispatched.error));
       } else
         this.deps.writer.recordDiagnostics({
           id: ids.diagnostics,
@@ -898,14 +945,15 @@ export class Engine {
     if (this.activeConnectionId !== connectionId) return;
     if (this.conversation) {
       try {
-        const decision = this.decide(disconnectTransition, {
+        // Never rejected: a disconnect of the conversation's connection is always recorded.
+        const dispatched = this.dispatch({
           kind: "client_disconnected",
           origin: this.origin,
           connectionId,
           ids: { event: this.deps.newId("evt") },
         });
-        // Never rejected: a disconnect of the conversation's connection is always recorded.
-        if (decision.kind === "accepted") this.commit(decision);
+        if (dispatched.kind === "failed")
+          this.deps.log(`could not record disconnect: ${String(dispatched.error)}`);
       } catch (error) {
         this.deps.log(`could not record disconnect: ${String(error)}`);
       }
@@ -1118,7 +1166,7 @@ export class Engine {
   private recordRuntimeEvent(taskId: string, report: RuntimeReport): void {
     const { event } = report;
     try {
-      const decision = this.decide(runtimeEventTransition, {
+      const dispatched = this.dispatch({
         kind: "runtime_event",
         origin: this.origin,
         taskId,
@@ -1130,7 +1178,7 @@ export class Engine {
           unmatched: this.deps.newId("evt"),
         },
       });
-      if (decision.kind === "rejected") {
+      if (dispatched.kind === "rejected") {
         const output = "output" in report ? report.output : null;
         const captured = output ? ` (output ${output.declared.path} captured)` : "";
         this.deps.log(
@@ -1138,7 +1186,8 @@ export class Engine {
         );
         return;
       }
-      this.commit(decision);
+      if (dispatched.kind === "failed")
+        this.deps.log(`failed to record ${event.type}: ${errorMessage(dispatched.error)}`);
     } catch (error) {
       this.deps.log(`failed to record ${event.type}: ${errorMessage(error)}`);
     }
@@ -1172,33 +1221,42 @@ export class Engine {
   }
 
   /**
-   * Decide and commit one permission request, returning what answers the runtime: the answer its committed transition
-   * gave through `answer_permission` (taken through `asking`), or the one a rejection carries. It throws when the
-   * transition fails or its records do not commit.
+   * Dispatch one permission request, returning what answers the runtime: the answer its committed transition gave
+   * through `answer_permission` (taken through `asking`), the one a rejection carries, or a denial when its records
+   * did not commit. It throws only when the transition does.
    */
   private decidePermission(taskId: string, req: PermissionRequest): PermissionAnswer {
-    const decision = this.decide(permissionRequestTransition, {
-      kind: "permission_request",
-      origin: this.origin,
-      taskId,
-      request: {
-        runtimeCallId: req.toolUseId ?? null,
-        toolIdentity: req.toolName,
-        input: req.input,
-      },
-      policy: policyFor(this.deps.profile.runtime, req.toolName),
-      promptsFull: this.prompts.full,
-      ids: {
-        resolved: this.deps.newId("evt"),
-        proposal: this.deps.newId("evt"),
-        call: this.deps.newId("call"),
-        evaluation: this.deps.newId("evt"),
-        outcome: this.deps.newId("evt"),
-        approval: this.deps.newId("appr"),
-      },
-    });
-    if (decision.kind === "rejected")
-      return match(decision.rejection)
+    // Restored, not cleared, so a dispatch nested inside this one's effects could not take the outer request's slot.
+    const previous = this.asking;
+    const asking: Asking = { answer: null };
+    this.asking = asking;
+    let dispatched: Dispatched<ConversationRejection, EventChange>;
+    try {
+      dispatched = this.dispatch({
+        kind: "permission_request",
+        origin: this.origin,
+        taskId,
+        request: {
+          runtimeCallId: req.toolUseId ?? null,
+          toolIdentity: req.toolName,
+          input: req.input,
+        },
+        policy: policyFor(this.deps.profile.runtime, req.toolName),
+        promptsFull: this.prompts.full,
+        ids: {
+          resolved: this.deps.newId("evt"),
+          proposal: this.deps.newId("evt"),
+          call: this.deps.newId("call"),
+          evaluation: this.deps.newId("evt"),
+          outcome: this.deps.newId("evt"),
+          approval: this.deps.newId("appr"),
+        },
+      });
+    } finally {
+      this.asking = previous;
+    }
+    if (dispatched.kind === "rejected")
+      return match(expectRejection(dispatched.rejection, ["no_task", "refused"]))
         .with({ kind: "no_task" }, (): PermissionAnswer => ({
           kind: "answer",
           decision: NO_ACTIVE_TASK,
@@ -1208,14 +1266,10 @@ export class Engine {
           return { kind: "answer", decision: answer };
         })
         .exhaustive();
-    // Restored, not cleared, so a commit nested inside this one's effects could not take the outer request's slot.
-    const previous = this.asking;
-    const asking: Asking = { answer: null };
-    this.asking = asking;
-    try {
-      this.commit(decision);
-    } finally {
-      this.asking = previous;
+    if (dispatched.kind === "failed") {
+      // Nothing was requested, so nothing is held: the runtime is denied at once.
+      this.deps.log(`permission handling failed: ${errorMessage(dispatched.error)}`);
+      return { kind: "answer", decision: NOT_RECORDED };
     }
     if (asking.answer) return asking.answer;
     // Unreachable: a committed request's transition always queues its answer, and taking it cannot fail. The request
@@ -1257,15 +1311,18 @@ export class Engine {
    */
   private recordRefusal(taskId: string, detail: string): void {
     try {
-      const decision = this.decide(permissionRefusedTransition, {
+      // Rejected, the task ended; unreachable, as the refusal was decided against it just before.
+      const dispatched = this.dispatch({
         kind: "permission_refused",
         origin: this.origin,
         taskId,
         detail,
         ids: { event: this.deps.newId("evt") },
       });
-      // Rejected, the task ended; unreachable, as the refusal was decided against it just before.
-      if (decision.kind === "accepted") this.commit(decision);
+      if (dispatched.kind === "failed")
+        this.deps.log(
+          `could not record a refused permission request: ${errorMessage(dispatched.error)}`,
+        );
     } catch (error) {
       this.deps.log(`could not record a refused permission request: ${errorMessage(error)}`);
     }
@@ -1287,20 +1344,13 @@ export class Engine {
       callId,
       ids: { resolved: this.deps.newId("evt") },
     };
-    const decision = this.decide(abandonmentTransition, abandoned);
     // Rejected, the approval was no longer pending (or the call is gone), so there is nothing to expire.
-    if (decision.kind === "accepted") {
-      try {
-        this.commit(decision);
-      } catch (error) {
-        this.deps.log(`could not record abandoned approval: ${String(error)}`);
-        // The runtime is denied below whatever the records say, so memory takes the expiry anyway (#165). Nothing
-        // has run since the failed commit, so it is decided from the state the expiry was decided from.
-        this.commitMemoryOnly(abandonmentUnrecordedTransition, {
-          ...abandoned,
-          kind: "abandonment_unrecorded",
-        });
-      }
+    const dispatched = this.dispatch(abandoned);
+    if (dispatched.kind === "failed") {
+      this.deps.log(`could not record abandoned approval: ${String(dispatched.error)}`);
+      // The runtime is denied below whatever the records say, so memory takes the expiry anyway (#165). Nothing
+      // has run since the failed commit, so it is decided from the state the expiry was decided from.
+      this.dispatchMemoryOnly({ ...abandoned, kind: "abandonment_unrecorded" });
     }
     return abandonedPromptDenial(call.toolIdentity);
   }
@@ -1315,7 +1365,7 @@ export class Engine {
       return;
     }
     // Before the reads below yield (see `runtimeExitTransition`).
-    this.commitMemoryOnly(runtimeExitTransition, { kind: "runtime_exited", taskId });
+    this.dispatchMemoryOnly({ kind: "runtime_exited", taskId });
     // Read and store before the transaction: retaining evidence is best-effort, so a read or store that fails
     // becomes a failed capture that says why, and the transaction only records that outcome. Its rows then commit
     // or fail with the turn's end, like every other record of it. Read and store before anything else is
@@ -1365,7 +1415,7 @@ export class Engine {
         "SELECT a.id FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id WHERE t.task_id = ? AND a.status = 'pending'",
         task.id,
       );
-      const decision = this.decide(turnEndTransition, {
+      const dispatched = this.dispatch({
         kind: "turn_ended",
         origin: this.origin,
         taskId,
@@ -1377,16 +1427,14 @@ export class Engine {
         ids,
       });
       // Rejected, the task was cleared; unreachable, as it was read just above with nothing awaited since.
-      if (decision.kind === "accepted") {
-        this.commit(decision);
-        recorded = true;
-      }
+      if (dispatched.kind === "failed")
+        this.deps.log(`finishTurn record failure: ${String(dispatched.error)}`);
+      recorded = dispatched.kind === "committed";
     } catch (recordError) {
       this.deps.log(`finishTurn record failure: ${String(recordError)}`);
     }
     // A committed end left the note; one that was not still leaves it, as the next turn's only account of this one.
-    if (!recorded)
-      this.commitMemoryOnly(turnUnrecordedTransition, { kind: "turn_unrecorded", taskId });
+    if (!recorded) this.dispatchMemoryOnly({ kind: "turn_unrecorded", taskId });
   }
 
   /**

@@ -1,5 +1,5 @@
 import { match } from "ts-pattern";
-import type { RecordWriter } from "@mia/records";
+import type { Catalog, RecordWriter } from "@mia/records";
 
 /** A writer operation's name. */
 type Operation = {
@@ -56,6 +56,9 @@ export type EngineRecord =
 
 /** What committing one record changed: an event, with the sequence the catalog gave it, or some other row. */
 export type CommittedChange = { kind: "event"; id: string; sequence: number } | { kind: "row" };
+
+/** A committed event: the one kind of change the conversation's kernel publishes and replays (see `commitEvents`). */
+export type EventChange = Extract<CommittedChange, { kind: "event" }>;
 
 const ROW: CommittedChange = { kind: "row" };
 
@@ -148,6 +151,33 @@ export const commitRecords = (
   records.length === 0
     ? []
     : writer.catalog.transaction(() => records.map((record) => writeRecord(writer, record)));
+
+/**
+ * `commitRecords`, keeping only the events it committed, in record order, which is sequence order: the changes a
+ * conversation's kernel commits, publishes and hands its effects (see `KernelDeps.commit`).
+ */
+export const commitEvents = (
+  writer: RecordWriter,
+  records: readonly EngineRecord[],
+): EventChange[] =>
+  commitRecords(writer, records).filter((change): change is EventChange => change.kind === "event");
+
+/**
+ * The events conversation `conversationId` committed after sequence `after`, up to `limit` of them in sequence order,
+ * read from the catalog: its kernel's replay (see `FeedDeps.replay`). The catalog numbers events per conversation, so
+ * each conversation has its own kernel and replays only its own events.
+ */
+export const committedEvents =
+  (catalog: Catalog, conversationId: string) =>
+  (input: { after: number; limit: number }): EventChange[] =>
+    catalog
+      .all<{ id: string; sequence: number }>(
+        "SELECT id, sequence FROM events WHERE conversation_id = ? AND sequence > ? ORDER BY sequence LIMIT ?",
+        conversationId,
+        input.after,
+        input.limit,
+      )
+      .map(({ id, sequence }): EventChange => ({ kind: "event", id, sequence }));
 
 /** The sequence the catalog gave the committed event `eventId`; it throws when `changes` holds no such event. */
 export const eventSequence = (changes: readonly CommittedChange[], eventId: string): number => {
