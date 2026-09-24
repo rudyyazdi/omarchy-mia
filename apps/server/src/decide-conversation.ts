@@ -69,7 +69,7 @@ import {
  * The conversation machine: what a command or runtime callback does to the conversation, as a pure `decide` over its
  * state (see `ConversationState`). Each transition composes the rules of ./transitions.ts into the records to commit,
  * the effects to perform once they have, and the next state, and every id it may record comes in with its event,
- * drawn at the boundary. It reads nothing else and changes nothing, so the engine commits what it returns and a
+ * drawn at the boundary. It reads nothing else and changes nothing, so the kernel commits what it returns and a
  * test checks it directly. It covers every transition of a conversation: its start, task submission, how approvals
  * end (a user's decision, an interruption, and the runtime abandoning a held prompt), the runtime's permission
  * requests, the events the runtime reports, the turn's end, and the client's diagnostics and disconnect. The few
@@ -480,7 +480,7 @@ const memoryOnly = (next: ConversationState): BuiltTransition => ({
 });
 
 /** A user's decision is recorded before any release; the held call changes and is answered only after the commit. */
-export const approvalDecisionTransition: ConversationTransition<
+const approvalDecisionTransition: ConversationTransition<
   ApprovalDecisionEvent,
   ApprovalDecisionRejection
 > = ({ state, event, now }) => {
@@ -558,10 +558,11 @@ const drawn = (ids: ReadonlyMap<string, string>, key: string): string => {
  * Atomically: close the gate, advance the epoch, invalidate the pending approvals, and record the order in the
  * interruption_requested event; the runtime is interrupted once that has committed.
  */
-export const interruptionTransition: ConversationTransition<
-  InterruptTaskEvent,
-  InterruptionRejection
-> = ({ state, event, now }) => {
+const interruptionTransition: ConversationTransition<InterruptTaskEvent, InterruptionRejection> = ({
+  state,
+  event,
+  now,
+}) => {
   const { task } = state;
   if (task?.id !== event.taskId) return rejected({ kind: "no_task" });
   const { ids } = event;
@@ -625,10 +626,11 @@ export const interruptionTransition: ConversationTransition<
  * decision can release it, and the call is remembered as abandoned for the next turn's note. The runtime has
  * already been denied (`abandonedPromptDenial`), so nothing is answered here.
  */
-export const abandonmentTransition: ConversationTransition<
-  PromptAbandonedEvent,
-  AbandonmentRejection
-> = ({ state, event, now }) => {
+const abandonmentTransition: ConversationTransition<PromptAbandonedEvent, AbandonmentRejection> = ({
+  state,
+  event,
+  now,
+}) => {
   const { task } = state;
   if (task?.id !== event.taskId) return rejected({ kind: "no_task" });
   const { callId } = event;
@@ -666,7 +668,7 @@ export const abandonmentTransition: ConversationTransition<
  * pending (`TurnEndedEvent.stillPending`). Unlike the other memory-only transitions, this one departs from what the
  * records say (#165).
  */
-export const abandonmentUnrecordedTransition: ConversationTransition<
+const abandonmentUnrecordedTransition: ConversationTransition<
   AbandonmentUnrecordedEvent,
   AbandonmentRejection
 > = ({ state, event, now }) => {
@@ -884,7 +886,7 @@ const recordPermission = (
  * runtime's answer is the one `answer_permission` effect, queued last: a denial or a release at once, or a hold
  * under the approval requested, which the boundary places only once the request has committed.
  */
-export const permissionRequestTransition: ConversationTransition<
+const permissionRequestTransition: ConversationTransition<
   PermissionRequestEvent,
   PermissionRejection
 > = ({ state, event, now }) => {
@@ -967,10 +969,11 @@ export const permissionRequestTransition: ConversationTransition<
 };
 
 /** Tell the client of a refused permission request: a runtime failure, recorded under the task. */
-export const permissionRefusedTransition: ConversationTransition<
-  PermissionRefusedEvent,
-  NoTask
-> = ({ state, event, now }) => {
+const permissionRefusedTransition: ConversationTransition<PermissionRefusedEvent, NoTask> = ({
+  state,
+  event,
+  now,
+}) => {
   const { task } = state;
   if (task?.id !== event.taskId) return rejected({ kind: "no_task" });
   const draft = new TransitionDraft({ state, now, origin: event.origin });
@@ -1062,7 +1065,7 @@ const registerToolOutput = (
  * supersedes the held one and proposes a new revision; a tool result completes or fails the call it binds to, with
  * its declared output and MCP bodies as the boundary read them.
  */
-export const runtimeEventTransition: ConversationTransition<
+const runtimeEventTransition: ConversationTransition<
   RuntimeEventReceived,
   RuntimeEventRejection
 > = ({ state, event: received, now }) => {
@@ -1241,10 +1244,11 @@ const RUNTIME_IDENTITY = "claude-code";
  * and its execution are recorded under the next epoch, and its runtime prompt carries the note the last turn left,
  * which the task takes over. The turn starts once that has committed (`start_turn`, queued last).
  */
-export const taskSubmissionTransition: ConversationTransition<
-  TaskSubmittedEvent,
-  SubmissionRejection
-> = ({ state, event, now }) => {
+const taskSubmissionTransition: ConversationTransition<TaskSubmittedEvent, SubmissionRejection> = ({
+  state,
+  event,
+  now,
+}) => {
   const { task } = state;
   if (task)
     return rejected({
@@ -1423,7 +1427,7 @@ const withTurnNote = (state: ConversationState, task: TaskState): ConversationSt
  * interruption of, a runtime that is gone; an approval decided then ends blocked. Memory only: the task stays running
  * in the records until its turn's end commits.
  */
-export const runtimeExitTransition: ConversationTransition<RuntimeExitedEvent, NoTask> = ({
+const runtimeExitTransition: ConversationTransition<RuntimeExitedEvent, NoTask> = ({
   state,
   event,
 }) =>
@@ -1434,7 +1438,7 @@ export const runtimeExitTransition: ConversationTransition<RuntimeExitedEvent, N
     : rejected({ kind: "no_task" });
 
 /** The turn's end could not be recorded: memory still takes the note it leaves (see `turnNote`), and nothing else. */
-export const turnUnrecordedTransition: ConversationTransition<TurnUnrecordedEvent, NoTask> = ({
+const turnUnrecordedTransition: ConversationTransition<TurnUnrecordedEvent, NoTask> = ({
   state,
   event,
 }) =>
@@ -1447,7 +1451,7 @@ export const turnUnrecordedTransition: ConversationTransition<TurnUnrecordedEven
  * answered the prompts it still held (`TURN_ENDED`), so the next submission can start. Memory only: the records
  * already say how the task ended, or keep it running when they could not.
  */
-export const taskClearedTransition: ConversationTransition<TaskClearedEvent, NoTask> = ({
+const taskClearedTransition: ConversationTransition<TaskClearedEvent, NoTask> = ({
   state,
   event,
 }) =>
@@ -1462,7 +1466,7 @@ export const taskClearedTransition: ConversationTransition<TaskClearedEvent, NoT
  * failure, and the conversation carries the note the turn leaves (`turnNote`). The task leaves the state only once the
  * boundary has answered its held prompts (`taskClearedTransition`).
  */
-export const turnEndTransition: ConversationTransition<TurnEndedEvent, NoTask> = ({
+const turnEndTransition: ConversationTransition<TurnEndedEvent, NoTask> = ({
   state,
   event,
   now,
@@ -1598,7 +1602,7 @@ export const turnEndTransition: ConversationTransition<TurnEndedEvent, NoTask> =
  * diagnostics row that names it, committed together. A report about no conversation, or another one, is not this
  * machine's to decide; the boundary records its row alone.
  */
-export const diagnosticsTransition: ConversationTransition<DiagnosticsReportedEvent, never> = ({
+const diagnosticsTransition: ConversationTransition<DiagnosticsReportedEvent, never> = ({
   state,
   event,
   now,
@@ -1636,7 +1640,7 @@ export const diagnosticsTransition: ConversationTransition<DiagnosticsReportedEv
  * The active connection closed. Disconnection is not consent: pending approvals stay pending, and the event lists
  * them, in request order, under the task if there is one.
  */
-export const disconnectTransition: ConversationTransition<ClientDisconnectedEvent, never> = ({
+const disconnectTransition: ConversationTransition<ClientDisconnectedEvent, never> = ({
   state,
   event,
   now,
@@ -1659,7 +1663,7 @@ export const disconnectTransition: ConversationTransition<ClientDisconnectedEven
  * captured_in_debug_mode, all in one commit. Built from no conversation, so it is never refused; the machine refuses
  * a start of one already started (`conversationStartTransition`).
  */
-export const conversationStart = (input: {
+const conversationStart = (input: {
   event: ConversationStartEvent;
   now: Date;
 }): BuiltTransition => {
@@ -1715,7 +1719,7 @@ export const conversationStart = (input: {
 };
 
 /** A start decided by the conversation's machine: from no conversation (null) only, as each starts once. */
-export const conversationStartTransition = (input: {
+const conversationStartTransition = (input: {
   state: ConversationState | null;
   event: ConversationStartEvent;
   now: Date;

@@ -3,10 +3,11 @@ import type { TaskStatus, ToolCallPolicy, ToolCallStatus } from "@mia/protocol";
 /**
  * What the engine holds in memory about the active conversation, as one immutable value: the conversation, its
  * task, the task's call revisions and pending approvals, and the epoch. Memory follows the records, so a
- * transition builds the next value beside its records and the engine replaces the whole value only once they
- * commit; nothing here is ever mutated, so a failed commit leaves the value it started from standing, and a
- * callback that outlives a transition reads the value as it is now by id, never a stale copy it kept. The runtime
- * a task's turn runs in (its handle, the promise of its end) is a resource, not state, and lives with the engine.
+ * transition builds the next value beside its records and the conversation's kernel machine replaces the whole
+ * value only once they commit; nothing here is ever mutated, so a failed commit leaves the value it started from
+ * standing, and a callback that outlives a transition reads the value as it is now by id, never a stale copy it
+ * kept. The runtime a task's turn runs in (its handle, the promise of its end) is a resource, not state, and lives
+ * with the engine.
  */
 export interface ConversationState {
   readonly id: string;

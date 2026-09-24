@@ -1632,6 +1632,19 @@ describe("interruption path", () => {
     expect(finished.payload.status).toBe("interrupted");
   });
 
+  it("records the killed runtime's exit after the interruption that killed it", async () => {
+    const { turn, taskId } = await submit("interrupted");
+    turn.init();
+    expect((await client.interrupt(taskId)).disposition).toBe("accepted");
+    await client.waitFor("task_finished");
+    const types = rows<{ type: string }>(
+      "SELECT type FROM events WHERE task_id = ? ORDER BY sequence",
+      taskId,
+    ).map(({ type }) => type);
+    expect(types.indexOf("runtime_exit")).toBeGreaterThan(types.indexOf("interruption_requested"));
+    expect(types.indexOf("interruption_requested")).toBeGreaterThan(-1);
+  });
+
   it("kills the runtime at shutdown even when the interruption cannot be recorded", async () => {
     const { turn } = await submitHeldCall("change");
     failNextCommit();
@@ -1788,12 +1801,17 @@ describe("runtime session", () => {
     expect(turn.options).toMatchObject({ text: "recorded", turnIndex: 1, firstTurn: true });
   });
 
-  it("fails a submission whose turn the adapter cannot start, once its task is recorded", async () => {
+  /** Make the adapter throw as it starts the next turn, as if the runtime could not be launched. */
+  const failNextLaunch = (): void => {
     const original = runtime.submitTurn.bind(runtime);
     runtime.submitTurn = () => {
       runtime.submitTurn = original;
       throw new Error("simulated launch failure");
     };
+  };
+
+  it("fails a submission whose turn the adapter cannot start, once its task is recorded", async () => {
+    failNextLaunch();
     const ack = await client.submitText("unlaunched");
     // Not answered ok, as it would be if the turn were started as an effect whose throw is only logged.
     expect(ack.disposition).toBe("failed");
@@ -1802,6 +1820,17 @@ describe("runtime session", () => {
     expect(rows("SELECT text, status FROM tasks")).toEqual([
       { text: "unlaunched", status: "running" },
     ]);
+  });
+
+  it("records the interruption of a task whose turn never started, with no runtime to interrupt", async () => {
+    failNextLaunch();
+    expect((await client.submitText("unlaunched")).disposition).toBe("failed");
+    const { id: taskId } = must(rows<{ id: string }>("SELECT id FROM tasks")[0], "task row");
+    const ack = await client.interrupt(taskId);
+    expect(ackResult(ack)).toMatchObject({ execution_epoch: 2 });
+    expect(taskStatus(taskId)).toBe("interrupting");
+    // Its interrupt_runtime effect finds no runtime running the task and does nothing, rather than failing.
+    expect(ts.logs).not.toContainEqual(expect.stringContaining("delivery failed"));
   });
 
   it("creates the session again on the turn after one whose runtime never started", async () => {
