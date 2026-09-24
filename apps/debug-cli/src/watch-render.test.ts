@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { eventView, taskView, toolCallView } from "./watch-render.ts";
-import { eventRow, executionRow, taskRow, toolCallRow } from "./watch-fixture.ts";
+import { conversationView, eventView, taskView, toolCallView } from "./watch-render.ts";
+import { conversationRow, eventRow, executionRow, taskRow, toolCallRow } from "./watch-fixture.ts";
 
 const SECRET = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
@@ -19,6 +19,7 @@ describe("watch views", () => {
     const call = toolCallView(
       toolCallRow({ redacted_arguments: JSON.stringify({ token: "super-secret-value-123456" }) }),
       [],
+      false,
     );
     const event = eventView(eventRow({ sequence: 1, payload: `{"password": "hunter2hunter2` }));
     const shown = JSON.stringify([task, call, event]);
@@ -42,8 +43,26 @@ describe("watch views", () => {
     const view = toolCallView(
       toolCallRow({ status: "denied", detail: "Mia denied mcp__d1__forbidden by policy" }),
       [],
+      false,
     );
     expect(view.summary).toContain("denied");
     expect(view.summary).toContain("✗ Mia denied mcp__d1__forbidden by policy");
+  });
+
+  it("marks a dispatched call's MCP bodies as not recorded when the conversation was captured with debug mode off", () => {
+    const marker = "not recorded (debug mode off)";
+    const dispatched = toolCallRow({ status: "completed", dispatch_event_id: "e5" });
+    expect(toolCallView(dispatched, [], false).body).toContain(marker);
+    expect(toolCallView(dispatched, [], true).body).not.toContain(marker);
+  });
+
+  it("marks nothing on a call that never reached an MCP server", () => {
+    const denied = toolCallRow({ status: "denied", detail: "Mia denied it by policy" });
+    expect(toolCallView(denied, [], false).body).not.toContain("not recorded");
+  });
+
+  it("shows on the conversation's line whether it was captured in debug mode", () => {
+    expect(conversationView(conversationRow(), false).summary).toContain("debug mode off");
+    expect(conversationView(conversationRow(), true).summary).toContain("debug mode on");
   });
 });

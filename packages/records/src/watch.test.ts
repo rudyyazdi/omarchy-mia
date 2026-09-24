@@ -9,7 +9,13 @@ import type {
   ToolCallRow,
 } from "./schema.ts";
 import { fixtureEvent, snapshotFixture } from "./snapshot-fixture.ts";
-import { watchEntriesAfter, watchTree, type WatchEntry, type WatchRows } from "./watch.ts";
+import {
+  capturedInDebugMode,
+  watchEntriesAfter,
+  watchTree,
+  type WatchEntry,
+  type WatchRows,
+} from "./watch.ts";
 
 const EXECUTION_OF: Record<string, string> = { first: "x1", second: "x2" };
 
@@ -305,6 +311,15 @@ describe("watchTree", () => {
     expect(() => watchTree({ ...finalRows(), conversations: [] })).toThrow(
       "the rows hold no conversation",
     );
+  });
+});
+
+describe("capturedInDebugMode", () => {
+  it("tells whether the conversation was captured in debug mode", () => {
+    const rows = finalRows();
+    expect(capturedInDebugMode(rows)).toBe(false);
+    rows.events.push(eventsOf(null)(21, "captured_in_debug_mode"));
+    expect(capturedInDebugMode(rows)).toBe(true);
   });
 });
 

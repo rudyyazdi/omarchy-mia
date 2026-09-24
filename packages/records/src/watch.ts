@@ -77,6 +77,15 @@ export interface WatchTree {
   events: EventRow[];
 }
 
+/**
+ * Whether the conversation was captured in debug mode, so a view can mark detail only debug mode records as
+ * "not recorded" instead of leaving a silent gap. The engine records one `captured_in_debug_mode` event in the
+ * transaction that starts the conversation when debug mode is on, and nothing when it is off, so every read that
+ * sees the conversation already sees the flag, and it never changes afterwards.
+ */
+export const capturedInDebugMode = (rows: Pick<WatchRows, "events">): boolean =>
+  rows.events.some((event) => event.type === "captured_in_debug_mode");
+
 /** A stored payload that names the tool call it is about (policy, dispatch and approval events). */
 const NamesToolCall = z.object({ tool_call_id: z.string() });
 /** A `tool_proposed` payload: the binding it announces. */

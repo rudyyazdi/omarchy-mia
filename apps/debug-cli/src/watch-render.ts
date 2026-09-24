@@ -86,8 +86,17 @@ const STOPPED_CALLS: ReadonlySet<ToolCallStatus> = new Set([
   "cancelled",
 ]);
 
-export const conversationView = (conversation: ConversationRow): NodeView => ({
-  summary: `<b>Conversation</b> ${shown(conversation.id)} ${statusHtml(conversation.status)} started ${shown(conversation.started_at)}`,
+/**
+ * What only debug mode records, marked where it would appear in a conversation captured with debug mode off, so
+ * the page never shows a silent gap (issue #6). Only a dispatched call has MCP bodies: a call denied, blocked or
+ * cancelled before dispatch never reached a server. A dispatched call is always an MCP call, since only listed
+ * `mcp__…` identities are permitted and the runtime is launched with no built-in tools.
+ */
+const NOT_RECORDED = `<p class="not-recorded">MCP request and response: not recorded (debug mode off)</p>`;
+
+/** `debugMode` is whether the conversation was captured in debug mode (`capturedInDebugMode`). */
+export const conversationView = (conversation: ConversationRow, debugMode: boolean): NodeView => ({
+  summary: `<b>Conversation</b> ${shown(conversation.id)} ${statusHtml(conversation.status)} started ${shown(conversation.started_at)} <span class="capture">debug mode ${debugMode ? "on" : "off"}</span>`,
   body: fieldsHtml({ ...conversation }),
 });
 
@@ -109,7 +118,12 @@ export const taskView = (task: TaskRow, executions: readonly ExecutionRow[]): No
   };
 };
 
-export const toolCallView = (call: ToolCallRow, approvals: readonly ApprovalRow[]): NodeView => {
+/** `debugMode` is whether the conversation was captured in debug mode (`capturedInDebugMode`). */
+export const toolCallView = (
+  call: ToolCallRow,
+  approvals: readonly ApprovalRow[],
+  debugMode: boolean,
+): NodeView => {
   const args = JSON.stringify(redactValue(parseStored(call.redacted_arguments)));
   const outcome = call.detail
     ? ` ${STOPPED_CALLS.has(call.status) ? "✗ " : ""}${escapeHtml(clipped(redactString(call.detail), 160))}`
@@ -120,6 +134,7 @@ export const toolCallView = (call: ToolCallRow, approvals: readonly ApprovalRow[
     body: [
       fieldsHtml({ ...call, redacted_arguments: parseStored(call.redacted_arguments) }),
       ...approvals.map((row) => `<h4>approval ${shown(row.id)}</h4>${fieldsHtml({ ...row })}`),
+      !debugMode && call.dispatch_event_id !== null ? NOT_RECORDED : "",
     ].join(""),
   };
 };
