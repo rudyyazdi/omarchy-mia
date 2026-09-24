@@ -37,8 +37,11 @@ export const escapeHtml = (text: string): string =>
 const shown = (text: string): string => escapeHtml(redactString(text));
 
 /** The first `length` characters of already-redacted text, so a cut never splits a secret out of view. */
-const clipped = (text: string, length = 80): string =>
-  text.length > length ? `${text.slice(0, length)}…` : text;
+const clipped = (text: string, length = 80): string => {
+  // By code point, so a cut never splits a surrogate pair.
+  const points = Array.from(text);
+  return points.length > length ? `${points.slice(0, length).join("")}…` : text;
+};
 
 /** A stored JSON column as a value; text that does not parse (a runtime line cut short) stays text. */
 const parseStored = (text: string | null): unknown => {

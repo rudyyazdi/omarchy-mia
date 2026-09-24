@@ -1,7 +1,13 @@
 import { match } from "ts-pattern";
 import { describe, expect, it } from "vitest";
 import type { WatchRows } from "@mia/records";
-import { messagesAfter, NOTHING_SENT, sseRecord, type WatchMessage } from "./watch-feed.ts";
+import {
+  messagesAfter,
+  NOTHING_SENT,
+  sseRecord,
+  type Sent,
+  type WatchMessage,
+} from "./watch-feed.ts";
 import {
   approvalRow,
   conversationRow,
@@ -26,6 +32,12 @@ const conversation = (): WatchRows =>
     ],
   });
 
+/** One poll, its messages read out as the server sends them. */
+const poll = (rows: WatchRows, sent: Sent) => {
+  const polled = messagesAfter(rows, sent);
+  return { messages: [...polled.messages], sent: polled.sent };
+};
+
 /** What a message places and where: enough to check the order and the parents without the HTML. */
 const placement = (message: WatchMessage): string =>
   match(message)
@@ -37,7 +49,7 @@ const placement = (message: WatchMessage): string =>
 
 describe("messagesAfter", () => {
   it("sends the conversation, then every node before its events, each under its parent", () => {
-    const { messages, sent } = messagesAfter(conversation(), NOTHING_SENT);
+    const { messages, sent } = poll(conversation(), NOTHING_SENT);
     expect(messages.map(placement)).toEqual([
       "conversation",
       "event under conversation",
@@ -51,15 +63,15 @@ describe("messagesAfter", () => {
 
   it("sends nothing again when nothing changed", () => {
     const rows = conversation();
-    const { sent } = messagesAfter(rows, NOTHING_SENT);
-    expect(messagesAfter(rows, sent)).toEqual({ messages: [], sent });
+    const { sent } = poll(rows, NOTHING_SENT);
+    expect(poll(rows, sent)).toEqual({ messages: [], sent });
   });
 
   it("sends only the entries after the last sequence sent", () => {
     const rows = conversation();
-    const { sent } = messagesAfter(rows, NOTHING_SENT);
+    const { sent } = poll(rows, NOTHING_SENT);
     rows.events.push(eventRow({ sequence: 4, type: "text_delta", task_id: "t1" }));
-    const next = messagesAfter(rows, sent);
+    const next = poll(rows, sent);
     expect(next.messages.map(placement)).toEqual(["event under task:t1"]);
     expect(next.messages[0]).toMatchObject({ view: { summary: expect.stringContaining("#4 ") } });
     expect(next.sent.sequence).toBe(4);
@@ -95,19 +107,26 @@ describe("messagesAfter", () => {
       shown: "42",
     },
   ])("re-sends the header of $what, once", ({ change, id, shown }) => {
-    const { sent } = messagesAfter(conversation(), NOTHING_SENT);
+    const { sent } = poll(conversation(), NOTHING_SENT);
     const changed = change(conversation());
-    const next = messagesAfter(changed, sent);
+    const next = poll(changed, sent);
     expect(next.messages).toHaveLength(1);
     expect(next.messages[0]).toMatchObject({ op: "node", id });
     expect(JSON.stringify(next.messages[0])).toContain(shown);
-    expect(messagesAfter(changed, next.sent).messages).toEqual([]);
+    expect(poll(changed, next.sent).messages).toEqual([]);
+  });
+
+  it("sends a node that enters at a sequence already sent, such as a call with no event of its own", () => {
+    const rows = conversation();
+    const { sent } = poll(rows, NOTHING_SENT);
+    rows.tool_calls.push(toolCallRow({ id: "c2", runtime_call_id: "toolu_2" }));
+    expect(poll(rows, sent).messages.map(placement)).toEqual(["node tool_call:c2 under task:t1"]);
   });
 
   it("re-sends the conversation's header once its status changes", () => {
-    const { sent } = messagesAfter(conversation(), NOTHING_SENT);
+    const { sent } = poll(conversation(), NOTHING_SENT);
     const closed = { ...conversation(), conversations: [conversationRow({ status: "closed" })] };
-    const next = messagesAfter(closed, sent);
+    const next = poll(closed, sent);
     expect(next.messages.map(placement)).toEqual(["conversation"]);
     expect(next.messages[0]).toMatchObject({
       view: { summary: expect.stringContaining("closed") },

@@ -46,21 +46,36 @@ const nodeId = (parent: WatchParent): string =>
 
 const digest = (view: NodeView): string => sha256Hex(JSON.stringify(view));
 
+/** A node's header and the id the page knows it by. */
+const nodeOf = (entry: WatchEntry & { kind: NodeKind }): { id: string; view: NodeView } =>
+  match(entry)
+    .with({ kind: "task" }, ({ task, executions }) => ({
+      id: nodeId({ level: "task", task_id: task.id }),
+      view: taskView(task, executions),
+    }))
+    .with({ kind: "tool_call" }, ({ tool_call, approvals }) => ({
+      id: nodeId({ level: "tool_call", task_id: tool_call.task_id, tool_call_id: tool_call.id }),
+      view: toolCallView(tool_call, approvals),
+    }))
+    .exhaustive();
+
 /**
  * The messages that bring a page that was sent `sent` up to date with `rows`, in the order to send them, and
  * what it has been sent once they all are. The caller adopts the new `sent` only after sending every message:
  * a task, its first event and a tool call can share one sequence, so a sequence is sent only once all of its
  * entries are.
+ *
+ * Headers are rendered up front, since `sent` needs every one of them; events, the bulk of a conversation, are
+ * rendered one at a time as `messages` is iterated, so a page's first poll never holds its whole history as HTML.
  */
 export const messagesAfter = (
   rows: WatchRows,
   sent: Sent,
-): { messages: WatchMessage[]; sent: Sent } => {
+): { messages: Iterable<WatchMessage>; sent: Sent } => {
   const conversation = rows.conversations[0];
   if (!conversation) throw new Error("the rows hold no conversation");
-  const messages: WatchMessage[] = [];
+  const entries = watchEntriesAfter(rows, -1);
   const headers = new Map<string, string>();
-  let sequence = sent.sequence;
   /** Records a header and reports whether the page lacks it: the node is new, or its row changed. */
   const changed = (id: string, view: NodeView, isNew: boolean): boolean => {
     const current = digest(view);
@@ -68,38 +83,35 @@ export const messagesAfter = (
     return isNew || sent.headers.get(id) !== current;
   };
   const header = conversationView(conversation);
-  if (changed(CONVERSATION_NODE, header, false))
-    messages.push({ op: "conversation", view: header });
-  const node = (entry: WatchEntry & { kind: NodeKind }, view: NodeView, self: WatchParent) => {
-    const id = nodeId(self);
-    const parent = nodeId(entry.parent);
+  const sendHeader = changed(CONVERSATION_NODE, header, false);
+  /** The node messages to send, by entry: at most one per task and tool call. */
+  const nodeMessages = new Map<WatchEntry, WatchMessage>();
+  for (const entry of entries) {
+    if (entry.kind === "event") continue;
+    const { id, view } = nodeOf(entry);
     if (changed(id, view, entry.sequence > sent.sequence))
-      messages.push({ op: "node", id, parent, kind: entry.kind, view });
-  };
-  for (const entry of watchEntriesAfter(rows, -1)) {
-    sequence = Math.max(sequence, entry.sequence);
-    match(entry)
-      .with({ kind: "task" }, (task) =>
-        node(task, taskView(task.task, task.executions), { level: "task", task_id: task.task.id }),
-      )
-      .with({ kind: "tool_call" }, (call) =>
-        node(call, toolCallView(call.tool_call, call.approvals), {
-          level: "tool_call",
-          task_id: call.tool_call.task_id,
-          tool_call_id: call.tool_call.id,
-        }),
-      )
-      .with({ kind: "event" }, (event) => {
-        if (event.sequence > sent.sequence)
-          messages.push({
-            op: "event",
-            parent: nodeId(event.parent),
-            view: eventView(event.event),
-          });
-      })
-      .exhaustive();
+      nodeMessages.set(entry, {
+        op: "node",
+        id,
+        parent: nodeId(entry.parent),
+        kind: entry.kind,
+        view,
+      });
   }
-  return { messages, sent: { sequence, headers } };
+  const sequence = entries.reduce((last, entry) => Math.max(last, entry.sequence), sent.sequence);
+  const lazy = {
+    *messages(): Generator<WatchMessage, undefined, undefined> {
+      if (sendHeader) yield { op: "conversation", view: header };
+      for (const entry of entries) {
+        const node = nodeMessages.get(entry);
+        if (node) yield node;
+        else if (entry.kind === "event" && entry.sequence > sent.sequence)
+          yield { op: "event", parent: nodeId(entry.parent), view: eventView(entry.event) };
+      }
+      return undefined;
+    },
+  };
+  return { messages: lazy.messages(), sent: { sequence, headers } };
 };
 
 /** One Server-Sent Event carrying `message`; JSON holds no raw line break, so it is one `data` line. */

@@ -1,6 +1,6 @@
 import { once } from "node:events";
 import { readFile } from "node:fs/promises";
-import { createServer, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { setTimeout } from "node:timers/promises";
@@ -14,20 +14,27 @@ import { messagesAfter, NOTHING_SENT, sseRecord, type Sent } from "./watch-feed.
  * committed rows, and it works the same on a finished conversation.
  */
 
-/** When to poll again, and how long a page that closed has to come back; both reject once `signal` aborts. */
+/** When to poll again, and how long to wait on a page in two cases; each rejects once `signal` aborts. */
 export interface WatchTimers {
   nextPoll: (signal: AbortSignal) => Promise<unknown>;
   /** A reload closes the page's stream before it opens a new one, so the watch waits this long before it stops. */
   reconnectGrace: (signal: AbortSignal) => Promise<unknown>;
+  /**
+   * How long stopping waits for each page to take its last records. A page that stopped reading (a frozen tab)
+   * holds its stream at a full socket, so after this its connection is dropped instead.
+   */
+  stopDrain: (signal: AbortSignal) => Promise<unknown>;
 }
 
 const POLL_INTERVAL_MS = 500;
 const RECONNECT_GRACE_MS = 3_000;
+const STOP_DRAIN_MS = 2_000;
 
 /** Neither timer holds the process open: the listening server does, until the watch stops. */
 export const WATCH_TIMERS: WatchTimers = {
   nextPoll: (signal) => setTimeout(POLL_INTERVAL_MS, undefined, { ref: false, signal }),
   reconnectGrace: (signal) => setTimeout(RECONNECT_GRACE_MS, undefined, { ref: false, signal }),
+  stopDrain: (signal) => setTimeout(STOP_DRAIN_MS, undefined, { ref: false, signal }),
 };
 
 /** Pages streaming at once. One more is refused with 503; it is a view for one person, not a service. */
@@ -66,7 +73,8 @@ const PAGE_FILES = [
  * escaping mistake from ever running script out of a recorded conversation.
  */
 const HEADERS = {
-  "content-security-policy": "default-src 'self'",
+  "content-security-policy":
+    "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   "x-content-type-options": "nosniff",
   "cache-control": "no-store",
 };
@@ -131,7 +139,10 @@ export const startWatch = async (options: WatchOptions): Promise<WatchStart> => 
     const waiting = new AbortController();
     grace = waiting;
     timers.reconnectGrace(AbortSignal.any([waiting.signal, stop.signal])).then(
-      () => halt({ kind: "page_closed" }),
+      () => {
+        // A page may have connected after the wait ended but before this ran.
+        if (streams.size === 0 && !waiting.signal.aborted) halt({ kind: "page_closed" });
+      },
       () => undefined,
     );
   };
@@ -159,9 +170,20 @@ export const startWatch = async (options: WatchOptions): Promise<WatchStart> => 
 
   /** Set once listening: only this machine's own names, so a site that rebinds its domain to 127.0.0.1 gets nothing. */
   let ownHosts: ReadonlySet<string> = new Set();
+  /**
+   * A request from this machine's own name, and not from another site open in the same browser: such a site
+   * could not read the stream, but it would still take a page's slot and keep the watch alive.
+   */
+  const ownRequest = (req: IncomingMessage): boolean => {
+    const { host, origin } = req.headers;
+    const site = req.headers["sec-fetch-site"];
+    if (!host || !ownHosts.has(host)) return false;
+    if (site === "cross-site" || site === "same-site") return false;
+    return origin === undefined || origin === `http://${host}`;
+  };
   const server = createServer((req, res) => {
-    if (!ownHosts.has(req.headers.host ?? "")) {
-      res.writeHead(403, HEADERS).end("forbidden host\n");
+    if (!ownRequest(req)) {
+      res.writeHead(403, HEADERS).end("forbidden\n");
       return;
     }
     const path = new URL(req.url ?? "/", "http://localhost").pathname;
@@ -188,9 +210,15 @@ export const startWatch = async (options: WatchOptions): Promise<WatchStart> => 
     options.signal.removeEventListener("abort", interrupted);
     const closing = once(server, "close");
     server.close();
-    // Each stream sends its last record and ends; only then is it safe to drop the connections left.
-    await Promise.all(streams);
+    // Each stream sends its last record and ends, or is dropped once the drain wait is over.
+    const drained = new AbortController();
+    await Promise.race([
+      Promise.all(streams),
+      timers.stopDrain(drained.signal).catch(() => undefined),
+    ]);
+    drained.abort();
     server.closeAllConnections();
+    await Promise.all(streams);
     await closing;
     return outcome ?? { kind: "interrupted" };
   })();

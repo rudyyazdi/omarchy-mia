@@ -1,8 +1,11 @@
+import { mkdtempSync, rmSync } from "node:fs";
 import { request } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { startWatch, type Watch, type WatchMessage, type WatchTimers } from "@mia/debug-cli";
-import { snapshotConversation, watchEntriesAfter, type Catalog } from "@mia/records";
+import { Catalog, RecordWriter, snapshotConversation, watchEntriesAfter } from "@mia/records";
 import type { MiaClient } from "@mia/text-client";
 import { ackResult, must, mustString, useScriptedSession, type TestServer } from "./harness.ts";
 import type { ScriptedRuntime } from "./scripted-runtime.ts";
@@ -30,7 +33,8 @@ const WatchMessageSchema = z.discriminatedUnion("op", [
 
 /**
  * A timer the test fires by hand: `fire` waits until the watch waits on it, then ends that wait. A wait that
- * aborts leaves, so a fire never lands on a stream that is gone.
+ * aborts leaves, so a fire never lands on a stream that is gone. One test caller at a time: `waiting` and
+ * `fire` share one arrival, and with several waits `fire` ends the oldest.
  */
 const manualTimer = () => {
   const waits = new Set<PromiseWithResolvers<undefined>>();
@@ -61,6 +65,8 @@ const manualTimer = () => {
     },
     /** Resolves once something waits on the timer. */
     waiting,
+    /** How many waits are pending. */
+    pending: () => waits.size,
     fire: async (): Promise<void> => {
       await waiting();
       const [wait] = waits;
@@ -131,7 +137,10 @@ const openPage = async (url: string): Promise<Page> => {
   return page;
 };
 
-/** Every message a page is sent on connecting: the conversation's header, then one per entry. */
+/**
+ * Every message a page is sent on connecting: the conversation's header, then one per entry. It reads its own
+ * snapshot, so it holds only while the conversation is idle between the watch's first poll and this read.
+ */
 const initialCount = (catalog: Catalog, conversationId: string): number =>
   1 + watchEntriesAfter(snapshotConversation(catalog, conversationId).tables, -1).length;
 
@@ -140,16 +149,24 @@ interface Watching {
   catalog: Catalog;
   poll: ReturnType<typeof manualTimer>;
   grace: ReturnType<typeof manualTimer>;
+  drain: ReturnType<typeof manualTimer>;
   interrupt: AbortController;
 }
 
 let watching: Watching | null = null;
-const watchConversation = async (conversationId: string): Promise<Watching> => {
-  const catalog = ts.catalog();
+const watchConversation = async (
+  conversationId: string,
+  catalog: Catalog = ts.catalog(),
+): Promise<Watching> => {
   const poll = manualTimer();
   const grace = manualTimer();
+  const drain = manualTimer();
   const interrupt = new AbortController();
-  const timers: WatchTimers = { nextPoll: poll.wait, reconnectGrace: grace.wait };
+  const timers: WatchTimers = {
+    nextPoll: poll.wait,
+    reconnectGrace: grace.wait,
+    stopDrain: drain.wait,
+  };
   try {
     const started = await startWatch({
       catalog,
@@ -158,7 +175,7 @@ const watchConversation = async (conversationId: string): Promise<Watching> => {
       timers,
     });
     if (started.kind !== "watching") throw new Error(`could not watch ${conversationId}`);
-    watching = { watch: started.watch, catalog, poll, grace, interrupt };
+    watching = { watch: started.watch, catalog, poll, grace, drain, interrupt };
     return watching;
   } catch (error) {
     catalog.close();
@@ -169,10 +186,12 @@ const watchConversation = async (conversationId: string): Promise<Watching> => {
 afterEach(async () => {
   for (const page of pages.splice(0)) page.close();
   if (!watching) return;
-  const { watch, catalog, interrupt } = watching;
+  const { watch, catalog, interrupt, drain } = watching;
   watching = null;
   interrupt.abort();
   try {
+    // A test that failed may leave a page that never reads; the drain wait ends its stream.
+    await Promise.race([watch.ended, drain.fire()]);
     await watch.ended;
   } finally {
     catalog.close();
@@ -193,12 +212,12 @@ const watchWithPage = async (): Promise<Watching & { page: Page }> => {
 const statusOf = (message: NodeMessage): string | undefined =>
   /class="status status-([a-z_]+)"/.exec(message.view.summary)?.[1];
 
-/** A request with a Host header the test chooses, which fetch does not allow. */
-const get = (url: string, host: string) => {
+/** A request with headers the test chooses (Host, Origin, Sec-Fetch-Site), which fetch does not allow. */
+const get = (url: string, headers: Record<string, string>) => {
   const { promise, resolve, reject } = Promise.withResolvers<number>();
   const target = new URL(url);
   const sent = request(
-    { hostname: target.hostname, port: target.port, path: "/", headers: { host } },
+    { hostname: target.hostname, port: target.port, path: "/events", headers },
     (res) => {
       res.resume();
       resolve(res.statusCode ?? 0);
@@ -210,7 +229,8 @@ const get = (url: string, host: string) => {
 };
 
 describe("mia debug watch", () => {
-  it("shows a finished conversation's whole tree, with sensitive values redacted", async () => {
+  // The token is also redacted before it is stored, so the view's own redaction is covered by watch-render.test.ts.
+  it("shows a finished conversation's whole tree, each node under its parent, without the token", async () => {
     const next = runtime.nextTurn();
     const taskId = mustString(ackResult(await client.submitText("change it")).task_id, "task id");
     const turn = await next;
@@ -315,7 +335,11 @@ describe("mia debug watch", () => {
         catalog,
         conversationId: "conv_unknown",
         signal: AbortSignal.abort(),
-        timers: { nextPoll: manualTimer().wait, reconnectGrace: manualTimer().wait },
+        timers: {
+          nextPoll: manualTimer().wait,
+          reconnectGrace: manualTimer().wait,
+          stopDrain: manualTimer().wait,
+        },
       });
       expect(started).toEqual({ kind: "unknown_conversation" });
     } finally {
@@ -347,6 +371,7 @@ describe("mia debug watch", () => {
     first.close();
     await grace.waiting();
     const reloaded = await openPage(watch.url);
+    expect(grace.pending()).toBe(0);
     expect((await reloaded.next()).op).toBe("conversation");
     interrupt.abort();
     expect(await watch.ended).toEqual({ kind: "interrupted" });
@@ -356,9 +381,65 @@ describe("mia debug watch", () => {
     const { watch } = await watchConversation(conversationId());
     const page = await fetch(watch.url);
     expect(page.status).toBe(200);
-    expect(page.headers.get("content-security-policy")).toBe("default-src 'self'");
+    expect(page.headers.get("content-security-policy")).toContain("default-src 'self'");
     expect(await page.text()).toContain('<script type="module" src="watch.js">');
     expect((await fetch(new URL("missing", watch.url))).status).toBe(404);
-    expect(await get(watch.url, "rebound.example")).toBe(403);
+    const host = new URL(watch.url).host;
+    expect(await get(watch.url, { host: "rebound.example" })).toBe(403);
+    expect(await get(watch.url, { host, "sec-fetch-site": "cross-site" })).toBe(403);
+    expect(await get(watch.url, { host, origin: "http://elsewhere.example" })).toBe(403);
+  });
+
+  it("refuses a page beyond its limit", async () => {
+    const { watch } = await watchConversation(conversationId());
+    for (let open = 0; open < 4; open += 1) await (await openPage(watch.url)).next();
+    const refused = await fetch(new URL("events", watch.url));
+    expect(refused.status).toBe(503);
+    await refused.body?.cancel();
+  });
+
+  it("tells the page and stops when the catalog can no longer be read", async () => {
+    const { watch, page, poll, catalog } = await watchWithPage();
+    catalog.close();
+    await poll.fire();
+    expect(await page.next()).toEqual({
+      op: "stopped",
+      message: "the watch stopped after an error",
+    });
+    expect(await watch.ended).toMatchObject({ kind: "failed" });
+  });
+
+  it("stops on Ctrl-C even when a page stopped reading", async () => {
+    // Enough history that the page's stream stalls at a full socket before it is all sent.
+    const dir = mkdtempSync(join(tmpdir(), "mia-watch-"));
+    try {
+      const writable = Catalog.openSync(dir);
+      const stalled = writable.transaction(() => {
+        const writer = new RecordWriter(writable);
+        const provenanceSetId = writer.createProvenanceSet("watch backpressure");
+        const { id } = writer.createConversation({ provenanceSetId, runtimeConversationId: "rt" });
+        for (let index = 0; index < 200; index += 1)
+          writer.appendEvent({
+            conversationId: id,
+            type: "text_delta",
+            payload: { text: "x".repeat(64 * 1024) },
+          });
+        return id;
+      });
+      writable.close();
+      const { watch, drain, interrupt } = await watchConversation(
+        stalled,
+        Catalog.openSync(dir, { readonly: true }),
+      );
+      const unread = new AbortController();
+      const response = await fetch(new URL("events", watch.url), { signal: unread.signal });
+      expect(response.status).toBe(200);
+      interrupt.abort();
+      await drain.fire();
+      expect(await watch.ended).toEqual({ kind: "interrupted" });
+      unread.abort();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

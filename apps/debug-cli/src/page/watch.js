@@ -104,5 +104,8 @@ source.addEventListener("message", (event) => {
   handlers[message.op]?.(message);
 });
 source.addEventListener("error", () => {
-  if (source.readyState !== EventSource.CLOSED) state.textContent = "disconnected; reconnecting…";
+  state.textContent =
+    source.readyState === EventSource.CLOSED
+      ? "the watch refused this page (too many pages, or it is stopping)"
+      : "disconnected; reconnecting…";
 });
