@@ -13,10 +13,10 @@ import type {
   ObjectStore,
   ProvenanceEntryRow,
   ProvenanceRole,
-  RecordWriter,
   StoredObject,
 } from "@mia/records";
 import type { BuildInfo } from "./build-info.ts";
+import type { EngineRecord } from "./engine-records.ts";
 
 /**
  * What the running server is: the runtime it launches and the source tree it loaded. `startServer`
@@ -137,7 +137,7 @@ const json = (value: unknown): Uint8Array => Buffer.from(JSON.stringify(value, n
  * Decides everything that shaped this conversation, to be retained immutably, except the runtime and build
  * identity, which record the server as it was at startup (see `ServerIdentity`). Later edits to the prompt,
  * configuration or source tree do not change retained objects. Pure: the files were read beforehand, and
- * `storeProvenance` then `recordConversationProvenance` do the I/O.
+ * `storeProvenance` does the I/O, and `provenanceRecords` builds the rows.
  */
 export const planConversationProvenance = (input: {
   profile: Profile;
@@ -330,25 +330,35 @@ export const nameProvenance = (
   ),
 });
 
-/** Records a stored, named provenance plan (inside the start's transaction), stamped `createdAt`; it does no file I/O. */
-export const recordConversationProvenance = (
-  writer: RecordWriter,
+/**
+ * The records of a stored, named provenance plan, stamped `createdAt`, and the summary they record. Pure: the bytes
+ * were stored and the ids drawn beforehand, so the start's transaction commits these rows and does no file I/O.
+ */
+export const provenanceRecords = (
   plan: NamedProvenancePlan,
   createdAt: string,
-): ProvenanceSummary => {
+): { records: EngineRecord[]; summary: ProvenanceSummary } => {
   const { setId } = plan;
-  writer.createProvenanceSet({ id: setId, createdAt, description: plan.description });
+  const records: EngineRecord[] = [
+    {
+      kind: "create_provenance_set",
+      input: { id: setId, createdAt, description: plan.description },
+    },
+  ];
   const entries: ProvenanceSummary["entries"] = [];
   const artifacts = new Map<ProvenanceRole, string>();
   let promptDigest: string | null = null;
   for (const item of plan.items) {
     if (item.availability === "unavailable") {
-      writer.addProvenanceEntry({
-        id: item.entryId,
-        provenanceSetId: setId,
-        role: item.role,
-        availability: "unavailable",
-        reason: item.reason,
+      records.push({
+        kind: "add_provenance_entry",
+        input: {
+          id: item.entryId,
+          provenanceSetId: setId,
+          role: item.role,
+          availability: "unavailable",
+          reason: item.reason,
+        },
       });
       entries.push({
         role: item.role,
@@ -359,23 +369,31 @@ export const recordConversationProvenance = (
       continue;
     }
     const { artifactId } = item;
-    writer.registerArtifact({
-      id: artifactId,
-      createdAt,
-      kind: "snapshot",
-      logicalName: item.logicalName,
-      mimeType: item.mime,
-      schemaVersion: item.version,
-      stored: item.content,
-    });
-    writer.addProvenanceEntry({
-      id: item.entryId,
-      provenanceSetId: setId,
-      role: item.role,
-      version: item.version,
-      artifactId,
-      availability: "retained",
-    });
+    records.push(
+      {
+        kind: "register_artifact",
+        input: {
+          id: artifactId,
+          createdAt,
+          kind: "snapshot",
+          logicalName: item.logicalName,
+          mimeType: item.mime,
+          schemaVersion: item.version,
+          stored: item.content,
+        },
+      },
+      {
+        kind: "add_provenance_entry",
+        input: {
+          id: item.entryId,
+          provenanceSetId: setId,
+          role: item.role,
+          version: item.version,
+          artifactId,
+          availability: "retained",
+        },
+      },
+    );
     entries.push({
       role: item.role,
       availability: "retained",
@@ -389,28 +407,43 @@ export const recordConversationProvenance = (
   const build = artifacts.get("server_build");
   const localChanges = artifacts.get("server_local_changes");
   if (build !== undefined && localChanges !== undefined)
-    writer.addDependency(build, localChanges, "local_changes");
+    records.push({
+      kind: "add_dependency",
+      parentArtifactId: build,
+      requiredArtifactId: localChanges,
+      relation: "local_changes",
+    });
   return {
-    provenance_set_id: setId,
-    agent_prompt_digest: promptDigest,
-    ...plan.summary,
-    entries,
+    records,
+    summary: {
+      provenance_set_id: setId,
+      agent_prompt_digest: promptDigest,
+      ...plan.summary,
+      entries,
+    },
   };
 };
 
-/** Links every artifact a recorded provenance plan retained into its conversation (inside the start's transaction). */
-export const linkConversationProvenance = (
-  writer: RecordWriter,
-  input: { conversationId: string; plan: NamedProvenancePlan },
-): void => {
+/** The records linking every artifact a provenance plan retains into its conversation. */
+export const provenanceLinks = (input: {
+  conversationId: string;
+  plan: NamedProvenancePlan;
+}): EngineRecord[] => {
   const { conversationId, plan } = input;
-  for (const item of plan.items)
-    if (item.availability === "retained")
-      writer.linkArtifact({
-        id: item.linkId,
-        conversationId,
-        artifactId: item.artifactId,
-        relation: "provenance",
-        provenanceSetId: plan.setId,
-      });
+  return plan.items.flatMap((item): EngineRecord[] =>
+    item.availability === "retained"
+      ? [
+          {
+            kind: "link_artifact",
+            input: {
+              id: item.linkId,
+              conversationId,
+              artifactId: item.artifactId,
+              relation: "provenance",
+              provenanceSetId: plan.setId,
+            },
+          },
+        ]
+      : [],
+  );
 };

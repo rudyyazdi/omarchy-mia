@@ -63,11 +63,17 @@ import {
   type McpBody,
 } from "./mcp-bodies.ts";
 import {
-  linkConversationProvenance,
+  commitRecords,
+  eventSequence,
+  type CommittedChange,
+  type EngineRecord,
+} from "./engine-records.ts";
+import {
   nameProvenance,
   planConversationProvenance,
+  provenanceLinks,
+  provenanceRecords,
   readConversationFiles,
-  recordConversationProvenance,
   storeProvenance,
   type ProvenancePlan,
   type ServerIdentity,
@@ -408,13 +414,17 @@ const abandonedStart = (pending: PendingStart): CommandResult | null =>
       )
     : null;
 
-/** State changes and effects a transaction queues; neither runs unless it commits. */
+/**
+ * The records, state changes and effects a transaction queues. The records commit together; the state changes and
+ * effects run only once they have, and each effect is handed what the commit changed.
+ */
 interface CommitQueue {
+  records: EngineRecord[];
   state: (() => void)[];
-  effects: (() => void)[];
+  effects: ((changes: readonly CommittedChange[]) => void)[];
 }
 
-const emptyQueue = (): CommitQueue => ({ state: [], effects: [] });
+const emptyQueue = (): CommitQueue => ({ records: [], state: [], effects: [] });
 
 /** Effective effort reported by one PreToolUse hook record: `effort.level`, a bare `effort`, else CLAUDE_EFFORT. */
 const effortLevelOf = (hook: Record<string, unknown>): unknown => {
@@ -516,16 +526,19 @@ export class Engine {
   // ---------------------------------------------------------------- event plumbing
 
   /**
-   * Write `records` in one catalog transaction. A failed commit throws, applies no queued state change and
+   * Run one transition: `build` queues its records without touching the catalog, then `commitRecords` writes them in
+   * one catalog transaction. A build or commit that throws commits nothing, applies no queued state change and
    * performs no queued effect, so nothing is released or delivered. After a commit the queued state changes
    * apply, then each effect runs on its own: one that throws is logged as a delivery failure, never reported
    * as a persistence failure, and the records, the state, and the remaining effects stand.
    */
-  private tx<T>(records: () => T): T {
+  private tx<T>(build: () => T): T {
     let result: T;
+    let changes: CommittedChange[];
     this.transactionTime = this.deps.now().toISOString();
     try {
-      result = this.deps.catalog.transaction(records);
+      result = build();
+      changes = commitRecords(this.deps.writer, this.queued.records);
     } catch (error) {
       this.queued = emptyQueue();
       throw error;
@@ -537,12 +550,18 @@ export class Engine {
     for (const apply of state) apply();
     for (const effect of effects) {
       try {
-        effect();
+        effect(changes);
       } catch (error) {
         this.deps.log(`delivery failed after commit; records stand: ${errorMessage(error)}`);
       }
     }
     return result;
+  }
+
+  /** Queue a record for the transaction in progress to commit (inside tx). */
+  private write(...records: EngineRecord[]): void {
+    if (this.transactionTime === null) throw new Error("engine records only inside a transaction");
+    this.queued.records.push(...records);
   }
 
   /**
@@ -553,8 +572,11 @@ export class Engine {
     this.queued.state.push(apply);
   }
 
-  /** Queue an effect (client delivery or runtime answer) for after the commit and its state changes (inside tx). */
-  private afterCommit(effect: () => void): void {
+  /**
+   * Queue an effect (client delivery or runtime answer) for after the commit and its state changes (inside tx); it is
+   * handed what the commit changed.
+   */
+  private afterCommit(effect: (changes: readonly CommittedChange[]) => void): void {
     this.queued.effects.push(effect);
   }
 
@@ -571,32 +593,31 @@ export class Engine {
     });
   }
 
-  /** Persist an event (inside tx) and queue its delivery with the persisted id and sequence. */
-  private emit(event: OutgoingEvent, opts: EventOpts): { id: string; sequence: number } {
-    const ev = this.record(event.type, event.payload, opts);
-    this.afterCommit(() => this.deliver(event, { id: ev.id, sequence: ev.sequence }));
-    return ev;
+  /** Persist an event (inside tx) and queue its delivery with the id it was given and the sequence it committed at. */
+  private emit(event: OutgoingEvent, opts: EventOpts): void {
+    this.record(event.type, event.payload, opts);
+    this.afterCommit((changes) =>
+      this.deliver(event, { id: opts.id, sequence: eventSequence(changes, opts.id) }),
+    );
   }
 
   /** Persist evidence that has no client-facing schema (inside tx). */
-  private record(
-    type: JournalEventType,
-    payload: unknown,
-    opts: EventOpts,
-  ): { id: string; sequence: number } {
-    const appended = this.deps.writer.appendEvent({
-      id: opts.id,
-      receivedAt: this.recordedAt,
-      conversationId: this.activeConversation.id,
-      type,
-      payload,
-      taskId: opts.taskId ?? null,
-      executionId: opts.executionId ?? null,
-      clientId: this.activeClientId,
-      clientConnectionId: this.activeConnectionId,
-      causedByEventId: opts.causedBy ?? null,
+  private record(type: JournalEventType, payload: unknown, opts: EventOpts): void {
+    this.write({
+      kind: "append_event",
+      input: {
+        id: opts.id,
+        receivedAt: this.recordedAt,
+        conversationId: this.activeConversation.id,
+        type,
+        payload,
+        taskId: opts.taskId ?? null,
+        executionId: opts.executionId ?? null,
+        clientId: this.activeClientId,
+        clientConnectionId: this.activeConnectionId,
+        causedByEventId: opts.causedBy ?? null,
+      },
     });
-    return { id: appended.id, sequence: appended.sequence };
   }
 
   /** Unpersisted status notification (tool call progress); the durable evidence is the underlying events. */
@@ -751,18 +772,28 @@ export class Engine {
       // conversation; the catch below restores it.
       return this.tx(() => {
         const startedAt = this.recordedAt;
-        const provenance = recordConversationProvenance(writer, ids.provenance, startedAt);
+        const { records: provenanceRows, summary: provenance } = provenanceRecords(
+          ids.provenance,
+          startedAt,
+        );
         const runtimeConversationId = ids.runtimeConversation;
         const conversationId = ids.conversation;
-        const conv = writer.createConversation({
-          id: conversationId,
-          startedAt,
-          provenanceSetId: provenance.provenance_set_id,
-          runtimeConversationId,
+        this.write(...provenanceRows, {
+          kind: "create_conversation",
+          input: {
+            id: conversationId,
+            startedAt,
+            provenanceSetId: provenance.provenance_set_id,
+            runtimeConversationId,
+          },
         });
-        linkConversationProvenance(writer, { conversationId, plan: ids.provenance });
+        this.write(...provenanceLinks({ conversationId, plan: ids.provenance }));
         if (previous.conversation)
-          writer.updateConversation(previous.conversation.id, { status: "closed" });
+          this.write({
+            kind: "update_conversation",
+            id: previous.conversation.id,
+            fields: { status: "closed" },
+          });
         // Every turn of this conversation appends the prompt bytes recorded in provenance: the runtime reads the
         // retained object itself, so no second read of the prompt file or copy of it can drift from the record.
         const promptFile =
@@ -773,7 +804,7 @@ export class Engine {
           id: conversationId,
           runtimeConversationId,
           provenanceSetId: provenance.provenance_set_id,
-          directory: conv.directory,
+          directory: writer.conversationDirectory({ id: conversationId, startedAt }),
           promptFile,
           turnCount: 0,
           sessionStarted: false,
@@ -828,7 +859,7 @@ export class Engine {
           : "wait for it to finish or interrupt it";
       return fail("busy", `task ${this.task.id} is ${this.task.status}; ${hint}`);
     }
-    const { writer, profile } = this.deps;
+    const { profile } = this.deps;
     const epoch = conversation.epoch + 1;
     const turnIndex = conversation.turnCount + 1;
     const note = conversation.pendingNote;
@@ -838,25 +869,33 @@ export class Engine {
     const ids = { submitted: this.newId("evt"), started: this.newId("evt") };
     try {
       this.tx(() => {
-        writer.createTask({
-          id: taskId,
-          createdAt: this.recordedAt,
-          conversationId: conversation.id,
-          text: payload.text,
-          clientId: ctx.clientId,
-        });
-        writer.createExecution({
-          id: executionId,
-          startedAt: this.recordedAt,
-          taskId,
-          conversationId: conversation.id,
-          runtimeIdentity: RUNTIME_IDENTITY,
-          runtimeConversationId: conversation.runtimeConversationId,
-          requestedModel: profile.runtime.model,
-          requestedEffort: profile.runtime.effort,
-          provenanceSetId: conversation.provenanceSetId,
-          executionEpoch: epoch,
-        });
+        this.write(
+          {
+            kind: "create_task",
+            input: {
+              id: taskId,
+              createdAt: this.recordedAt,
+              conversationId: conversation.id,
+              text: payload.text,
+              clientId: ctx.clientId,
+            },
+          },
+          {
+            kind: "create_execution",
+            input: {
+              id: executionId,
+              startedAt: this.recordedAt,
+              taskId,
+              conversationId: conversation.id,
+              runtimeIdentity: RUNTIME_IDENTITY,
+              runtimeConversationId: conversation.runtimeConversationId,
+              requestedModel: profile.runtime.model,
+              requestedEffort: profile.runtime.effort,
+              provenanceSetId: conversation.provenanceSetId,
+              executionEpoch: epoch,
+            },
+          },
+        );
         const opts = { taskId, executionId };
         this.record(
           "task_submitted",
@@ -1018,22 +1057,25 @@ export class Engine {
     const { call, change } = decided;
     try {
       this.tx(() => {
-        const { writer } = this.deps;
-        const resolved = this.emit(
+        this.emit(
           this.approvalResolved(task, { approvalId, callId: call.id, status: decided.approval }),
           { ...this.taskOpts(task), id: ids.resolved },
         );
-        writer.updateApproval(approvalId, {
-          status: decided.approval,
-          consumedAt: this.recordedAt,
-          decisionEventId: resolved.id,
-          decisionClientId: ctx.clientId,
+        this.write({
+          kind: "update_approval",
+          id: approvalId,
+          fields: {
+            status: decided.approval,
+            consumedAt: this.recordedAt,
+            decisionEventId: ids.resolved,
+            decisionClientId: ctx.clientId,
+          },
         });
         if (decided.release)
           this.recordDispatch(task, call, {
             id: ids.dispatched,
             via: "approval",
-            causedBy: resolved.id,
+            causedBy: ids.resolved,
           });
         else this.recordCallChange(change);
         this.recordTaskStatus(task, decided.taskStatus);
@@ -1105,7 +1147,7 @@ export class Engine {
     const opts = this.taskOpts(task);
     try {
       this.tx(() => {
-        const requested = this.emit(
+        this.emit(
           {
             type: "interruption_requested",
             payload: {
@@ -1117,8 +1159,12 @@ export class Engine {
           { ...opts, id: requestedEventId },
         );
         for (const change of interruption.approvals)
-          this.recordApprovalChange(task, change, { decisionEventId: requested.id });
-        this.deps.writer.updateTask(task.id, { status: interruption.task.status });
+          this.recordApprovalChange(task, change, { decisionEventId: requestedEventId });
+        this.write({
+          kind: "update_task",
+          id: task.id,
+          fields: { status: interruption.task.status },
+        });
         this.onCommit(() => {
           task.status = interruption.task.status;
           task.gateOpen = interruption.task.gateOpen;
@@ -1155,27 +1201,29 @@ export class Engine {
     const ids = { event: this.newId("evt"), diagnostics: this.newId("diag") };
     try {
       this.tx(() => {
-        const ev = conversationId
-          ? this.record(
-              "client_diagnostics",
-              {
-                client_id: ctx.clientId,
-                captured_at: payload.diagnostics.captured_at,
-                connection_state: payload.diagnostics.connection_state,
-              },
-              { id: ids.event, taskId: this.task?.id ?? null },
-            )
-          : null;
-        this.deps.writer.recordDiagnostics({
-          id: ids.diagnostics,
-          receivedAt: this.recordedAt,
-          conversationId,
-          clientId: ctx.clientId,
-          clientConnectionId: ctx.connectionId,
-          taskId: this.task?.id ?? null,
-          eventId: ev?.id ?? null,
-          capturedAt: payload.diagnostics.captured_at,
-          state: payload.diagnostics,
+        if (conversationId)
+          this.record(
+            "client_diagnostics",
+            {
+              client_id: ctx.clientId,
+              captured_at: payload.diagnostics.captured_at,
+              connection_state: payload.diagnostics.connection_state,
+            },
+            { id: ids.event, taskId: this.task?.id ?? null },
+          );
+        this.write({
+          kind: "record_diagnostics",
+          input: {
+            id: ids.diagnostics,
+            receivedAt: this.recordedAt,
+            conversationId,
+            clientId: ctx.clientId,
+            clientConnectionId: ctx.connectionId,
+            taskId: this.task?.id ?? null,
+            eventId: conversationId ? ids.event : null,
+            capturedAt: payload.diagnostics.captured_at,
+            state: payload.diagnostics,
+          },
         });
       });
       return { ok: true };
@@ -1316,11 +1364,15 @@ export class Engine {
     change: ApprovalChange,
     cause: { decisionEventId: string | null } = { decisionEventId: null },
   ): void {
-    this.deps.writer.updateApproval(change.approvalId, {
-      status: change.status,
-      consumedAt: this.recordedAt,
-      reason: change.reason,
-      ...(cause.decisionEventId ? { decisionEventId: cause.decisionEventId } : {}),
+    this.write({
+      kind: "update_approval",
+      id: change.approvalId,
+      fields: {
+        status: change.status,
+        consumedAt: this.recordedAt,
+        reason: change.reason,
+        ...(cause.decisionEventId ? { decisionEventId: cause.decisionEventId } : {}),
+      },
     });
     this.emit(this.approvalResolved(task, change), {
       ...this.taskOpts(task),
@@ -1330,10 +1382,14 @@ export class Engine {
   }
 
   private recordCallChange(change: CallChange): void {
-    this.deps.writer.updateToolCall(change.callId, {
-      updatedAt: this.recordedAt,
-      status: change.status,
-      ...(change.detail ? { detail: change.detail } : {}),
+    this.write({
+      kind: "update_tool_call",
+      id: change.callId,
+      fields: {
+        updatedAt: this.recordedAt,
+        status: change.status,
+        ...(change.detail ? { detail: change.detail } : {}),
+      },
     });
   }
 
@@ -1343,7 +1399,7 @@ export class Engine {
     call: ToolCallState,
     cause: { id: string; via: "approval" | "policy"; causedBy: string },
   ): void {
-    const dispatched = this.record(
+    this.record(
       "tool_dispatched",
       {
         tool_call_id: call.id,
@@ -1354,10 +1410,10 @@ export class Engine {
       },
       { ...this.taskOpts(task), id: cause.id, causedBy: cause.causedBy },
     );
-    this.deps.writer.updateToolCall(call.id, {
-      updatedAt: this.recordedAt,
-      status: "dispatched",
-      dispatchEventId: dispatched.id,
+    this.write({
+      kind: "update_tool_call",
+      id: call.id,
+      fields: { updatedAt: this.recordedAt, status: "dispatched", dispatchEventId: cause.id },
     });
   }
 
@@ -1541,7 +1597,11 @@ export class Engine {
           })
           .with({ type: "runtime_init" }, ({ init }) => {
             this.record("runtime_init", init.evidence, opts);
-            this.deps.writer.updateExecution(task.executionId, { reportedModel: init.model });
+            this.write({
+              kind: "update_execution",
+              id: task.executionId,
+              fields: { reportedModel: init.model },
+            });
             this.onCommit(() => {
               task.reportedModel = init.model;
               conversation.sessionStarted = true;
@@ -1571,7 +1631,7 @@ export class Engine {
               return;
             }
             const digest = canonicalDigest(proposed.arguments);
-            const proposal = this.record(
+            this.record(
               "tool_proposed",
               {
                 runtime_call_id: proposed.runtimeCallId,
@@ -1587,9 +1647,10 @@ export class Engine {
               digest,
             });
             if (binding.kind === "attach") {
-              this.deps.writer.updateToolCall(binding.call.id, {
-                updatedAt: this.recordedAt,
-                proposalEventId: proposal.id,
+              this.write({
+                kind: "update_tool_call",
+                id: binding.call.id,
+                fields: { updatedAt: this.recordedAt, proposalEventId: ids.event },
               });
               return;
             }
@@ -1608,7 +1669,7 @@ export class Engine {
               digest,
               args: proposed.arguments,
               policy,
-              proposalEventId: proposal.id,
+              proposalEventId: ids.event,
             });
             this.afterCommit(() => this.notifyToolCall(task, state));
           })
@@ -1616,7 +1677,7 @@ export class Engine {
             this.record("assistant_message", message.message, opts);
           })
           .with({ type: "tool_result" }, (toolResult) => {
-            const result = this.record(
+            this.record(
               "tool_result",
               {
                 runtime_call_id: toolResult.runtimeCallId,
@@ -1637,13 +1698,13 @@ export class Engine {
             }
             const { call } = binding;
             const status = statusAfterResult(call.status, toolResult.isError);
-            this.deps.writer.updateToolCall(call.id, {
-              updatedAt: this.recordedAt,
-              status,
-              resultEventId: result.id,
+            this.write({
+              kind: "update_tool_call",
+              id: call.id,
+              fields: { updatedAt: this.recordedAt, status, resultEventId: ids.event },
             });
             if (status === "completed" && output)
-              this.registerToolOutput({ task, call, ...output, eventId: result.id });
+              this.registerToolOutput({ task, call, ...output, eventId: ids.event });
             for (const body of read.bodies ?? [])
               this.record(
                 MCP_BODY_EVENT[body.direction],
@@ -1651,7 +1712,7 @@ export class Engine {
                 {
                   ...links,
                   id: body.eventId,
-                  causedBy: result.id,
+                  causedBy: ids.event,
                 },
               );
             this.onCommit(() => {
@@ -1661,13 +1722,17 @@ export class Engine {
           })
           .with({ type: "turn_result" }, ({ summary }) => {
             this.record("runtime_result", summary.evidence, opts);
-            this.deps.writer.updateExecution(task.executionId, {
-              usage: {
-                usage: summary.usage,
-                totalCostUsd: summary.totalCostUsd,
-                durationMs: summary.durationMs,
-                durationApiMs: summary.durationApiMs,
-                numTurns: summary.numTurns,
+            this.write({
+              kind: "update_execution",
+              id: task.executionId,
+              fields: {
+                usage: {
+                  usage: summary.usage,
+                  totalCostUsd: summary.totalCostUsd,
+                  durationMs: summary.durationMs,
+                  durationApiMs: summary.durationApiMs,
+                  numTurns: summary.numTurns,
+                },
               },
             });
           })
@@ -1703,20 +1768,23 @@ export class Engine {
     const { id, runtimeCallId, toolIdentity, digest, policy, proposalEventId } = input;
     const revision = (task.calls.get(runtimeCallId)?.at(-1)?.revision ?? 0) + 1;
     const redactedArguments = redactValue(input.args);
-    this.deps.writer.createToolCall({
-      id,
-      createdAt: this.recordedAt,
-      conversationId: this.activeConversation.id,
-      taskId: task.id,
-      executionId: task.executionId,
-      runtimeCallId,
-      bindingRevision: revision,
-      toolIdentity,
-      argumentDigest: digest,
-      redactedArguments,
-      policy,
-      status: "proposed",
-      proposalEventId,
+    this.write({
+      kind: "create_tool_call",
+      input: {
+        id,
+        createdAt: this.recordedAt,
+        conversationId: this.activeConversation.id,
+        taskId: task.id,
+        executionId: task.executionId,
+        runtimeCallId,
+        bindingRevision: revision,
+        toolIdentity,
+        argumentDigest: digest,
+        redactedArguments,
+        policy,
+        status: "proposed",
+        proposalEventId,
+      },
     });
     const state: ToolCallState = {
       id,
@@ -1774,7 +1842,7 @@ export class Engine {
    * records and in memory alike (a superseded approval resumes the task, then the new revision's ask holds it).
    */
   private recordTaskStatus(task: TaskState, status: TaskStatus): void {
-    this.deps.writer.updateTask(task.id, { status });
+    this.write({ kind: "update_task", id: task.id, fields: { status } });
     this.onCommit(() => {
       task.status = status;
     });
@@ -1836,7 +1904,7 @@ export class Engine {
               next: { toolIdentity: req.toolName, digest },
               resolvedEventId: ids.resolved,
             });
-          const proposal = this.record(
+          this.record(
             "tool_proposed",
             {
               runtime_call_id: runtimeCallId,
@@ -1854,10 +1922,10 @@ export class Engine {
             digest,
             args: req.input,
             policy,
-            proposalEventId: proposal.id,
+            proposalEventId: ids.proposal,
           });
         }
-        const evaluation = this.record(
+        this.record(
           "policy_evaluated",
           {
             tool_call_id: bound.id,
@@ -1873,7 +1941,7 @@ export class Engine {
           task,
           call: bound,
           rule,
-          evaluationId: evaluation.id,
+          evaluationId: ids.evaluation,
           ids,
         });
         this.afterCommit(() => this.notifyToolCall(task, bound));
@@ -2001,7 +2069,7 @@ export class Engine {
       })
       .with({ kind: "ask" }, (): PermissionAnswer => {
         const approvalId = ids.approval;
-        const requested = this.emit(
+        this.emit(
           {
             type: "approval_requested",
             payload: {
@@ -2023,17 +2091,23 @@ export class Engine {
         );
         // Durable pending approval bound to (conversation, task, runtime call, revision, tool, digest, epoch), and
         // to the event that asked for it: its id was chosen first, so the event could name it before it existed.
-        this.deps.writer.createApproval({
-          id: approvalId,
-          requestedAt: this.recordedAt,
-          toolCallId: call.id,
-          executionEpoch: task.epoch,
-          requestingEventId: requested.id,
-        });
-        this.deps.writer.updateToolCall(call.id, {
-          updatedAt: this.recordedAt,
-          status: "awaiting_approval",
-        });
+        this.write(
+          {
+            kind: "create_approval",
+            input: {
+              id: approvalId,
+              requestedAt: this.recordedAt,
+              toolCallId: call.id,
+              executionEpoch: task.epoch,
+              requestingEventId: ids.outcome,
+            },
+          },
+          {
+            kind: "update_tool_call",
+            id: call.id,
+            fields: { updatedAt: this.recordedAt, status: "awaiting_approval" },
+          },
+        );
         this.onCommit(() => {
           call.status = "awaiting_approval";
           call.approvalId = approvalId;
@@ -2069,7 +2143,7 @@ export class Engine {
         this.tx(() => {
           this.recordApprovalChange(task, expire.approval);
           this.recordCallChange(expire.call);
-          this.deps.writer.updateTask(task.id, { status: expire.taskStatus });
+          this.write({ kind: "update_task", id: task.id, fields: { status: expire.taskStatus } });
           this.onCommit(applyExpiry);
         });
       } catch (error) {
@@ -2132,14 +2206,20 @@ export class Engine {
       finished: this.newId("evt"),
       error: this.newId("evt"),
     };
+    // Every approval the records still hold pending, not only the ones in memory: an abandonment whose commit failed
+    // left memory without its approval and the catalog with a pending row. Read just before the transaction, with
+    // nothing awaited in between, so no approval can be requested or resolved after the read and before the commit.
+    const stillPending = this.deps.catalog.all<{ id: string }>(
+      "SELECT a.id FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id WHERE t.task_id = ? AND a.status = 'pending'",
+      task.id,
+    );
     try {
       this.tx(() => {
-        const { writer } = this.deps;
         for (const action of actions)
-          writer.updateToolCall(action.tool_call_id, {
-            updatedAt: this.recordedAt,
-            status: action.status,
-            detail: action.detail,
+          this.write({
+            kind: "update_tool_call",
+            id: action.tool_call_id,
+            fields: { updatedAt: this.recordedAt, status: action.status, detail: action.detail },
           });
         for (const { call, bodies } of unresultedBodies)
           for (const body of bodies)
@@ -2148,17 +2228,11 @@ export class Engine {
               mcpPayload({ toolCallId: call.id, runtimeCallId: call.runtimeCallId }, body),
               { ...opts, id: body.eventId },
             );
-        // Every approval the records still hold pending, not only the ones in memory: an abandonment whose
-        // commit failed left memory without its approval and the catalog with a pending row.
-        const stillPending = this.deps.catalog.all<{ id: string }>(
-          "SELECT a.id FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id WHERE t.task_id = ? AND a.status = 'pending'",
-          task.id,
-        );
         for (const approval of stillPending)
-          writer.updateApproval(approval.id, {
-            status: "expired",
-            consumedAt: this.recordedAt,
-            reason: "task ended",
+          this.write({
+            kind: "update_approval",
+            id: approval.id,
+            fields: { status: "expired", consumedAt: this.recordedAt, reason: "task ended" },
           });
         if (transcriptRetention)
           this.registerEvidence(task, {
@@ -2178,18 +2252,22 @@ export class Engine {
             originalPath: null,
             retention: hookRetention,
           });
-        writer.updateExecution(task.executionId, {
-          status: executionStatusFor(task.interrupted, result),
-          endedAt: this.recordedAt,
-          reportedModel: task.reportedModel,
-          reportedEffort: efforts.length === 1 ? (efforts[0] ?? null) : null,
-          effortEvidence: {
-            source: "PreToolUse hook",
-            values: efforts,
-            samples: hooks.length,
-            malformed_lines: malformedLines,
-            read_error: readError,
-            note: effortNote(hookEvidence),
+        this.write({
+          kind: "update_execution",
+          id: task.executionId,
+          fields: {
+            status: executionStatusFor(task.interrupted, result),
+            endedAt: this.recordedAt,
+            reportedModel: task.reportedModel,
+            reportedEffort: efforts.length === 1 ? (efforts[0] ?? null) : null,
+            effortEvidence: {
+              source: "PreToolUse hook",
+              values: efforts,
+              samples: hooks.length,
+              malformed_lines: malformedLines,
+              read_error: readError,
+              note: effortNote(hookEvidence),
+            },
           },
         });
         if (task.interrupted)
@@ -2206,7 +2284,11 @@ export class Engine {
             },
             { ...opts, id: ids.outcome },
           );
-        writer.updateTask(task.id, { status, finishedAt: this.recordedAt });
+        this.write({
+          kind: "update_task",
+          id: task.id,
+          fields: { status, finishedAt: this.recordedAt },
+        });
         this.emit(
           {
             type: "task_finished",
@@ -2257,25 +2339,32 @@ export class Engine {
    * the transaction opened (`store`), so these rows only record that outcome and commit or fail with the turn's end.
    */
   private registerEvidence(task: TaskState, evidence: TurnEvidence): void {
-    const { writer } = this.deps;
     const artifactId = evidence.ids.artifact;
-    writer.registerArtifact({
-      id: artifactId,
-      createdAt: this.recordedAt,
-      kind: evidence.kind,
-      logicalName: evidence.name,
-      mimeType: "application/x-ndjson",
-      producerExecutionId: task.executionId,
-      originalPath: evidence.originalPath,
-      ...captureFields(evidence.retention),
-    });
-    writer.linkArtifact({
-      id: evidence.ids.link,
-      conversationId: this.activeConversation.id,
-      artifactId,
-      relation: evidence.relation,
-      taskId: task.id,
-    });
+    this.write(
+      {
+        kind: "register_artifact",
+        input: {
+          id: artifactId,
+          createdAt: this.recordedAt,
+          kind: evidence.kind,
+          logicalName: evidence.name,
+          mimeType: "application/x-ndjson",
+          producerExecutionId: task.executionId,
+          originalPath: evidence.originalPath,
+          ...captureFields(evidence.retention),
+        },
+      },
+      {
+        kind: "link_artifact",
+        input: {
+          id: evidence.ids.link,
+          conversationId: this.activeConversation.id,
+          artifactId,
+          relation: evidence.relation,
+          taskId: task.id,
+        },
+      },
+    );
   }
 
   /**
@@ -2285,44 +2374,55 @@ export class Engine {
    */
   private registerToolOutput(output: DeclaredOutput): void {
     const { ids, task, call, declared, eventId, retention } = output;
-    const { writer } = this.deps;
     const conversationId = this.activeConversation.id;
     const artifactId = ids.artifact;
-    const art = writer.registerArtifact({
-      id: artifactId,
-      createdAt: this.recordedAt,
-      kind: "tool_output",
-      logicalName: declared.name ?? declared.path,
-      mimeType: declared.mimeType ?? "application/octet-stream",
-      producerExecutionId: task.executionId,
-      producerEventId: eventId,
-      originalPath: declared.path,
-      externalLocator: retention.status === "retained" ? null : declared.path,
-      ...captureFields(retention),
-    });
-    writer.linkArtifact({
-      id: ids.resultLink,
-      conversationId,
-      artifactId,
-      relation: "tool_result",
-      toolCallId: call.id,
-      taskId: task.id,
-    });
+    this.write(
+      {
+        kind: "register_artifact",
+        input: {
+          id: artifactId,
+          createdAt: this.recordedAt,
+          kind: "tool_output",
+          logicalName: declared.name ?? declared.path,
+          mimeType: declared.mimeType ?? "application/octet-stream",
+          producerExecutionId: task.executionId,
+          producerEventId: eventId,
+          originalPath: declared.path,
+          externalLocator: retention.status === "retained" ? null : declared.path,
+          ...captureFields(retention),
+        },
+      },
+      {
+        kind: "link_artifact",
+        input: {
+          id: ids.resultLink,
+          conversationId,
+          artifactId,
+          relation: "tool_result",
+          toolCallId: call.id,
+          taskId: task.id,
+        },
+      },
+    );
     if (retention.status === "retained") {
-      writer.linkArtifact({
-        id: ids.outputLink,
-        conversationId,
-        artifactId,
-        relation: "task_output",
-        taskId: task.id,
+      const { stored } = retention;
+      this.write({
+        kind: "link_artifact",
+        input: {
+          id: ids.outputLink,
+          conversationId,
+          artifactId,
+          relation: "task_output",
+          taskId: task.id,
+        },
       });
       this.record(
         "artifact_registered",
         {
           artifact_id: artifactId,
           tool_call_id: call.id,
-          digest: art.digest,
-          size: art.byteSize,
+          digest: stored.digest,
+          size: stored.byteCount,
           original_path: declared.path,
         },
         { id: ids.registered, taskId: task.id, executionId: task.executionId, causedBy: eventId },
