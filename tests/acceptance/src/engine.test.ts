@@ -1728,6 +1728,20 @@ describe("runtime session", () => {
     await client.waitFor("task_finished", (event) => event.payload.task_id !== first.taskId);
   };
 
+  it("starts no turn for a submission that cannot be recorded, and starts its retry as the first turn", async () => {
+    failNextCommit();
+    // A turn starts before its submission is answered, so none can start after this ack.
+    expect(ackError(await client.submitText("unrecorded")).code).toBe("record_failure");
+    expect(runtime.turns).toHaveLength(0);
+    expect(rows("SELECT id FROM tasks")).toEqual([]);
+    const next = runtime.nextTurn();
+    const ack = await client.submitText("recorded");
+    expect(ackResult(ack)).toMatchObject({ execution_epoch: 1 });
+    const turn = await next;
+    expect(runtime.turns).toHaveLength(1);
+    expect(turn.options).toMatchObject({ text: "recorded", turnIndex: 1, firstTurn: true });
+  });
+
   it("creates the session again on the turn after one whose runtime never started", async () => {
     const first = await submit("first");
     expect(first.turn.launch.resume).toBe(false);
