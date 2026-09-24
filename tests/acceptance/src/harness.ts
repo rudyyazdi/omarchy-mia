@@ -27,10 +27,13 @@ export interface TestServer {
   dir: string;
   /** What the server logged, in order: how a test observes a loss the records cannot hold. */
   logs: readonly string[];
-  /** Aborts the deadline of every turn-end evidence read in progress, as if it had timed out. */
+  /** Resolves with the first line the server logged, or logs later, that `matches`. */
+  waitForLog(matches: (line: string) => boolean): Promise<string>;
+  /** Aborts the deadline of every evidence read in progress (turn end or conversation start), as if it had timed out. */
   expireEvidenceReads(): void;
   /**
-   * Holds the next turn-end evidence read of `path` until `release`, as a read blocked on a stale mount would be;
+   * Holds the next evidence read of `path` (a turn's transcript or hook evidence, or a starting conversation's prompt
+   * or architecture document) until `release`, as a read blocked on a stale mount would be;
    * `started` resolves once the engine has asked for it. Its deadline or shutdown still abandons it.
    */
   holdEvidenceRead(path: string): HeldRead;
@@ -159,6 +162,11 @@ export const startTestServer = async (
   const dir = mkdtempSync(join(tmpdir(), "mia-acceptance-"));
   const profile = testProfile(dir, overrides);
   const logs: string[] = [];
+  const logWaiters = new Set<(line: string) => void>();
+  const log = (line: string) => {
+    logs.push(line);
+    for (const waiter of logWaiters) waiter(line);
+  };
   // Replaced on every expiry, so a read that starts afterwards gets a deadline of its own.
   let evidenceDeadline = new AbortController();
   const holds = new Map<string, PendingHold>();
@@ -180,7 +188,7 @@ export const startTestServer = async (
   const server = await startServer({
     profile,
     ...(adapter ? { adapter } : {}),
-    log: (message) => logs.push(message),
+    log,
     evidenceReadDeadline: () => evidenceDeadline.signal,
     readEvidence,
     collectArtifact: captureArtifact,
@@ -192,6 +200,18 @@ export const startTestServer = async (
     profile,
     dir,
     logs,
+    waitForLog: (matches) => {
+      const logged = logs.find(matches);
+      if (logged !== undefined) return Promise.resolve(logged);
+      const { promise, resolve } = Promise.withResolvers<string>();
+      const waiter = (line: string) => {
+        if (!matches(line)) return;
+        logWaiters.delete(waiter);
+        resolve(line);
+      };
+      logWaiters.add(waiter);
+      return promise;
+    },
     expireEvidenceReads: () => {
       evidenceDeadline.abort(new DOMException("evidence read deadline", "TimeoutError"));
       evidenceDeadline = new AbortController();

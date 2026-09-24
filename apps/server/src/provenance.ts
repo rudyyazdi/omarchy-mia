@@ -1,8 +1,19 @@
-import { readFileSync } from "node:fs";
 import { basename } from "node:path";
-import { ADAPTER_VERSION, type Profile, type StaticCapabilities } from "@mia/agent-adapter";
-import { isNotFound, PROTOCOL_VERSION, redactValue, sha256Hex } from "@mia/protocol";
-import type { ProvenanceEntryRow, ProvenanceRole, RecordWriter } from "@mia/records";
+import {
+  ADAPTER_VERSION,
+  type Profile,
+  type RuntimeFileRead,
+  type RuntimeFileReader,
+  type StaticCapabilities,
+} from "@mia/agent-adapter";
+import { PROTOCOL_VERSION, redactValue, sha256Hex } from "@mia/protocol";
+import type {
+  ObjectStore,
+  ProvenanceEntryRow,
+  ProvenanceRole,
+  RecordWriter,
+  StoredObject,
+} from "@mia/records";
 import type { BuildInfo } from "./build-info.ts";
 
 /**
@@ -34,216 +45,302 @@ export interface ConversationFile {
   bytes: Buffer | null;
 }
 
-/** The files a conversation's provenance retains, read by `readConversationFilesSync`. */
+/** The files a conversation's provenance retains, read by `readConversationFiles`. */
 export interface ConversationFiles {
   agentPrompt: ConversationFile;
   architecture: ConversationFile;
 }
 
-const readConversationFileSync = (path: string): ConversationFile => {
-  try {
-    return { path, bytes: readFileSync(path) };
-  } catch (error) {
-    if (isNotFound(error)) return { path, bytes: null };
-    throw error;
-  }
+/**
+ * The most a conversation file may hold. The agent prompt and the architecture document are text measured in KiB;
+ * the cap bounds the memory a misconfigured path (a disk image, a log) can take before the start is refused.
+ */
+export const MAX_CONVERSATION_FILE_BYTES = 16 * 1024 * 1024;
+
+const conversationFile = (path: string, read: RuntimeFileRead): ConversationFile => {
+  if (read.status === "absent") return { path, bytes: null };
+  if (read.status === "unreadable") throw new Error(`${path} is unreadable: ${read.reason}`);
+  return { path, bytes: read.bytes };
 };
 
 /**
  * Reads the profile's agent prompt and architecture document before the transaction that records a conversation
- * opens, so `createConversationProvenance` reads no file. Only a file that does not exist (`ENOENT`) is recorded as
- * unavailable; any other read failure, a path through a non-directory or an unreadable parent included, throws, and
- * no conversation starts, because a misconfigured path should not silently drop provenance.
+ * opens. The read is bounded like a turn-end read: it opens without blocking, refuses anything but a regular file,
+ * refuses a file over `MAX_CONVERSATION_FILE_BYTES`, and is abandoned once `signal` aborts. Only a file that does
+ * not exist is recorded as unavailable; any other failure throws, and no conversation starts, because a
+ * misconfigured path should not silently drop provenance.
  */
-export const readConversationFilesSync = (profile: Profile): ConversationFiles => ({
-  agentPrompt: readConversationFileSync(profile.runtime.agentPromptFile),
-  architecture: readConversationFileSync(profile.architectureDocument),
-});
+export const readConversationFiles = async (input: {
+  profile: Profile;
+  read: RuntimeFileReader;
+  signal: AbortSignal;
+}): Promise<ConversationFiles> => {
+  const { profile, read, signal } = input;
+  const options = { signal, maxBytes: MAX_CONVERSATION_FILE_BYTES };
+  const promptPath = profile.runtime.agentPromptFile;
+  const architecturePath = profile.architectureDocument;
+  const [agentPrompt, architecture] = await Promise.all([
+    read(promptPath, options),
+    read(architecturePath, options),
+  ]);
+  return {
+    agentPrompt: conversationFile(promptPath, agentPrompt),
+    architecture: conversationFile(architecturePath, architecture),
+  };
+};
 
 /**
- * Snapshot everything that shaped this conversation, immutably, at creation time, except the runtime and
- * build identity, which record the server as it was at startup (see `ServerIdentity`). Later edits to the
- * prompt, configuration or source tree do not change retained objects.
+ * One provenance entry, decided before the transaction: its content to retain (the bytes, then the object they
+ * were stored as), or why it is unavailable.
  */
-export const createConversationProvenance = (input: {
-  writer: RecordWriter;
+export type ProvenanceItem<Content> =
+  | { availability: "unavailable"; role: ProvenanceRole; reason: string }
+  | {
+      availability: "retained";
+      role: ProvenanceRole;
+      content: Content;
+      version: string | null;
+      mime: string;
+      logicalName: string;
+    };
+
+/** Everything a conversation's provenance records, decided before its transaction opens. */
+export interface ProvenancePlan<Content> {
+  description: string;
+  items: ProvenanceItem<Content>[];
+  summary: Omit<ProvenanceSummary, "provenance_set_id" | "agent_prompt_digest" | "entries">;
+}
+
+const unavailable = (role: ProvenanceRole, reason: string): ProvenanceItem<Uint8Array> => ({
+  availability: "unavailable",
+  role,
+  reason,
+});
+
+const retained = (
+  role: ProvenanceRole,
+  input: { bytes: Uint8Array; version: string | null; mime?: string; logicalName?: string },
+): ProvenanceItem<Uint8Array> => ({
+  availability: "retained",
+  role,
+  content: input.bytes,
+  version: input.version,
+  mime: input.mime ?? "application/json",
+  logicalName: input.logicalName ?? role,
+});
+
+const json = (value: unknown): Uint8Array => Buffer.from(JSON.stringify(value, null, 2), "utf8");
+
+/**
+ * Decides everything that shaped this conversation, to be retained immutably, except the runtime and build
+ * identity, which record the server as it was at startup (see `ServerIdentity`). Later edits to the prompt,
+ * configuration or source tree do not change retained objects. Pure: the files were read beforehand, and
+ * `storeProvenance` then `recordConversationProvenance` do the I/O.
+ */
+export const planConversationProvenance = (input: {
   profile: Profile;
   /** Client build as reported at connection time. */
   clientBuild: unknown;
   identity: ServerIdentity;
   files: ConversationFiles;
-}): ProvenanceSummary => {
-  const { writer, profile, clientBuild, identity, files } = input;
-  const setId = writer.createProvenanceSet(
-    `conversation provenance for profile ${profile.profile}`,
-  );
-  const entries: ProvenanceSummary["entries"] = [];
-  const add = (
-    role: ProvenanceRole,
-    input: {
-      text?: string;
-      bytes?: Uint8Array;
-      version?: string | null;
-      mime?: string;
-      logicalName?: string;
-    } | null,
-    reason?: string,
-  ) => {
-    if (!input) {
-      writer.addProvenanceEntry({
-        provenanceSetId: setId,
-        role,
-        availability: "unavailable",
-        reason: reason ?? "not exposed",
-      });
-      entries.push({
-        role,
-        availability: "unavailable",
-        artifact_id: null,
-        reason: reason ?? "not exposed",
-      });
-      return null;
-    }
-    const bytes = input.bytes ?? Buffer.from(input.text ?? "", "utf8");
-    const art = writer.registerArtifact({
-      kind: "snapshot",
-      logicalName: input.logicalName ?? role,
-      mimeType: input.mime ?? "application/json",
-      schemaVersion: input.version ?? null,
-      // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 makes engine commands async
-      stored: writer.objects.putSync(bytes),
-    });
-    writer.addProvenanceEntry({
-      provenanceSetId: setId,
-      role,
-      version: input.version ?? null,
-      artifactId: art.artifactId,
-      availability: "retained",
-    });
-    entries.push({ role, availability: "retained", artifact_id: art.artifactId, reason: null });
-    return art;
-  };
+}): ProvenancePlan<Uint8Array> => {
+  const { profile, clientBuild, identity, files } = input;
+  const items: ProvenanceItem<Uint8Array>[] = [];
 
   // Mia-owned agent instructions.
-  let promptDigest: string | null = null;
-  let promptVersion: string | null = null;
   const prompt = files.agentPrompt;
-  if (prompt.bytes !== null) {
-    promptVersion = basename(prompt.path).replace(/\.md$/, "");
-    // The digest the object was stored under, so the engine can hand the runtime that very object.
-    promptDigest =
-      add("agent_prompt", {
-        bytes: prompt.bytes,
-        version: promptVersion,
-        mime: "text/markdown",
-        logicalName: basename(prompt.path),
-      })?.digest ?? null;
-  } else {
-    add("agent_prompt", null, `agent prompt file missing: ${prompt.path}`);
-  }
+  const promptVersion = prompt.bytes === null ? null : basename(prompt.path).replace(/\.md$/, "");
+  items.push(
+    prompt.bytes === null
+      ? unavailable("agent_prompt", `agent prompt file missing: ${prompt.path}`)
+      : retained("agent_prompt", {
+          bytes: prompt.bytes,
+          version: promptVersion,
+          mime: "text/markdown",
+          logicalName: basename(prompt.path),
+        }),
+  );
   // Exposed runtime instructions: the runtime does not expose its full system prompt over the stream.
-  add(
-    "runtime_instructions",
-    null,
-    "Claude Code does not expose its effective system prompt or inherited CLAUDE.md content over stream-json",
+  items.push(
+    unavailable(
+      "runtime_instructions",
+      "Claude Code does not expose its effective system prompt or inherited CLAUDE.md content over stream-json",
+    ),
   );
 
   // Effective configuration, redacted.
   const configText = JSON.stringify(redactValue(profile), null, 2);
-  add("configuration", { text: configText, version: profile.profile });
+  items.push(
+    retained("configuration", { bytes: Buffer.from(configText, "utf8"), version: profile.profile }),
+  );
 
   // Tool contracts: configured servers and per-tool policy (runtime-reported tool lists are recorded per execution).
-  add("tool_contracts", {
-    text: JSON.stringify(
-      {
+  items.push(
+    retained("tool_contracts", {
+      bytes: json({
         mcpServers: redactValue(profile.runtime.mcpServers),
         toolPolicy: profile.runtime.toolPolicy,
         builtinTools: profile.runtime.builtinTools,
-      },
-      null,
-      2,
-    ),
-    version: "d1",
-  });
+      }),
+      version: "d1",
+    }),
+  );
 
   // Requested model identities and effort; reported values live on executions.
-  add("model_selection", {
-    text: JSON.stringify(
-      {
+  items.push(
+    retained("model_selection", {
+      bytes: json({
         requested_model: profile.runtime.model,
         requested_effort: profile.runtime.effort,
         notes: profile.notes,
-      },
-      null,
-      2,
-    ),
-    version: "d1",
-  });
+      }),
+      version: "d1",
+    }),
+  );
 
   // Runtime and adapter identity.
   const staticCaps = identity.runtime;
-  add("runtime_identity", {
-    text: JSON.stringify(
-      {
+  items.push(
+    retained("runtime_identity", {
+      bytes: json({
         runtime: "claude-code",
         runtime_version: staticCaps.runtime_version,
         executable: staticCaps.executable_resolved,
         adapter_version: ADAPTER_VERSION,
         protocol_version: PROTOCOL_VERSION,
         node: process.version,
-      },
-      null,
-      2,
-    ),
-    version: staticCaps.runtime_version ?? "unknown",
-  });
+      }),
+      version: staticCaps.runtime_version ?? "unknown",
+    }),
+  );
 
   // Architecture document revision.
-  let architectureRevision: string | null = null;
   const architecture = files.architecture;
-  if (architecture.bytes !== null) {
-    architectureRevision = sha256Hex(architecture.bytes);
-    add("architecture", {
-      bytes: architecture.bytes,
-      version: architectureRevision.slice(0, 12),
-      mime: "text/markdown",
-      logicalName: basename(architecture.path),
-    });
-  } else {
-    add("architecture", null, `architecture document missing: ${architecture.path}`);
-  }
+  const architectureRevision = architecture.bytes === null ? null : sha256Hex(architecture.bytes);
+  items.push(
+    architecture.bytes === null || architectureRevision === null
+      ? unavailable("architecture", `architecture document missing: ${architecture.path}`)
+      : retained("architecture", {
+          bytes: architecture.bytes,
+          version: architectureRevision.slice(0, 12),
+          mime: "text/markdown",
+          logicalName: basename(architecture.path),
+        }),
+  );
 
-  // Server build, plus retained local changes for dirty trees.
+  // Server build, plus retained local changes for dirty trees (recorded as a dependency of the build).
   const build = identity.build;
   const { local_changes: localChanges, ...buildSummary } = build;
-  const buildArt = add("server_build", {
-    text: JSON.stringify(buildSummary, null, 2),
-    version: build.commit ?? "no-git",
-  });
-  if (localChanges && buildArt) {
-    const diffArt = add("server_local_changes", {
-      text: localChanges,
-      version: build.local_changes_digest,
-      mime: "text/x-diff",
-      logicalName: "server-local-changes.diff",
-    });
-    if (diffArt) writer.addDependency(buildArt.artifactId, diffArt.artifactId, "local_changes");
-  }
+  items.push(
+    retained("server_build", { bytes: json(buildSummary), version: build.commit ?? "no-git" }),
+  );
+  if (localChanges)
+    items.push(
+      retained("server_local_changes", {
+        bytes: Buffer.from(localChanges, "utf8"),
+        version: build.local_changes_digest,
+        mime: "text/x-diff",
+        logicalName: "server-local-changes.diff",
+      }),
+    );
 
   // Client build as reported at connection time.
-  add("client_build", {
-    text: JSON.stringify(redactValue(clientBuild ?? null), null, 2),
-    version: "reported",
-  });
+  items.push(
+    retained("client_build", {
+      bytes: json(redactValue(clientBuild ?? null)),
+      version: "reported",
+    }),
+  );
 
+  return {
+    description: `conversation provenance for profile ${profile.profile}`,
+    items,
+    summary: {
+      agent_prompt_version: promptVersion,
+      configuration_digest: sha256Hex(configText),
+      architecture_revision: architectureRevision,
+      server_build: buildSummary,
+      runtime_version: staticCaps.runtime_version,
+    },
+  };
+};
+
+/**
+ * Stores every retained item's bytes before the transaction that records them opens, so the writes and fsyncs
+ * stall only this start, never the other connections. A failed or aborted store rejects and no conversation
+ * starts; objects already stored stay as unreferenced objects, never a row that points at missing bytes.
+ */
+export const storeProvenance = async (
+  plan: ProvenancePlan<Uint8Array>,
+  options: { objects: ObjectStore; signal: AbortSignal },
+): Promise<ProvenancePlan<StoredObject>> => {
+  const items: ProvenanceItem<StoredObject>[] = [];
+  for (const item of plan.items)
+    items.push(
+      item.availability === "unavailable"
+        ? item
+        : { ...item, content: await options.objects.put(item.content, { signal: options.signal }) },
+    );
+  return { ...plan, items };
+};
+
+/** Records a stored provenance plan (inside the start's transaction); it does no file I/O. */
+export const recordConversationProvenance = (
+  writer: RecordWriter,
+  plan: ProvenancePlan<StoredObject>,
+): ProvenanceSummary => {
+  const setId = writer.createProvenanceSet(plan.description);
+  const entries: ProvenanceSummary["entries"] = [];
+  const artifacts = new Map<ProvenanceRole, string>();
+  let promptDigest: string | null = null;
+  for (const item of plan.items) {
+    if (item.availability === "unavailable") {
+      writer.addProvenanceEntry({
+        provenanceSetId: setId,
+        role: item.role,
+        availability: "unavailable",
+        reason: item.reason,
+      });
+      entries.push({
+        role: item.role,
+        availability: "unavailable",
+        artifact_id: null,
+        reason: item.reason,
+      });
+      continue;
+    }
+    const art = writer.registerArtifact({
+      kind: "snapshot",
+      logicalName: item.logicalName,
+      mimeType: item.mime,
+      schemaVersion: item.version,
+      stored: item.content,
+    });
+    writer.addProvenanceEntry({
+      provenanceSetId: setId,
+      role: item.role,
+      version: item.version,
+      artifactId: art.artifactId,
+      availability: "retained",
+    });
+    entries.push({
+      role: item.role,
+      availability: "retained",
+      artifact_id: art.artifactId,
+      reason: null,
+    });
+    artifacts.set(item.role, art.artifactId);
+    // The digest the object was stored under, so the engine can hand the runtime that very object.
+    if (item.role === "agent_prompt") promptDigest = item.content.digest;
+  }
+  const build = artifacts.get("server_build");
+  const localChanges = artifacts.get("server_local_changes");
+  if (build !== undefined && localChanges !== undefined)
+    writer.addDependency(build, localChanges, "local_changes");
   return {
     provenance_set_id: setId,
     agent_prompt_digest: promptDigest,
-    agent_prompt_version: promptVersion,
-    configuration_digest: sha256Hex(configText),
-    architecture_revision: architectureRevision,
-    server_build: buildSummary,
-    runtime_version: staticCaps.runtime_version,
+    ...plan.summary,
     entries,
   };
 };

@@ -55,6 +55,20 @@ describe("readRuntimeFile", () => {
     expect(await readRuntimeFile(file)).toEqual({ status: "read", bytes: Buffer.from("{}\n") });
   });
 
+  it("reads a file up to maxBytes and reports a longer one as unreadable", async () => {
+    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-runtime-file-"));
+    const path = join(directory.path, "agent-prompt.md");
+    writeFileSync(path, "12345");
+    expect(await readRuntimeFile(path, { maxBytes: 5 })).toEqual({
+      status: "read",
+      bytes: Buffer.from("12345"),
+    });
+    expect(await readRuntimeFile(path, { maxBytes: 4 })).toEqual({
+      status: "unreadable",
+      reason: "larger than 4 bytes",
+    });
+  });
+
   it("reports why a read was abandoned before it started", async () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-runtime-file-"));
     const path = join(directory.path, "transcript.jsonl");

@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, constants } from "node:fs";
-import { mkdir, open, writeFile } from "node:fs/promises";
+import { mkdir, open, writeFile, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { match } from "ts-pattern";
 import { z } from "zod";
@@ -481,9 +481,13 @@ export type RuntimeFileRead =
   | { status: "read"; bytes: Buffer }
   | { status: "unreadable"; reason: string };
 
-/** How a turn-end read is bounded: once `signal` aborts, the read is abandoned. */
+/**
+ * How a read is bounded: once `signal` aborts, the read is abandoned; a file longer than `maxBytes` is unreadable,
+ * and no more than one byte past the cap is ever held in memory.
+ */
 export interface RuntimeFileReadOptions {
   signal?: AbortSignal;
+  maxBytes?: number;
 }
 
 /** Reads a runtime-written file at a path; `readRuntimeFile` is the real one, and a test injects its own. */
@@ -504,15 +508,32 @@ const abortReason = (reason: unknown): string =>
  * runtime that leaves a FIFO on every turn would take one more each turn until every async fs call stalls.
  * O_NOCTTY keeps a terminal device at the path from becoming the server's controlling terminal.
  */
+/** Reads at most `maxBytes` + 1 bytes from the start of `handle`: one more than the cap shows the file is longer. */
+const readCapped = async (
+  handle: FileHandle,
+  maxBytes: number,
+  signal: AbortSignal | undefined,
+): Promise<Buffer> => {
+  const chunks: Buffer[] = [];
+  const stream = handle.createReadStream({ start: 0, end: maxBytes, autoClose: false, signal });
+  for await (const chunk of stream)
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return Buffer.concat(chunks);
+};
+
 const readRegularFile = async (
   path: string,
-  signal: AbortSignal | undefined,
+  { signal, maxBytes }: RuntimeFileReadOptions,
 ): Promise<RuntimeFileRead> => {
   const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY);
   try {
     if (!(await handle.stat()).isFile())
       return { status: "unreadable", reason: "not a regular file" };
-    return { status: "read", bytes: await handle.readFile({ signal }) };
+    if (maxBytes === undefined) return { status: "read", bytes: await handle.readFile({ signal }) };
+    const bytes = await readCapped(handle, maxBytes, signal);
+    return bytes.byteLength > maxBytes
+      ? { status: "unreadable", reason: `larger than ${maxBytes} bytes` }
+      : { status: "read", bytes };
   } finally {
     // Nothing was written through this descriptor, so a failed close loses nothing the result depends on.
     await handle.close().catch(() => undefined);
@@ -521,10 +542,11 @@ const readRegularFile = async (
 
 const readOrReport = async (
   path: string,
-  signal: AbortSignal | undefined,
+  options: RuntimeFileReadOptions,
 ): Promise<RuntimeFileRead> => {
+  const { signal } = options;
   try {
-    return await readRegularFile(path, signal);
+    return await readRegularFile(path, options);
   } catch (error) {
     if (signal?.aborted) return { status: "unreadable", reason: abortReason(signal.reason) };
     if (isNotFound(error)) return { status: "absent" };
@@ -535,7 +557,7 @@ const readOrReport = async (
 /** Starts one read of a runtime-written file; it never rejects, reporting every failure as a result instead. */
 type RuntimeFileReadStart = (
   path: string,
-  signal: AbortSignal | undefined,
+  options: RuntimeFileReadOptions,
 ) => Promise<RuntimeFileRead>;
 
 /**
@@ -557,7 +579,8 @@ export const boundedRuntimeFileReader = ({
   const release = (): void => {
     stuckReads -= 1;
   };
-  return async (path, { signal } = {}) => {
+  return async (path, options = {}) => {
+    const { signal } = options;
     // A signal that has already aborted reports its own reason, which `untilAborted` gives without starting.
     if (!signal?.aborted && stuckReads >= maxStuckReads)
       return { status: "unreadable", reason: "an earlier abandoned read is still blocked" };
@@ -568,7 +591,7 @@ export const boundedRuntimeFileReader = ({
     };
     return untilAborted(
       () => {
-        started = read(path, signal);
+        started = read(path, options);
         // Neither handler can throw, so these chains never reject.
         void started.then(markSettled, markSettled);
         return started;

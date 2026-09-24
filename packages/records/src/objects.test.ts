@@ -29,7 +29,6 @@ const recordingStore = (root: string) => {
       record(directory);
       await Promise.resolve();
     },
-    flushSync: record,
   });
   return { store, flushed };
 };
@@ -47,13 +46,6 @@ describe("ObjectStore durability", () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-objects-"));
     const { store, flushed } = recordingStore(directory.path);
     await store.put(bytes, live());
-    expect(flushed).toEqual(firstStoreFsyncs(directory.path));
-  });
-
-  it("putSync fsyncs the same directories as put", () => {
-    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-objects-"));
-    const { store, flushed } = recordingStore(directory.path);
-    store.putSync(bytes);
     expect(flushed).toEqual(firstStoreFsyncs(directory.path));
   });
 
@@ -75,7 +67,6 @@ describe("ObjectStore durability", () => {
     mkdirSync(objectDirectory, { recursive: true });
     await store.put(bytes, live());
     await store.put(bytes, live());
-    store.putSync(bytes);
     expect(flushed).toEqual([{ directory: objectDirectory, objectInPlace: true }]);
   });
 
@@ -90,7 +81,6 @@ describe("ObjectStore durability", () => {
         reached.resolve(undefined);
         await release.promise;
       },
-      flushSync: () => undefined,
     });
     let settled = false;
     const put = store.put(bytes, live()).finally(() => {
@@ -111,7 +101,6 @@ describe("ObjectStore durability", () => {
         if (flushed === objectDirectory) throw new Error("fsync failed");
         await Promise.resolve();
       },
-      flushSync: () => undefined,
     });
     await expect(store.put(bytes, live())).rejects.toThrow("fsync failed");
     expect(store.verifySync(ObjectStore.digestOf(bytes))).toBe("verified");
@@ -119,35 +108,29 @@ describe("ObjectStore durability", () => {
   });
 
   it("stores nothing when a directory it created cannot be fsynced", async () => {
-    const failing = () => {
-      throw new Error("fsync failed");
-    };
-    const fsync = {
+    using root = mkdtempDisposableSync(join(tmpdir(), "mia-objects-"));
+    const store = new ObjectStore(catalogPaths(root.path), {
       flush: async () => {
         await Promise.resolve();
-        failing();
+        throw new Error("fsync failed");
       },
-      flushSync: failing,
-    };
-    using asyncRoot = mkdtempDisposableSync(join(tmpdir(), "mia-objects-"));
-    using syncRoot = mkdtempDisposableSync(join(tmpdir(), "mia-objects-"));
-    const asyncStore = new ObjectStore(catalogPaths(asyncRoot.path), fsync);
-    const syncStore = new ObjectStore(catalogPaths(syncRoot.path), fsync);
-    await expect(asyncStore.put(bytes, live())).rejects.toThrow("fsync failed");
-    expect(() => syncStore.putSync(bytes)).toThrow("fsync failed");
-    for (const store of [asyncStore, syncStore]) {
-      expect(store.verifySync(ObjectStore.digestOf(bytes))).toBe("missing");
-      expect(readdirSync(store.paths.staging)).toEqual([]);
-    }
+    });
+    await expect(store.put(bytes, live())).rejects.toThrow("fsync failed");
+    expect(store.verifySync(ObjectStore.digestOf(bytes))).toBe("missing");
+    expect(readdirSync(store.paths.staging)).toEqual([]);
   });
 });
 
 describe("ObjectStore.put", () => {
-  it("stores bytes read-only under their digest, as putSync does", async () => {
+  it("stores bytes read-only under their digest", async () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-objects-"));
     const store = new ObjectStore(catalogPaths(directory.path));
     const stored = await store.put(bytes, live());
-    expect(stored).toEqual(new ObjectStore(catalogPaths(join(directory.path, "x"))).putSync(bytes));
+    expect(stored).toEqual({
+      digest: ObjectStore.digestOf(bytes),
+      byteCount: bytes.byteLength,
+      storageKey: store.storageKey(ObjectStore.digestOf(bytes)),
+    });
     const path = store.pathFor(stored.digest);
     expect(readFileSync(path)).toEqual(bytes);
     expect(statSync(path).mode & 0o777).toBe(0o400);
