@@ -32,6 +32,11 @@ export class Holds<Reply> {
     return this.held.size;
   }
 
+  /** One more hold would be refused with `full`: a caller that must not ask what it cannot hold checks this first. */
+  get full(): boolean {
+    return this.held.size >= this.max;
+  }
+
   /**
    * Wait for the reply to `id`. When `signal` aborts first, `onAbort` supplies the reply instead (the waiter gave
    * up, so the caller records the abandonment there); if `onAbort` throws, the reply rejects with its error. A

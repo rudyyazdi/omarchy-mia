@@ -86,11 +86,13 @@ describe("holds", () => {
     holds.hold("approval-1", { signal, onAbort });
     holds.hold("approval-2", { signal, onAbort });
 
+    expect(holds.full).toBe(true);
     expect(holds.hold("approval-3", { signal, onAbort })).toEqual({
       kind: "refused",
       refusal: "full",
     });
     holds.reply("approval-1", "allow");
+    expect(holds.full).toBe(false);
     expect(holds.hold("approval-3", { signal, onAbort }).kind).toBe("held");
   });
 

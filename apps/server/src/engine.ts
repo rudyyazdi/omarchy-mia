@@ -15,6 +15,7 @@ import {
   type TurnOptions,
   type TurnResult,
 } from "@mia/agent-adapter";
+import { Holds } from "@mia/kernel";
 import {
   PROTOCOL_VERSION,
   canonicalDigest,
@@ -99,6 +100,26 @@ export type CommandResult =
 
 const fail = (code: ErrorCode, message: string): CommandResult => ({ ok: false, code, message });
 
+/**
+ * How many permission prompts the server holds open at once, across tasks, waiting for the user's decision. A
+ * call that would ask beyond it is denied without asking (evaluatePermission), so no approval is recorded that
+ * cannot be held. Far above what one turn asks in parallel; it bounds a runtime that keeps asking.
+ */
+export const MAX_HELD_PROMPTS = 32;
+
+/** The answer to a prompt still held once its turn has ended, recorded or not: the runtime is gone, and nothing was released. */
+const TURN_ENDED: PermissionDecision = {
+  behavior: "deny",
+  message: "Mia: the turn ended before the user decided; this call was not released.",
+};
+
+/**
+ * What a recorded permission request answers the runtime: at once, or by holding its prompt, under the approval
+ * the request recorded, until the user decides.
+ */
+type PermissionAnswer =
+  { kind: "answer"; decision: PermissionDecision } | { kind: "hold"; approvalId: string };
+
 interface ToolCallState {
   id: string;
   runtimeCallId: string;
@@ -109,7 +130,6 @@ interface ToolCallState {
   policy: ToolCallPolicy;
   status: ToolCallStatus;
   approvalId: string | null;
-  resolve: ((decision: PermissionDecision) => void) | null;
 }
 
 interface TaskState {
@@ -344,6 +364,11 @@ export class Engine {
   private starting: PendingStart | null = null;
   /** What the transaction in progress will apply and perform once it commits. */
   private queued: CommitQueue = emptyQueue();
+  /**
+   * The runtime's permission prompts waiting for the user's decision, keyed by approval id. Each is answered once:
+   * by `answerPrompt` after a commit, by its abandonment, or once its turn has ended (submitText).
+   */
+  private readonly prompts = new Holds<PermissionDecision>(MAX_HELD_PROMPTS);
 
   constructor(private readonly deps: EngineDeps) {}
 
@@ -736,6 +761,11 @@ export class Engine {
         ),
       )
       .finally(() => {
+        // However finishTurn ended, even by throwing: the runtime has ended, so a prompt it never abandoned is
+        // answered with a denial rather than left holding a place under MAX_HELD_PROMPTS. One already answered is
+        // skipped.
+        for (const revisions of task.calls.values())
+          for (const call of revisions) this.answerPrompt(call, TURN_ENDED);
         if (this.task === task) this.task = null;
         finished.resolve();
       });
@@ -1053,10 +1083,13 @@ export class Engine {
     return { kind: "active", task };
   }
 
-  private settle(call: ToolCallState, decision: PermissionDecision): void {
-    const resolve = call.resolve;
-    call.resolve = null;
-    resolve?.(decision);
+  /**
+   * Answer the prompt held for `call`'s approval, if one is still held. None is when the call never asked, or its
+   * prompt was already answered: abandoned by the runtime, or denied once its turn ended. The
+   * runtime then already has a denial, and this answer is dropped.
+   */
+  private answerPrompt(call: ToolCallState, decision: PermissionDecision): void {
+    if (call.approvalId !== null) this.prompts.reply(call.approvalId, decision);
   }
 
   private taskOpts(task: TaskState): EventOpts {
@@ -1138,7 +1171,7 @@ export class Engine {
       call.status = change.status;
     });
     const settle = change.settle;
-    if (settle) this.afterCommit(() => this.settle(call, settle));
+    if (settle) this.afterCommit(() => this.answerPrompt(call, settle));
   }
 
   // ---------------------------------------------------------------- runtime events
@@ -1382,7 +1415,6 @@ export class Engine {
       policy,
       status: "proposed",
       approvalId: null,
-      resolve: null,
     };
     this.onCommit(() => {
       const revisions = task.calls.get(runtimeCallId) ?? [];
@@ -1459,10 +1491,11 @@ export class Engine {
       policy,
       gateOpen: task.gateOpen,
       toolIdentity: req.toolName,
+      promptsFull: this.prompts.full,
     });
-    let call: ToolCallState;
+    let recorded: { call: ToolCallState; answer: PermissionAnswer };
     try {
-      call = this.tx(() => {
+      recorded = this.tx(() => {
         let bound: ToolCallState;
         if (binding.kind === "reuse") {
           bound = binding.call;
@@ -1500,28 +1533,52 @@ export class Engine {
           },
           opts,
         );
-        this.recordPermission({ task, call: bound, rule, evaluationId: evaluation.id });
+        const answer = this.recordPermission({
+          task,
+          call: bound,
+          rule,
+          evaluationId: evaluation.id,
+        });
         this.afterCommit(() => this.notifyToolCall(task, bound));
-        return bound;
+        return { call: bound, answer };
       });
     } catch (error) {
+      // Nothing was requested, so nothing is held: the runtime is denied at once.
       this.deps.log(`permission handling failed: ${errorMessage(error)}`);
       return { behavior: "deny", message: "Mia could not record this call; it was not released." };
     }
-    return match(rule)
-      .with({ kind: "deny" }, (denial): PermissionDecision =>
-        denial.interrupt
-          ? { behavior: "deny", message: denial.message, interrupt: true }
-          : { behavior: "deny", message: denial.message },
+    const { call, answer } = recorded;
+    return match(answer)
+      .with({ kind: "answer" }, ({ decision }) => decision)
+      .with({ kind: "hold" }, ({ approvalId }) =>
+        this.holdPrompt({ task, call, approvalId, abandoned: req.abandoned }),
       )
-      .with({ kind: "dispatch" }, (): PermissionDecision => ({ behavior: "allow" }))
-      .with({ kind: "ask" }, () => {
-        const { promise, resolve } = Promise.withResolvers<PermissionDecision>();
-        call.resolve = resolve;
-        req.abandoned.addEventListener("abort", () => this.abandon(task, call, resolve), {
-          once: true,
-        });
-        return promise;
+      .exhaustive();
+  }
+
+  /**
+   * Hold the runtime's prompt for a call whose approval request has committed, until the user decides or the
+   * runtime abandons it. Held only after the commit, so a request that could not be recorded is never held. A
+   * prompt the runtime abandoned before this (a signal already aborted) is abandoned at once. The cap was checked
+   * before the request was recorded and nothing ran since, so a refusal here is a bug; its approval is expired as
+   * abandoned, so no decision can release a call whose runtime was denied.
+   */
+  private holdPrompt(input: {
+    task: TaskState;
+    call: ToolCallState;
+    approvalId: string;
+    abandoned: AbortSignal;
+  }): Promise<PermissionDecision> {
+    const { task, call, approvalId, abandoned } = input;
+    const held = this.prompts.hold(approvalId, {
+      signal: abandoned,
+      onAbort: () => this.abandon(task, call),
+    });
+    return match(held)
+      .with({ kind: "held" }, ({ reply }) => reply)
+      .with({ kind: "refused" }, ({ refusal }) => {
+        this.deps.log(`prompt for approval ${approvalId} could not be held (${refusal})`);
+        return Promise.resolve(this.abandon(task, call));
       })
       .exhaustive();
   }
@@ -1555,18 +1612,18 @@ export class Engine {
     return refusal.settle;
   }
 
-  /** Record what the permission rule decided for a bound call (inside tx). */
+  /** Record what the permission rule decided for a bound call, and what that answers the runtime (inside tx). */
   private recordPermission(input: {
     task: TaskState;
     call: ToolCallState;
     rule: PermissionRule;
     evaluationId: string;
-  }): void {
+  }): PermissionAnswer {
     const { task, call, rule, evaluationId } = input;
     const conversation = this.activeConversation;
     const opts = this.taskOpts(task);
-    match(rule)
-      .with({ kind: "deny" }, (denial) => {
+    return match(rule)
+      .with({ kind: "deny" }, (denial): PermissionAnswer => {
         if (denial.unlisted)
           this.emit(
             {
@@ -1588,14 +1645,22 @@ export class Engine {
         };
         this.recordCallChange(change);
         this.commitCallChange(call, change);
+        const { message } = denial;
+        return {
+          kind: "answer",
+          decision: denial.interrupt
+            ? { behavior: "deny", message, interrupt: true }
+            : { behavior: "deny", message },
+        };
       })
-      .with({ kind: "dispatch" }, () => {
+      .with({ kind: "dispatch" }, (): PermissionAnswer => {
         this.recordDispatch(task, call, { via: "policy", causedBy: evaluationId });
         this.onCommit(() => {
           call.status = "dispatched";
         });
+        return { kind: "answer", decision: { behavior: "allow" } };
       })
-      .with({ kind: "ask" }, () => {
+      .with({ kind: "ask" }, (): PermissionAnswer => {
         // Durable pending approval bound to (conversation, task, runtime call, revision, tool, digest, epoch).
         const approvalId = this.deps.writer.createApproval({
           toolCallId: call.id,
@@ -1630,18 +1695,16 @@ export class Engine {
           task.pendingApprovals.set(approvalId, call);
         });
         this.recordTaskStatus(task, "awaiting_approval");
+        return { kind: "hold", approvalId };
       })
       .exhaustive();
   }
 
-  /** The runtime dropped the held prompt (process gone or turn aborted): the pending approval can never release anything. */
-  private abandon(
-    task: TaskState,
-    call: ToolCallState,
-    resolve: (decision: PermissionDecision) => void,
-  ): void {
-    if (call.resolve !== resolve) return;
-    call.resolve = null;
+  /**
+   * The runtime dropped the held prompt (process gone or turn aborted): the pending approval can never release
+   * anything. Returns the runtime's answer; `prompts` calls this at most once per hold, and never after a reply.
+   */
+  private abandon(task: TaskState, call: ToolCallState): PermissionDecision {
     const approvalId = call.approvalId;
     const { expire, settle } = decideAbandonment({
       call,
@@ -1671,7 +1734,7 @@ export class Engine {
         applyExpiry();
       }
     }
-    resolve(settle);
+    return settle;
   }
 
   // ---------------------------------------------------------------- turn completion

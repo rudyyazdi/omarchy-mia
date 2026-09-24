@@ -91,13 +91,36 @@ export class ScriptedTurn {
   }
 
   /** Raise a permission request exactly as the bridge would; resolves with Mia's decision. */
-  async request(
+  request(
     toolIdentity: string,
     args: unknown,
     runtimeCallId: string | undefined,
   ): Promise<PermissionDecision> {
+    return this.raise({ toolIdentity, args, runtimeCallId, abandonFirst: false });
+  }
+
+  /**
+   * Raise a permission request whose prompt the runtime has already abandoned when Mia gets it, as when the
+   * bridge's connection closes before its handler runs.
+   */
+  requestAbandoned(
+    toolIdentity: string,
+    args: unknown,
+    runtimeCallId: string,
+  ): Promise<PermissionDecision> {
+    return this.raise({ toolIdentity, args, runtimeCallId, abandonFirst: true });
+  }
+
+  private async raise(input: {
+    toolIdentity: string;
+    args: unknown;
+    runtimeCallId: string | undefined;
+    abandonFirst: boolean;
+  }): Promise<PermissionDecision> {
+    const { toolIdentity, args, runtimeCallId } = input;
     const abandon = new AbortController();
     this.pendingAbandons.push(abandon);
+    if (input.abandonFirst) abandon.abort();
     const request: PermissionRequest = {
       toolName: toolIdentity,
       input: args,
