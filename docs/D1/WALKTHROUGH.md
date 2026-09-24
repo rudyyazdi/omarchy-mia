@@ -32,7 +32,7 @@ Rules that everything else hangs off:
 | 2 | `packages/agent-adapter/src/launch.ts` | `prepareLaunch` builds the exact `claude` command line, the settings layer (`deny` rules, `ask` for everything else) and the MCP config that adds the bridge. |
 | 3 | `packages/agent-adapter/src/bridge.ts` | ~100 lines. One MCP tool, `request`, that awaits a handler. No handler ⇒ deny. |
 | 4 | `packages/agent-adapter/src/adapter.ts` | `submitTurn`: spawn, parse stdout lines and translate them (`claude-translate.ts`) into runtime-independent `RuntimeEvent`s, kill on `interrupt()`. |
-| 5 | `apps/server/src/engine.ts` | Read top to bottom: `tx`/`emit`/`record` plumbing, then the six commands, then `onRuntimeEvent`, `handlePermission`, `finishTurn`. |
+| 5 | `apps/server/src/engine.ts` | Read top to bottom: `tx`/`decide`/`commit` plumbing (a transition's records, effects and next state are built in `transition-draft.ts`; how an approval ends is decided purely in `decide-conversation.ts`), then the six commands, then `onRuntimeEvent`, `handlePermission`, `finishTurn`. |
 | 6 | `packages/records/src/schema.ts` and `writer.ts` | Tables and the only code that writes them. |
 | 7 | `packages/records/src/export.ts` | Snapshot → files → manifest → verify → rename. |
 | 8 | `fixtures/controlled-mcp/src/fixture.ts` | The test double you will poke by hand below. |

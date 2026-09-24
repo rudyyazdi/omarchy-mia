@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { TurnResult } from "@mia/agent-adapter";
 import type { TaskStatus, ToolCallPolicy, ToolCallStatus } from "@mia/protocol";
 import {
+  abandonedPromptDenial,
   bindPermissionRequest,
   bindStreamProposal,
   bindToolResult,
@@ -209,11 +210,10 @@ describe("decideAbandonment", () => {
       task: lastPending,
       resolvedEventId: "evt_1",
     });
-    expect(outcome.expire).toMatchObject({
+    expect(outcome).toMatchObject({
       approval: { approvalId: "appr_1", eventId: "evt_1", status: "expired" },
       call: { callId: "call_1", status: "invalidated" },
     });
-    expect(outcome.settle.behavior).toBe("deny");
   });
 
   it("resumes the task when the abandoned approval was the last pending, and not while others are", () => {
@@ -224,12 +224,12 @@ describe("decideAbandonment", () => {
         pending: true,
         task,
         resolvedEventId: "evt_1",
-      }).expire?.taskStatus;
+      })?.taskStatus;
     expect(abandon(lastPending)).toBe("running");
     expect(abandon({ status: "awaiting_approval", otherPending: 1 })).toBe("awaiting_approval");
   });
 
-  it("changes nothing for an approval already resolved, and still refuses the prompt", () => {
+  it("changes nothing for an approval already resolved", () => {
     const outcome = decideAbandonment({
       call: call("denied"),
       approvalId: "appr_1",
@@ -237,8 +237,14 @@ describe("decideAbandonment", () => {
       task: { status: "running", otherPending: 0 },
       resolvedEventId: "evt_1",
     });
-    expect(outcome.expire).toBeNull();
-    expect(outcome.settle.behavior).toBe("deny");
+    expect(outcome).toBeNull();
+  });
+
+  it("always refuses the abandoned prompt, naming its tool", () => {
+    expect(abandonedPromptDenial("mcp__d1__change")).toMatchObject({
+      behavior: "deny",
+      message: expect.stringContaining("mcp__d1__change"),
+    });
   });
 });
 

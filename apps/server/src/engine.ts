@@ -28,9 +28,7 @@ import {
   type ClientDiagnostics,
   type Decision,
   type ErrorCode,
-  type EventPayload,
   type ServerEvent,
-  type TaskStatus,
   type ToolCallPolicy,
 } from "@mia/protocol";
 import {
@@ -38,7 +36,6 @@ import {
   type Catalog,
   type IdPrefix,
   type NewId,
-  type JournalEventType,
   type LinkRelation,
   type McpEventType,
   type RecordWriter,
@@ -57,7 +54,6 @@ import {
   callById,
   callsOf,
   otherPending,
-  pendingCall,
   withCall,
   withCallStatuses,
   withPending,
@@ -75,13 +71,16 @@ import {
   type BodyReadPoint,
   type McpBody,
 } from "./mcp-bodies.ts";
-import type { EngineEffect, OutgoingEvent } from "./engine-effects.ts";
 import {
-  commitRecords,
-  eventSequence,
-  type CommittedChange,
-  type EngineRecord,
-} from "./engine-records.ts";
+  abandonmentTransition,
+  approvalDecisionTransition,
+  interruptionTransition,
+  releasedBy,
+  type ConversationDecision,
+  type ConversationTransition,
+} from "./decide-conversation.ts";
+import type { EngineEffect, OutgoingEvent } from "./engine-effects.ts";
+import { commitRecords, eventSequence, type CommittedChange } from "./engine-records.ts";
 import {
   nameProvenance,
   planConversationProvenance,
@@ -93,14 +92,18 @@ import {
   type ServerIdentity,
 } from "./provenance.ts";
 import {
+  TransitionDraft,
+  taskLinks,
+  type BuiltTransition,
+  type Origin,
+} from "./transition-draft.ts";
+import {
+  abandonedPromptDenial,
   bindPermissionRequest,
   bindStreamProposal,
   bindToolResult,
   classifyActions,
   classifyTask,
-  decideAbandonment,
-  decideApproval,
-  decideInterruption,
   evaluatePermission,
   executionStatusFor,
   isReleased,
@@ -108,10 +111,7 @@ import {
   releasedWithoutResult,
   statusAfterResult,
   supersedeBinding,
-  type ApprovalChange,
-  type ApprovalOutcome,
   type CallChange,
-  type InterruptionOutcome,
   type PermissionRule,
 } from "./transitions.ts";
 
@@ -134,6 +134,10 @@ export type CommandResult =
   { ok: true; result?: Record<string, unknown> } | { ok: false; code: ErrorCode; message: string };
 
 const fail = (code: ErrorCode, message: string): CommandResult => ({ ok: false, code, message });
+
+/** The answer to a task-scoped command naming a task that is not the active one. */
+const notActiveTask = (taskId: string): CommandResult =>
+  fail("not_found", `task ${taskId} is not the active task`);
 
 /**
  * How many permission prompts the server holds open at once, across tasks, waiting for the user's decision. A
@@ -208,18 +212,6 @@ export interface EngineDeps {
    */
   debugMode: boolean;
   log: (message: string) => void;
-}
-
-/** Linkage recorded with an event: the task and execution it belongs to and the event that caused it. */
-interface EventLinks {
-  taskId?: string | null;
-  executionId?: string | null;
-  causedBy?: string | null;
-}
-
-/** An event's id, drawn before its transaction opens, and its linkage. */
-interface EventOpts extends EventLinks {
-  id: string;
 }
 
 interface NewCallInput {
@@ -359,18 +351,6 @@ const abandonedStart = (pending: PendingStart): CommandResult | null =>
     : null;
 
 /**
- * The transaction in progress: the one time its rows record, the records it has built, the conversation state it
- * moves to, and the effects it queues. The records commit together; the next state replaces the engine's only once
- * they have, and the effects then run, each handed what the commit changed.
- */
-interface OpenTransaction {
-  time: string;
-  records: EngineRecord[];
-  next: ConversationState | null;
-  effects: EngineEffect[];
-}
-
-/**
  * The runtime running the active task's turn: resources the engine owns, not state (see ConversationState). Set once
  * the adapter has started the turn, and cleared with the task once its end is recorded.
  */
@@ -417,8 +397,10 @@ const describeAction = (toolIdentity: string, args: unknown): string => {
 
 /**
  * Conversation/task coordinator plus approval and interruption controller. One conversation, one task,
- * one active client. The rules live in ./transitions.ts; the engine commits what they decide, replaces its state
- * with the next one only after the commit, then performs the effects (see `tx`).
+ * one active client. The rules live in ./transitions.ts, and ./decide-conversation.ts composes them into pure
+ * transitions for how an approval ends; the engine commits what they decide, replaces its state with the next one
+ * only after the commit, then performs the effects (see `commit`). The transitions not yet in that machine it builds
+ * itself, through the same draft (see `tx`).
  */
 export class Engine {
   activeConnectionId: string | null = null;
@@ -445,10 +427,11 @@ export class Engine {
    */
   private starting: PendingStart | null = null;
   /**
-   * The transaction in progress, or null outside one. Its time is read once, as a kernel dispatch hands its `decide`
-   * one `now`, so the transition rows of one commit (see `EngineDeps.now`) agree on when it happened.
+   * The transition the engine is building (see `tx`), or null outside one. Its time is read once, as a kernel
+   * dispatch hands its `decide` one `now`, so the transition rows of one commit (see `EngineDeps.now`) agree on when
+   * it happened.
    */
-  private open: OpenTransaction | null = null;
+  private open: TransitionDraft | null = null;
   /**
    * The runtime's permission prompts waiting for the user's decision, keyed by approval id. Each is answered once:
    * by an `answer_prompt` effect after a commit, by its abandonment, or once its turn has ended (submitText).
@@ -478,35 +461,15 @@ export class Engine {
     return task?.id === taskId ? task : null;
   }
 
-  /** The transaction in progress (inside tx). */
-  private get transaction(): OpenTransaction {
+  /** The transition in progress (inside tx). */
+  private get transition(): TransitionDraft {
     if (this.open === null) throw new Error("engine records only inside a transaction");
     return this.open;
   }
 
-  /** The time the rows of the transaction in progress record (inside tx). */
-  private get recordedAt(): string {
-    return this.transaction.time;
-  }
-
-  /**
-   * The conversation as the transaction in progress leaves it so far (inside tx): what its records name, and what
-   * it replaces the engine's state with once they commit.
-   */
-  private get draft(): ConversationState {
-    const { next } = this.transaction;
-    if (!next) throw new Error("engine has no active conversation");
-    return next;
-  }
-
-  /** Move the state the transaction in progress commits to (inside tx). */
-  private advance(next: ConversationState): void {
-    this.transaction.next = next;
-  }
-
-  /** Move the task the transaction in progress commits to (inside tx); see `withTask`. */
-  private advanceTask(taskId: string, update: (task: TaskState) => TaskState): void {
-    this.advance(withTask(this.draft, taskId, update));
+  /** The client and connection a transition decided now records its events under. */
+  private get origin(): Origin {
+    return { clientId: this.activeClientId, connectionId: this.activeConnectionId };
   }
 
   /**
@@ -529,57 +492,63 @@ export class Engine {
   // ---------------------------------------------------------------- event plumbing
 
   /**
-   * Run one transition: `build` queues its records without touching the catalog and moves the draft state (see
-   * `draft`), then `commitRecords` writes the records in one catalog transaction. A build or commit that throws
-   * commits nothing, keeps the state it started from and performs no queued effect, so nothing is released or
-   * delivered. After a commit the draft becomes the state, then each effect runs on its own: one that throws is
-   * logged as a delivery failure, never reported as a persistence failure, and the records, the state, and the
-   * remaining effects stand.
+   * Run one transition the engine builds itself: `build` queues its records without touching the catalog and moves
+   * the draft state (see `TransitionDraft`), then `commit` commits what it built. A build that throws commits
+   * nothing, keeps the state it started from and performs no queued effect.
    */
   private tx<T>(build: () => T): T {
     // A transition inside another would commit the outer one's half-built records.
     if (this.open !== null) throw new Error("transitions do not nest");
-    const open: OpenTransaction = {
-      time: this.deps.now().toISOString(),
-      records: [],
-      next: this.current,
-      effects: [],
-    };
-    this.open = open;
+    const draft = new TransitionDraft({
+      state: this.current,
+      now: this.deps.now(),
+      origin: this.origin,
+    });
+    this.open = draft;
     let result: T;
-    let changes: CommittedChange[];
     try {
       result = build();
-      changes = commitRecords(this.deps.writer, open.records);
     } finally {
       this.open = null;
     }
-    this.current = open.next;
-    for (const effect of open.effects) {
+    this.commit(draft.built());
+    return result;
+  }
+
+  /**
+   * Decide one transition of the active conversation with the pure machine (see ./decide-conversation.ts), reading
+   * the clock once for it; an accepted decision is committed with `commit`.
+   */
+  private decide<Event, Rejection>(
+    transition: ConversationTransition<Event, Rejection>,
+    event: Event,
+  ): ConversationDecision<Rejection> {
+    if (this.open !== null) throw new Error("transitions do not nest");
+    return transition({ state: this.activeConversation, event, now: this.deps.now() });
+  }
+
+  /**
+   * Commit what one transition built: `commitRecords` writes its records in one catalog transaction. A commit that
+   * throws keeps the state it started from and performs no effect, so nothing is released or delivered. After a
+   * commit the next state becomes the state, then each effect runs on its own: one that throws is logged as a
+   * delivery failure, never reported as a persistence failure, and the records, the state, and the remaining effects
+   * stand.
+   */
+  private commit(built: BuiltTransition): void {
+    if (this.open !== null) throw new Error("transitions do not nest");
+    const changes = commitRecords(this.deps.writer, built.records);
+    this.current = built.next;
+    for (const effect of built.effects) {
       try {
         this.perform(effect, changes);
       } catch (error) {
         this.deps.log(`delivery failed after commit; records stand: ${errorMessage(error)}`);
       }
     }
-    return result;
-  }
-
-  /** Queue a record for the transaction in progress to commit (inside tx). */
-  private write(...records: EngineRecord[]): void {
-    this.transaction.records.push(...records);
   }
 
   /**
-   * Queue an effect (see `EngineEffect`) for after the commit and its next state (inside tx); `perform` hands it
-   * what the commit changed.
-   */
-  private afterCommit(effect: EngineEffect): void {
-    this.transaction.effects.push(effect);
-  }
-
-  /**
-   * Perform one effect of a committed transition, once its next state has replaced the engine's (see `tx`). It
+   * Perform one effect of a committed transition, once its next state has replaced the engine's (see `commit`). It
    * reads the connection, the held prompts and the active turn as they are now, not as they were when the effect
    * was queued.
    */
@@ -614,52 +583,6 @@ export class Engine {
       sequence: envelope.sequence,
       server_time: this.deps.now().toISOString(),
       ...event,
-    });
-  }
-
-  /** Persist an event (inside tx) and queue its delivery with the id it was given and the sequence it committed at. */
-  private emit(event: OutgoingEvent, opts: EventOpts): void {
-    this.record(event.type, event.payload, opts);
-    this.afterCommit({ kind: "deliver_event", eventId: opts.id, event });
-  }
-
-  /** Persist evidence that has no client-facing schema (inside tx), under the conversation the transaction records. */
-  private record(type: JournalEventType, payload: unknown, opts: EventOpts): void {
-    this.write({
-      kind: "append_event",
-      input: {
-        id: opts.id,
-        receivedAt: this.recordedAt,
-        conversationId: this.draft.id,
-        type,
-        payload,
-        taskId: opts.taskId ?? null,
-        executionId: opts.executionId ?? null,
-        clientId: this.activeClientId,
-        clientConnectionId: this.activeConnectionId,
-        causedByEventId: opts.causedBy ?? null,
-      },
-    });
-  }
-
-  /**
-   * Queue the progress notification for call `callId` of task `taskId` (inside tx), as the draft leaves it: the
-   * status the commit leaves the call in, so the notice follows every change the transaction made to it so far.
-   */
-  private notifyCall(taskId: string, callId: string, notice?: string): void {
-    const call = this.draftCall(taskId, callId);
-    this.afterCommit({
-      kind: "notify_tool_call",
-      payload: {
-        conversation_id: this.draft.id,
-        task_id: taskId,
-        tool_call_id: call.id,
-        runtime_call_id: call.runtimeCallId,
-        tool_identity: call.toolIdentity,
-        status: call.status,
-        ...(notice ? { detail: notice } : {}),
-        redacted_arguments: call.redactedArguments,
-      },
     });
   }
 
@@ -791,17 +714,21 @@ export class Engine {
       client: this.activeClientId,
     };
     try {
-      // Unlike the conversation, which moves with the draft, this sets the active connection and client while the
-      // records are built, because `record` reads them; the catch below restores them if the build or commit throws.
+      // Unlike the conversation, which moves with the draft, this sets the active connection and client before the
+      // transition opens, because its events are recorded under them (`origin`); the catch below restores them if the
+      // build or commit throws. Disconnected, the active connection is none or one of this client's (refuseStart), so
+      // it stays.
+      if (connected) this.activeConnectionId = ctx.connectionId;
+      this.activeClientId = ctx.clientId;
       return this.tx(() => {
-        const startedAt = this.recordedAt;
+        const startedAt = this.transition.at;
         const { records: provenanceRows, summary: provenance } = provenanceRecords(
           ids.provenance,
           startedAt,
         );
         const runtimeConversationId = ids.runtimeConversation;
         const conversationId = ids.conversation;
-        this.write(...provenanceRows, {
+        this.transition.write(...provenanceRows, {
           kind: "create_conversation",
           input: {
             id: conversationId,
@@ -810,9 +737,9 @@ export class Engine {
             runtimeConversationId,
           },
         });
-        this.write(...provenanceLinks({ conversationId, plan: ids.provenance }));
+        this.transition.write(...provenanceLinks({ conversationId, plan: ids.provenance }));
         if (previous.conversation)
-          this.write({
+          this.transition.write({
             kind: "update_conversation",
             id: previous.conversation.id,
             fields: { status: "closed" },
@@ -823,7 +750,7 @@ export class Engine {
           provenance.agent_prompt_digest === null
             ? null
             : writer.objects.pathFor(provenance.agent_prompt_digest);
-        this.advance({
+        this.transition.advance({
           id: conversationId,
           runtimeConversationId,
           provenanceSetId: provenance.provenance_set_id,
@@ -835,11 +762,8 @@ export class Engine {
           pendingNote: null,
           task: null,
         });
-        // Disconnected, the active connection is none or one of this client's (refuseStart), so it stays.
-        if (connected) this.activeConnectionId = ctx.connectionId;
-        this.activeClientId = ctx.clientId;
-        this.record("provenance_recorded", provenance, { id: ids.provenanceRecorded });
-        this.emit(
+        this.transition.record("provenance_recorded", provenance, { id: ids.provenanceRecorded });
+        this.transition.emit(
           {
             type: "conversation_started",
             payload: {
@@ -851,7 +775,8 @@ export class Engine {
           { id: ids.started },
         );
         // After conversation_started, so that event keeps the sequence it has with debug mode off.
-        if (this.deps.debugMode) this.record("captured_in_debug_mode", {}, { id: ids.debugMode });
+        if (this.deps.debugMode)
+          this.transition.record("captured_in_debug_mode", {}, { id: ids.debugMode });
         return {
           ok: true,
           result: {
@@ -892,12 +817,12 @@ export class Engine {
     const ids = { submitted: this.newId("evt"), started: this.newId("evt") };
     try {
       this.tx(() => {
-        this.write(
+        this.transition.write(
           {
             kind: "create_task",
             input: {
               id: taskId,
-              createdAt: this.recordedAt,
+              createdAt: this.transition.at,
               conversationId: conversation.id,
               text: payload.text,
               clientId: ctx.clientId,
@@ -907,7 +832,7 @@ export class Engine {
             kind: "create_execution",
             input: {
               id: executionId,
-              startedAt: this.recordedAt,
+              startedAt: this.transition.at,
               taskId,
               conversationId: conversation.id,
               runtimeIdentity: RUNTIME_IDENTITY,
@@ -920,7 +845,7 @@ export class Engine {
           },
         );
         const opts = { taskId, executionId };
-        this.record(
+        this.transition.record(
           "task_submitted",
           {
             text: payload.text,
@@ -930,7 +855,7 @@ export class Engine {
           },
           { ...opts, id: ids.submitted },
         );
-        this.emit(
+        this.transition.emit(
           {
             type: "task_started",
             payload: {
@@ -943,8 +868,8 @@ export class Engine {
           },
           { ...opts, id: ids.started },
         );
-        this.advance({
-          ...this.draft,
+        this.transition.advance({
+          ...this.transition.draft,
           epoch,
           turnCount: turnIndex,
           pendingNote: null,
@@ -1023,90 +948,26 @@ export class Engine {
       return addressed.result;
     }
     const { task } = addressed;
-    const call = pendingCall(task, payload.approval_id);
-    const ids = { resolved: this.newId("evt"), dispatched: this.newId("evt") };
-    const outcome = decideApproval({
-      decision: payload.decision,
-      ownerClientId: task.clientId,
-      deciderClientId: ctx.clientId,
-      call,
-      task: {
-        status: task.status,
-        gateOpen: task.gateOpen,
-        epoch: task.epoch,
-        otherPending: otherPending(task, call ? payload.approval_id : null),
-      },
-      conversationEpoch: this.activeConversation.epoch,
-    });
-    return match(outcome)
-      .with({ kind: "not_owner" }, () =>
-        fail("unauthenticated", "decision must come from the client that owns the task"),
-      )
-      .with({ kind: "not_pending" }, () => {
-        const known = this.deps.catalog.get<{ status: ApprovalStatus }>(
-          "SELECT a.status FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id WHERE a.id = ? AND t.task_id = ?",
-          payload.approval_id,
-          task.id,
-        );
-        // A row still pending here is no longer held in memory, for example because its abandonment could not
-        // be recorded: Mia never released its call and no decision can now.
-        if (known?.status === "pending")
-          return fail(
-            "invalid_state",
-            `approval ${payload.approval_id} can no longer be decided; its call was not released`,
-          );
-        if (known)
-          return fail(
-            "invalid_state",
-            `approval ${payload.approval_id} is ${known.status}, not pending; a decision cannot be reused`,
-          );
-        return fail("not_found", `approval ${payload.approval_id} does not exist for this task`);
-      })
-      .with({ kind: "decided" }, (decided) =>
-        this.commitDecision({ ctx, task, payload, decided, ids }),
-      )
-      .exhaustive();
-  }
-
-  /** Persist a user decision before any release; the held call changes and is answered only after the commit. */
-  private commitDecision(input: {
-    ctx: CommandContext;
-    task: TaskState;
-    payload: { approval_id: string; decision: Decision };
-    decided: Extract<ApprovalOutcome<CallState>, { kind: "decided" }>;
-    /** The approval_resolved event, and the tool_dispatched event of a release. */
-    ids: { resolved: string; dispatched: string };
-  }): CommandResult {
-    const { ctx, task, payload, decided, ids } = input;
     const approvalId = payload.approval_id;
-    const { call, change } = decided;
+    const decision = this.decide(approvalDecisionTransition, {
+      kind: "approval_decision",
+      origin: this.origin,
+      taskId: task.id,
+      approvalId,
+      decision: payload.decision,
+      deciderClientId: ctx.clientId,
+      ids: { resolved: this.newId("evt"), dispatched: this.newId("evt") },
+    });
+    if (decision.kind === "rejected")
+      return match(decision.rejection)
+        .with({ kind: "no_task" }, () => notActiveTask(payload.task_id))
+        .with({ kind: "not_owner" }, () =>
+          fail("unauthenticated", "decision must come from the client that owns the task"),
+        )
+        .with({ kind: "not_pending" }, () => this.notPending(task, approvalId))
+        .exhaustive();
     try {
-      this.tx(() => {
-        this.emit(
-          this.approvalResolved(task, { approvalId, callId: call.id, status: decided.approval }),
-          { ...this.taskOpts(task), id: ids.resolved },
-        );
-        this.write({
-          kind: "update_approval",
-          id: approvalId,
-          fields: {
-            status: decided.approval,
-            consumedAt: this.recordedAt,
-            decisionEventId: ids.resolved,
-            decisionClientId: ctx.clientId,
-          },
-        });
-        if (decided.release)
-          this.recordDispatch(task, call, {
-            id: ids.dispatched,
-            via: "approval",
-            causedBy: ids.resolved,
-          });
-        else this.recordCallChange(change);
-        this.recordTaskStatus(task, decided.taskStatus);
-        this.advanceTask(task.id, (next) => withoutPending(next, approvalId));
-        this.commitCallChange(task, change, { notify: true });
-      });
+      this.commit(decision);
     } catch (error) {
       // Record failure: the call stays held and pending; nothing is released.
       return fail(
@@ -1116,8 +977,34 @@ export class Engine {
     }
     return {
       ok: true,
-      result: { approval_id: approvalId, released: decided.release, decision: payload.decision },
+      result: {
+        approval_id: approvalId,
+        released: releasedBy(decision.next, approvalId),
+        decision: payload.decision,
+      },
     };
+  }
+
+  /** Why a decision on `approvalId`, which `task` no longer holds pending, was refused, as the records say. */
+  private notPending(task: TaskState, approvalId: string): CommandResult {
+    const known = this.deps.catalog.get<{ status: ApprovalStatus }>(
+      "SELECT a.status FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id WHERE a.id = ? AND t.task_id = ?",
+      approvalId,
+      task.id,
+    );
+    // A row still pending here is no longer held in memory, for example because its abandonment could not
+    // be recorded: Mia never released its call and no decision can now.
+    if (known?.status === "pending")
+      return fail(
+        "invalid_state",
+        `approval ${approvalId} can no longer be decided; its call was not released`,
+      );
+    if (known)
+      return fail(
+        "invalid_state",
+        `approval ${approvalId} is ${known.status}, not pending; a decision cannot be reused`,
+      );
+    return fail("not_found", `approval ${approvalId} does not exist for this task`);
   }
 
   interruptTask(
@@ -1129,81 +1016,45 @@ export class Engine {
     return this.interrupt(addressed.task);
   }
 
-  /** Interrupt the active task through the recorded path, whoever asked: a client or shutdown. */
-  private interrupt(task: TaskState): CommandResult {
-    const requestedEventId = this.newId("evt");
-    const outcome = decideInterruption({
-      taskStatus: task.status,
-      runtimeEnded: task.runtimeEnded,
-      conversationEpoch: this.activeConversation.epoch,
-      pending: [...task.pendingApprovals.keys()].flatMap((approvalId) => {
-        const call = pendingCall(task, approvalId);
-        return call ? [{ approvalId, call, resolvedEventId: this.newId("evt") }] : [];
-      }),
-    });
-    return match(outcome)
-      .with({ kind: "already_interrupting" }, (): CommandResult => ({
-        ok: true,
-        result: { already_interrupting: true },
-      }))
-      .with({ kind: "runtime_ended" }, (): CommandResult => ({
-        ok: true,
-        result: { runtime_ended: true },
-      }))
-      .with({ kind: "invalid" }, ({ taskStatus }) => fail("invalid_state", `task is ${taskStatus}`))
-      .with({ kind: "interrupt" }, (interruption) =>
-        this.commitInterruption(task, interruption, requestedEventId),
-      )
-      .exhaustive();
-  }
-
   /**
-   * Atomically: close the gate, advance the epoch, invalidate pending approvals, record the order in the
-   * interruption_requested event `requestedEventId` names.
+   * Interrupt the active task through the recorded path, whoever asked: a client or shutdown. Atomically, the gate
+   * closes, the epoch advances, pending approvals are invalidated and the order is recorded (see
+   * `interruptionTransition`).
    */
-  private commitInterruption(
-    task: TaskState,
-    interruption: Extract<InterruptionOutcome<CallState>, { kind: "interrupt" }>,
-    requestedEventId: string,
-  ): CommandResult {
-    const conversation = this.activeConversation;
-    const opts = this.taskOpts(task);
+  private interrupt(task: TaskState): CommandResult {
+    const requested = this.newId("evt");
+    const decision = this.decide(interruptionTransition, {
+      kind: "interrupt_task",
+      origin: this.origin,
+      taskId: task.id,
+      ids: {
+        requested,
+        resolved: new Map(
+          task.pendingApprovals.keys().map((approvalId) => [approvalId, this.newId("evt")]),
+        ),
+      },
+    });
+    if (decision.kind === "rejected")
+      return match(decision.rejection)
+        .with({ kind: "no_task" }, () => notActiveTask(task.id))
+        .with({ kind: "already_interrupting" }, (): CommandResult => ({
+          ok: true,
+          result: { already_interrupting: true },
+        }))
+        .with({ kind: "runtime_ended" }, (): CommandResult => ({
+          ok: true,
+          result: { runtime_ended: true },
+        }))
+        .with({ kind: "invalid" }, ({ taskStatus }) =>
+          fail("invalid_state", `task is ${taskStatus}`),
+        )
+        .exhaustive();
     try {
-      this.tx(() => {
-        this.emit(
-          {
-            type: "interruption_requested",
-            payload: {
-              conversation_id: conversation.id,
-              task_id: task.id,
-              execution_epoch: interruption.epoch,
-            },
-          },
-          { ...opts, id: requestedEventId },
-        );
-        for (const change of interruption.approvals)
-          this.recordApprovalChange(task, change, { decisionEventId: requestedEventId });
-        this.write({
-          kind: "update_task",
-          id: task.id,
-          fields: { status: interruption.task.status },
-        });
-        this.advance({ ...this.draft, epoch: interruption.epoch });
-        this.advanceTask(task.id, (next) => ({
-          ...next,
-          ...interruption.task,
-          pendingApprovals: new Map(),
-        }));
-        for (const { change } of interruption.calls) {
-          this.recordCallChange(change);
-          this.commitCallChange(task, change, { notify: true });
-        }
-        this.afterCommit({ kind: "interrupt_runtime", taskId: task.id });
-      });
+      this.commit(decision);
     } catch (error) {
       return fail("record_failure", `interruption not recorded: ${errorMessage(error)}`);
     }
-    return { ok: true, result: { execution_epoch: interruption.epoch } };
+    return { ok: true, result: { execution_epoch: decision.next.epoch } };
   }
 
   diagnosticSnapshot(
@@ -1218,7 +1069,7 @@ export class Engine {
     try {
       this.tx(() => {
         if (conversationId)
-          this.record(
+          this.transition.record(
             "client_diagnostics",
             {
               client_id: ctx.clientId,
@@ -1227,11 +1078,11 @@ export class Engine {
             },
             { id: ids.event, taskId: this.task?.id ?? null },
           );
-        this.write({
+        this.transition.write({
           kind: "record_diagnostics",
           input: {
             id: ids.diagnostics,
-            receivedAt: this.recordedAt,
+            receivedAt: this.transition.at,
             conversationId,
             clientId: ctx.clientId,
             clientConnectionId: ctx.connectionId,
@@ -1282,7 +1133,7 @@ export class Engine {
       const id = this.newId("evt");
       try {
         this.tx(() =>
-          this.record(
+          this.transition.record(
             "client_disconnected",
             {
               connection_id: connectionId,
@@ -1334,7 +1185,7 @@ export class Engine {
     if (!task || task.id !== payload.task_id)
       return {
         kind: "no_active_task",
-        result: fail("not_found", `task ${payload.task_id} is not the active task`),
+        result: notActiveTask(payload.task_id),
       };
     return { kind: "active", task };
   }
@@ -1346,115 +1197,6 @@ export class Engine {
    */
   private answerPrompt(call: CallState, decision: PermissionDecision): void {
     if (call.approvalId !== null) this.prompts.reply(call.approvalId, decision);
-  }
-
-  private taskOpts(task: TaskState): EventLinks {
-    return { taskId: task.id, executionId: task.executionId };
-  }
-
-  // ---------------------------------------------------------------- committing transitions
-
-  private approvalResolved(
-    task: TaskState,
-    resolved: Pick<ApprovalChange, "approvalId" | "callId"> & {
-      status: EventPayload<"approval_resolved">["status"];
-      reason?: string;
-    },
-  ): OutgoingEvent {
-    return {
-      type: "approval_resolved",
-      payload: {
-        conversation_id: this.activeConversation.id,
-        task_id: task.id,
-        approval_id: resolved.approvalId,
-        tool_call_id: resolved.callId,
-        status: resolved.status,
-        ...(resolved.reason ? { reason: resolved.reason } : {}),
-      },
-    };
-  }
-
-  /** Record an approval resolved without a user decision, and the event that tells the client (inside tx). */
-  private recordApprovalChange(
-    task: TaskState,
-    change: ApprovalChange,
-    cause: { decisionEventId: string | null } = { decisionEventId: null },
-  ): void {
-    this.write({
-      kind: "update_approval",
-      id: change.approvalId,
-      fields: {
-        status: change.status,
-        consumedAt: this.recordedAt,
-        reason: change.reason,
-        ...(cause.decisionEventId ? { decisionEventId: cause.decisionEventId } : {}),
-      },
-    });
-    this.emit(this.approvalResolved(task, change), {
-      ...this.taskOpts(task),
-      id: change.eventId,
-      causedBy: cause.decisionEventId,
-    });
-  }
-
-  private recordCallChange(change: CallChange): void {
-    this.write({
-      kind: "update_tool_call",
-      id: change.callId,
-      fields: {
-        updatedAt: this.recordedAt,
-        status: change.status,
-        ...(change.detail ? { detail: change.detail } : {}),
-      },
-    });
-  }
-
-  /** Record a call's release; the runtime learns of it only through the settle queued after the commit (inside tx). */
-  private recordDispatch(
-    task: TaskState,
-    call: CallState,
-    cause: { id: string; via: "approval" | "policy"; causedBy: string },
-  ): void {
-    this.record(
-      "tool_dispatched",
-      {
-        tool_call_id: call.id,
-        runtime_call_id: call.runtimeCallId,
-        tool_identity: call.toolIdentity,
-        policy: call.policy,
-        via: cause.via,
-      },
-      { ...this.taskOpts(task), id: cause.id, causedBy: cause.causedBy },
-    );
-    this.write({
-      kind: "update_tool_call",
-      id: call.id,
-      fields: { updatedAt: this.recordedAt, status: "dispatched", dispatchEventId: cause.id },
-    });
-  }
-
-  /**
-   * The call takes its new status in the next state (inside tx). With `notify`, the client is then told of it; its
-   * held prompt, if any, is answered after.
-   */
-  private commitCallChange(
-    task: TaskState,
-    change: CallChange,
-    options: { notify: boolean } = { notify: false },
-  ): void {
-    this.advanceTask(task.id, (next) => withCall(next, change.callId, { status: change.status }));
-    if (options.notify) this.notifyCall(task.id, change.callId, change.notice);
-    const approvalId = this.draftCall(task.id, change.callId).approvalId;
-    if (change.settle && approvalId !== null)
-      this.afterCommit({ kind: "answer_prompt", approvalId, decision: change.settle });
-  }
-
-  /** Call `callId` of task `taskId` as the transaction in progress leaves it so far (inside tx). */
-  private draftCall(taskId: string, callId: string): CallState {
-    const task = this.draft.task;
-    const call = task?.id === taskId ? callById(task, callId) : undefined;
-    if (!call) throw new Error(`call ${callId} is not a call of task ${taskId}`);
-    return call;
   }
 
   // ---------------------------------------------------------------- runtime events
@@ -1614,7 +1356,7 @@ export class Engine {
       return;
     }
     const conversation = this.activeConversation;
-    const links = this.taskOpts(task);
+    const links = taskLinks(task);
     const ids: RuntimeEventIds = {
       event: this.newId("evt"),
       resolved: this.newId("evt"),
@@ -1626,20 +1368,27 @@ export class Engine {
       this.tx(() =>
         match(event)
           .with({ type: "runtime_started" }, (started) => {
-            this.record("runtime_started", { pid: started.pid, launch: started.launch }, opts);
+            this.transition.record(
+              "runtime_started",
+              { pid: started.pid, launch: started.launch },
+              opts,
+            );
           })
           .with({ type: "runtime_init" }, ({ init }) => {
-            this.record("runtime_init", init.evidence, opts);
-            this.write({
+            this.transition.record("runtime_init", init.evidence, opts);
+            this.transition.write({
               kind: "update_execution",
               id: task.executionId,
               fields: { reportedModel: init.model },
             });
-            this.advance({ ...this.draft, sessionStarted: true });
-            this.advanceTask(task.id, (next) => ({ ...next, reportedModel: init.model }));
+            this.transition.advance({ ...this.transition.draft, sessionStarted: true });
+            this.transition.advanceTask(task.id, (next) => ({
+              ...next,
+              reportedModel: init.model,
+            }));
           })
           .with({ type: "text_delta" }, (delta) => {
-            this.emit(
+            this.transition.emit(
               {
                 type: "text_delta",
                 payload: {
@@ -1654,7 +1403,7 @@ export class Engine {
           })
           .with({ type: "tool_proposed" }, (proposed) => {
             if (!proposed.complete) {
-              this.record(
+              this.transition.record(
                 "tool_proposal_started",
                 { runtime_call_id: proposed.runtimeCallId, tool_identity: proposed.toolIdentity },
                 opts,
@@ -1662,7 +1411,7 @@ export class Engine {
               return;
             }
             const digest = canonicalDigest(proposed.arguments);
-            this.record(
+            this.transition.record(
               "tool_proposed",
               {
                 runtime_call_id: proposed.runtimeCallId,
@@ -1678,10 +1427,10 @@ export class Engine {
               digest,
             });
             if (binding.kind === "attach") {
-              this.write({
+              this.transition.write({
                 kind: "update_tool_call",
                 id: binding.call.id,
-                fields: { updatedAt: this.recordedAt, proposalEventId: ids.event },
+                fields: { updatedAt: this.transition.at, proposalEventId: ids.event },
               });
               return;
             }
@@ -1702,13 +1451,13 @@ export class Engine {
               policy,
               proposalEventId: ids.event,
             });
-            this.notifyCall(task.id, state.id);
+            this.transition.notifyCall(task.id, state.id);
           })
           .with({ type: "assistant_message" }, (message) => {
-            this.record("assistant_message", message.message, opts);
+            this.transition.record("assistant_message", message.message, opts);
           })
           .with({ type: "tool_result" }, (toolResult) => {
-            this.record(
+            this.transition.record(
               "tool_result",
               {
                 runtime_call_id: toolResult.runtimeCallId,
@@ -1720,7 +1469,7 @@ export class Engine {
             );
             const binding = bindToolResult(task.calls.get(toolResult.runtimeCallId) ?? []);
             if (binding.kind === "unmatched") {
-              this.record(
+              this.transition.record(
                 "tool_result_unmatched",
                 { runtime_call_id: toolResult.runtimeCallId },
                 { ...links, id: ids.unmatched },
@@ -1729,15 +1478,15 @@ export class Engine {
             }
             const { call } = binding;
             const status = statusAfterResult(call.status, toolResult.isError);
-            this.write({
+            this.transition.write({
               kind: "update_tool_call",
               id: call.id,
-              fields: { updatedAt: this.recordedAt, status, resultEventId: ids.event },
+              fields: { updatedAt: this.transition.at, status, resultEventId: ids.event },
             });
             if (status === "completed" && output)
               this.registerToolOutput({ task, call, ...output, eventId: ids.event });
             for (const body of read.bodies ?? [])
-              this.record(
+              this.transition.record(
                 MCP_BODY_EVENT[body.direction],
                 mcpPayload({ toolCallId: call.id, runtimeCallId: call.runtimeCallId }, body),
                 {
@@ -1746,12 +1495,12 @@ export class Engine {
                   causedBy: ids.event,
                 },
               );
-            this.advanceTask(task.id, (next) => withCall(next, call.id, { status }));
-            this.notifyCall(task.id, call.id);
+            this.transition.advanceTask(task.id, (next) => withCall(next, call.id, { status }));
+            this.transition.notifyCall(task.id, call.id);
           })
           .with({ type: "turn_result" }, ({ summary }) => {
-            this.record("runtime_result", summary.evidence, opts);
-            this.write({
+            this.transition.record("runtime_result", summary.evidence, opts);
+            this.transition.write({
               kind: "update_execution",
               id: task.executionId,
               fields: {
@@ -1766,10 +1515,10 @@ export class Engine {
             });
           })
           .with({ type: "runtime_stderr" }, (stderr) => {
-            this.record("runtime_stderr", { text: stderr.text }, opts);
+            this.transition.record("runtime_stderr", { text: stderr.text }, opts);
           })
           .with({ type: "malformed_event" }, (malformed) => {
-            this.emit(
+            this.transition.emit(
               {
                 type: "error",
                 payload: {
@@ -1783,7 +1532,7 @@ export class Engine {
             );
           })
           .with({ type: "runtime_exit" }, (exit) => {
-            this.record("runtime_exit", { code: exit.code, signal: exit.signal }, opts);
+            this.transition.record("runtime_exit", { code: exit.code, signal: exit.signal }, opts);
           })
           .exhaustive(),
       );
@@ -1797,11 +1546,11 @@ export class Engine {
     const { id, runtimeCallId, toolIdentity, digest, policy, proposalEventId } = input;
     const revision = (task.calls.get(runtimeCallId)?.at(-1)?.revision ?? 0) + 1;
     const redactedArguments = redactValue(input.args);
-    this.write({
+    this.transition.write({
       kind: "create_tool_call",
       input: {
         id,
-        createdAt: this.recordedAt,
+        createdAt: this.transition.at,
         conversationId: this.activeConversation.id,
         taskId: task.id,
         executionId: task.executionId,
@@ -1826,7 +1575,7 @@ export class Engine {
       status: "proposed",
       approvalId: null,
     };
-    this.advanceTask(task.id, (next) => withRevision(next, state));
+    this.transition.advanceTask(task.id, (next) => withRevision(next, state));
     return state;
   }
 
@@ -1852,23 +1601,12 @@ export class Engine {
     if (!superseded) return;
     const { approval, call, taskStatus } = superseded;
     if (approval) {
-      this.recordApprovalChange(task, approval);
-      this.advanceTask(task.id, (draft) => withoutPending(draft, approval.approvalId));
+      this.transition.recordApprovalChange(task, approval);
+      this.transition.advanceTask(task.id, (draft) => withoutPending(draft, approval.approvalId));
     }
-    this.recordCallChange(call);
-    this.commitCallChange(task, call);
-    this.recordTaskStatus(task, taskStatus);
-  }
-
-  /**
-   * Record the task's status and move the draft to it (inside tx). It writes even an unchanged status, as every
-   * step that may change it does, so the records need no comparison against what an earlier step of the same
-   * transaction set. The write and the draft both keep transaction order, so the last one wins in the records and in
-   * memory alike (a superseded approval resumes the task, then the new revision's ask holds it).
-   */
-  private recordTaskStatus(task: TaskState, status: TaskStatus): void {
-    this.write({ kind: "update_task", id: task.id, fields: { status } });
-    this.advanceTask(task.id, (next) => ({ ...next, status }));
+    this.transition.recordCallChange(call);
+    this.transition.commitCallChange(task, call);
+    this.transition.recordTaskStatus(task, taskStatus);
   }
 
   // ---------------------------------------------------------------- approval controller
@@ -1879,7 +1617,7 @@ export class Engine {
   ): Promise<PermissionDecision> {
     const task = this.taskOf(taskId);
     if (!task) return { behavior: "deny", message: "Mia has no active task for this call." };
-    const opts = this.taskOpts(task);
+    const opts = taskLinks(task);
     const runtimeCallId = req.toolUseId;
     if (!runtimeCallId)
       return this.refuseRequest(task, {
@@ -1927,7 +1665,7 @@ export class Engine {
               next: { toolIdentity: req.toolName, digest },
               resolvedEventId: ids.resolved,
             });
-          this.record(
+          this.transition.record(
             "tool_proposed",
             {
               runtime_call_id: runtimeCallId,
@@ -1948,7 +1686,7 @@ export class Engine {
             proposalEventId: ids.proposal,
           });
         }
-        this.record(
+        this.transition.record(
           "policy_evaluated",
           {
             tool_call_id: bound.id,
@@ -1967,7 +1705,7 @@ export class Engine {
           evaluationId: ids.evaluation,
           ids,
         });
-        this.notifyCall(task.id, bound.id);
+        this.transition.notifyCall(task.id, bound.id);
         return { callId: bound.id, answer };
       });
     } catch (error) {
@@ -2022,7 +1760,7 @@ export class Engine {
     const id = this.newId("evt");
     try {
       this.tx(() =>
-        this.emit(
+        this.transition.emit(
           {
             type: "error",
             payload: {
@@ -2032,7 +1770,7 @@ export class Engine {
               task_id: task.id,
             },
           },
-          { ...this.taskOpts(task), id },
+          { ...taskLinks(task), id },
         ),
       );
     } catch (error) {
@@ -2054,11 +1792,11 @@ export class Engine {
   }): PermissionAnswer {
     const { task, call, rule, evaluationId, ids } = input;
     const conversation = this.activeConversation;
-    const opts = { ...this.taskOpts(task), id: ids.outcome };
+    const opts = { ...taskLinks(task), id: ids.outcome };
     return match(rule)
       .with({ kind: "deny" }, (denial): PermissionAnswer => {
         if (denial.unlisted)
-          this.emit(
+          this.transition.emit(
             {
               type: "error",
               payload: {
@@ -2076,8 +1814,8 @@ export class Engine {
           detail: denial.detail,
           settle: null,
         };
-        this.recordCallChange(change);
-        this.commitCallChange(task, change);
+        this.transition.recordCallChange(change);
+        this.transition.commitCallChange(task, change);
         const { message } = denial;
         return {
           kind: "answer",
@@ -2087,13 +1825,19 @@ export class Engine {
         };
       })
       .with({ kind: "dispatch" }, (): PermissionAnswer => {
-        this.recordDispatch(task, call, { id: ids.outcome, via: "policy", causedBy: evaluationId });
-        this.advanceTask(task.id, (next) => withCall(next, call.id, { status: "dispatched" }));
+        this.transition.recordDispatch(task, call, {
+          id: ids.outcome,
+          via: "policy",
+          causedBy: evaluationId,
+        });
+        this.transition.advanceTask(task.id, (next) =>
+          withCall(next, call.id, { status: "dispatched" }),
+        );
         return { kind: "answer", decision: { behavior: "allow" } };
       })
       .with({ kind: "ask" }, (): PermissionAnswer => {
         const approvalId = ids.approval;
-        this.emit(
+        this.transition.emit(
           {
             type: "approval_requested",
             payload: {
@@ -2115,12 +1859,12 @@ export class Engine {
         );
         // Durable pending approval bound to (conversation, task, runtime call, revision, tool, digest, epoch), and
         // to the event that asked for it: its id was chosen first, so the event could name it before it existed.
-        this.write(
+        this.transition.write(
           {
             kind: "create_approval",
             input: {
               id: approvalId,
-              requestedAt: this.recordedAt,
+              requestedAt: this.transition.at,
               toolCallId: call.id,
               executionEpoch: task.epoch,
               requestingEventId: ids.outcome,
@@ -2129,17 +1873,17 @@ export class Engine {
           {
             kind: "update_tool_call",
             id: call.id,
-            fields: { updatedAt: this.recordedAt, status: "awaiting_approval" },
+            fields: { updatedAt: this.transition.at, status: "awaiting_approval" },
           },
         );
-        this.advanceTask(task.id, (next) =>
+        this.transition.advanceTask(task.id, (next) =>
           withPending(
             withCall(next, call.id, { status: "awaiting_approval", approvalId }),
             approvalId,
             call.id,
           ),
         );
-        this.recordTaskStatus(task, "awaiting_approval");
+        this.transition.recordTaskStatus(task, "awaiting_approval");
         return { kind: "hold", approvalId };
       })
       .exhaustive();
@@ -2154,44 +1898,28 @@ export class Engine {
     const call = task ? callById(task, callId) : undefined;
     // Unreachable while the turn's end answers every prompt still held before its task is cleared (submitText).
     if (!task || !call) return TURN_ENDED;
-    const approvalId = call.approvalId;
-    const { expire, settle } = decideAbandonment({
-      call,
-      approvalId,
-      pending: approvalId !== null && task.pendingApprovals.has(approvalId),
-      task: { status: task.status, otherPending: otherPending(task, approvalId) },
-      resolvedEventId: this.newId("evt"),
+    const decision = this.decide(abandonmentTransition, {
+      kind: "prompt_abandoned",
+      origin: this.origin,
+      taskId,
+      callId,
+      ids: { resolved: this.newId("evt") },
     });
-    if (expire) {
-      const expired = (state: ConversationState): ConversationState =>
-        withTask(state, taskId, (next) => {
-          const invalidated = withoutPending(
-            withCall(next, callId, { status: expire.call.status }),
-            expire.approval.approvalId,
-          );
-          return {
-            ...invalidated,
-            status: expire.taskStatus,
-            abandoned: [...next.abandoned, callId],
-          };
-        });
+    // Rejected, the approval was no longer pending (or the call is gone), so there is nothing to expire.
+    if (decision.kind === "accepted") {
       try {
-        this.tx(() => {
-          this.recordApprovalChange(task, expire.approval);
-          this.recordCallChange(expire.call);
-          this.write({ kind: "update_task", id: task.id, fields: { status: expire.taskStatus } });
-          this.advance(expired(this.draft));
-        });
+        this.commit(decision);
       } catch (error) {
         this.deps.log(`could not record abandoned approval: ${String(error)}`);
         // The runtime is denied below whatever the records say, so memory takes the expiry anyway: a later
         // decision finds nothing pending and cannot release the call. The catalog keeps the approval pending
         // until finishTurn records the call's final status and expires every approval still pending. Unlike the
-        // other memory-only changes, this one departs from what the records say (#165).
-        if (this.current) this.current = expired(this.current);
+        // other memory-only changes, this one departs from what the records say (#165). The failed commit ran
+        // synchronously after the decision, so its next state is still the current one with the expiry applied.
+        this.current = decision.next;
       }
     }
-    return settle;
+    return abandonedPromptDenial(call.toolIdentity);
   }
 
   // ---------------------------------------------------------------- turn completion
@@ -2246,7 +1974,7 @@ export class Engine {
       this.deps.log(`turn of task ${taskId} ended after its task was cleared; not recorded`);
       return;
     }
-    const opts = this.taskOpts(task);
+    const opts = taskLinks(task);
     const calls = callsOf(task);
     const actions = classifyActions(calls, task.interrupted);
     const unknown = actions.some((action) => action.status === "unknown");
@@ -2270,23 +1998,23 @@ export class Engine {
       );
       this.tx(() => {
         for (const action of actions)
-          this.write({
+          this.transition.write({
             kind: "update_tool_call",
             id: action.tool_call_id,
-            fields: { updatedAt: this.recordedAt, status: action.status, detail: action.detail },
+            fields: { updatedAt: this.transition.at, status: action.status, detail: action.detail },
           });
         for (const { call, bodies } of unresultedBodies)
           for (const body of bodies)
-            this.record(
+            this.transition.record(
               MCP_BODY_EVENT[body.direction],
               mcpPayload({ toolCallId: call.id, runtimeCallId: call.runtimeCallId }, body),
               { ...opts, id: body.eventId },
             );
         for (const approval of stillPending)
-          this.write({
+          this.transition.write({
             kind: "update_approval",
             id: approval.id,
-            fields: { status: "expired", consumedAt: this.recordedAt, reason: "task ended" },
+            fields: { status: "expired", consumedAt: this.transition.at, reason: "task ended" },
           });
         if (transcriptRetention)
           this.registerEvidence(task, {
@@ -2306,12 +2034,12 @@ export class Engine {
             originalPath: null,
             retention: hookRetention,
           });
-        this.write({
+        this.transition.write({
           kind: "update_execution",
           id: task.executionId,
           fields: {
             status: executionStatusFor(task.interrupted, result),
-            endedAt: this.recordedAt,
+            endedAt: this.transition.at,
             reportedModel: task.reportedModel,
             reportedEffort: efforts.length === 1 ? (efforts[0] ?? null) : null,
             effortEvidence: {
@@ -2325,7 +2053,7 @@ export class Engine {
           },
         });
         if (task.interrupted)
-          this.emit(
+          this.transition.emit(
             {
               type: "interruption_outcome",
               payload: {
@@ -2338,12 +2066,12 @@ export class Engine {
             },
             { ...opts, id: ids.outcome },
           );
-        this.write({
+        this.transition.write({
           kind: "update_task",
           id: task.id,
-          fields: { status, finishedAt: this.recordedAt },
+          fields: { status, finishedAt: this.transition.at },
         });
-        this.emit(
+        this.transition.emit(
           {
             type: "task_finished",
             payload: {
@@ -2357,7 +2085,7 @@ export class Engine {
           { ...opts, id: ids.finished },
         );
         if (error)
-          this.emit(
+          this.transition.emit(
             {
               type: "error",
               payload: {
@@ -2370,7 +2098,7 @@ export class Engine {
             { ...opts, id: ids.error },
           );
         const finalStatus = new Map(actions.map((action) => [action.tool_call_id, action.status]));
-        this.advanceTask(task.id, (next) => ({
+        this.transition.advanceTask(task.id, (next) => ({
           ...withCallStatuses(next, finalStatus),
           pendingApprovals: new Map(),
           status,
@@ -2395,12 +2123,12 @@ export class Engine {
    */
   private registerEvidence(task: TaskState, evidence: TurnEvidence): void {
     const artifactId = evidence.ids.artifact;
-    this.write(
+    this.transition.write(
       {
         kind: "register_artifact",
         input: {
           id: artifactId,
-          createdAt: this.recordedAt,
+          createdAt: this.transition.at,
           kind: evidence.kind,
           logicalName: evidence.name,
           mimeType: "application/x-ndjson",
@@ -2431,12 +2159,12 @@ export class Engine {
     const { ids, task, call, declared, eventId, retention } = output;
     const conversationId = this.activeConversation.id;
     const artifactId = ids.artifact;
-    this.write(
+    this.transition.write(
       {
         kind: "register_artifact",
         input: {
           id: artifactId,
-          createdAt: this.recordedAt,
+          createdAt: this.transition.at,
           kind: "tool_output",
           logicalName: declared.name ?? declared.path,
           mimeType: declared.mimeType ?? "application/octet-stream",
@@ -2461,7 +2189,7 @@ export class Engine {
     );
     if (retention.status === "retained") {
       const { stored } = retention;
-      this.write({
+      this.transition.write({
         kind: "link_artifact",
         input: {
           id: ids.outputLink,
@@ -2471,7 +2199,7 @@ export class Engine {
           taskId: task.id,
         },
       });
-      this.record(
+      this.transition.record(
         "artifact_registered",
         {
           artifact_id: artifactId,
