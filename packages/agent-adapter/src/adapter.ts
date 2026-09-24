@@ -622,7 +622,7 @@ export const boundedRuntimeFileReader = ({
  * threads free when a turn's two concurrent evidence reads (transcript and hook evidence) are the last to stick.
  * A conversation start's two reads (agent prompt and architecture document) share the budget, because the pool is
  * shared: a stale mount under either path can cost later turns their evidence until those reads return. So does a
- * debug-mode read of a body log at a tool result.
+ * debug-mode read of a body log at a tool result or at turn end.
  */
 const MAX_STUCK_READS = 2;
 
