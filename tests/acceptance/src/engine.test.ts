@@ -612,18 +612,20 @@ describe("streaming and commands", () => {
     const { turn, taskId } = await submit("hello");
     turn.init();
     // Retention was decided before the turn-end transaction opened; the rows that record it commit with the
-    // turn's end or not at all, so a failed link undoes the object row written before it and the finish too.
+    // turn's end or not at all, so a failed link undoes the object row written before it, and the finish too.
     failArtifactLinks("runtime_transcript", "1");
-    const objectsBefore = countRows("objects");
     const statusBefore = taskStatus(taskId);
     const failed = ts.waitForLog((line) =>
       line.includes("finishTurn record failure: Error: simulated link failure"),
     );
     turn.end();
     await failed;
+    // Stored before the transaction, and referenced by no row once it rolled back.
+    const digest = ObjectStore.digestOf(readFileSync(turn.streamLogPath));
+    expect(objectStored(digest)).toBe(true);
+    expect(rows("SELECT 1 FROM objects WHERE digest = ?", digest)).toHaveLength(0);
     expect(transcriptArtifacts(taskId)).toEqual([]);
     expect(rows("SELECT 1 FROM artifacts WHERE kind = 'runtime_transcript'")).toHaveLength(0);
-    expect(countRows("objects")).toBe(objectsBefore);
     expect(taskStatus(taskId)).toBe(statusBefore);
     expect(rows("SELECT 1 FROM events WHERE type = 'task_finished'")).toHaveLength(0);
   });
@@ -2092,20 +2094,16 @@ describe("configuration and provenance", () => {
 
   // The rows that record a retained output commit with the tool result or not at all: retention was decided
   // before the transaction opened, so no failed write inside it falls back to recording a failed capture.
-  it.each([
-    {
-      failure: "the tool result cannot commit",
-      fail: failNextCommit,
-      error: "simulated commit failure",
-    },
-    {
-      failure: "the output rows cannot be written",
-      fail: () => failArtifactLinks("tool_result", "1"),
-      error: "simulated link failure",
-    },
+  it.each<[failure: string, fail: () => void, error: string]>([
+    ["the tool result cannot commit", failNextCommit, "simulated commit failure"],
+    [
+      "the output rows cannot be written",
+      () => failArtifactLinks("tool_result", "1"),
+      "simulated link failure",
+    ],
   ])(
-    "leaves the call as it was, and no row pointing at the stored output, when $failure",
-    async ({ fail, error }) => {
+    "leaves the call as it was, and no row pointing at the stored output, when %s",
+    async (_failure, fail, error) => {
       const { file, turn, taskId } = await approvedArtifactCall();
       const statusBefore = rows("SELECT status FROM tool_calls");
       const digest = ObjectStore.digestOf(Buffer.from("D1"));

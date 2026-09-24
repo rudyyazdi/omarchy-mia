@@ -279,12 +279,13 @@ const evidenceCapture = (content: Exclude<RuntimeFileRead, { status: "absent" }>
     }))
     .exhaustive();
 
-/** A tool output a completed call declared, and the tool_result event that declared it. */
+/** A tool output a completed call declared, the tool_result event that declared it, and what storing it produced. */
 interface DeclaredOutput {
   task: TaskState;
   call: ToolCallState;
   declared: DeclaredArtifact;
   eventId: string;
+  retention: Retention;
 }
 
 /**
@@ -1396,10 +1397,7 @@ export class Engine {
               resultEventId: result.id,
             });
             if (status === "completed" && output)
-              this.registerToolOutput(
-                { task, call, declared: output.declared, eventId: result.id },
-                output.retention,
-              );
+              this.registerToolOutput({ task, call, ...output, eventId: result.id });
             this.onCommit(() => {
               call.status = status;
             });
@@ -1984,8 +1982,8 @@ export class Engine {
    * Retention was decided before the transaction opened (`store`), so these rows only record that outcome. Only a
    * retained tool output becomes a task output and gets an artifact_registered event.
    */
-  private registerToolOutput(output: DeclaredOutput, retention: Retention): void {
-    const { task, call, declared, eventId } = output;
+  private registerToolOutput(output: DeclaredOutput): void {
+    const { task, call, declared, eventId, retention } = output;
     const { writer, newId } = this.deps;
     const conversationId = this.activeConversation.id;
     const artifactId = newId("art");
