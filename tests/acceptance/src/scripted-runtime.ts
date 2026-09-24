@@ -218,6 +218,8 @@ export class ScriptedTurn {
       interrupt: async (): Promise<RuntimeCancellation> => {
         this.interrupted = true;
         if (this.survivesInterrupt) return "unknown";
+        // Like the real kill, what it causes reaches the turn's callbacks only after interrupt() returns (TurnHandle).
+        await Promise.resolve();
         // SIGKILL: connections drop, held prompts are abandoned, the process is gone.
         for (const abandon of this.pendingAbandons) abandon.abort();
         this.end("failed", "killed");

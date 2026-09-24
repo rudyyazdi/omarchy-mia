@@ -61,7 +61,10 @@ export interface TurnHandle {
   /**
    * Kill the runtime process group (SIGKILL; see the note on interrupt below). Resolves once exit is observed, or
    * with "unknown" after EXIT_WAIT_MS; in that case the turn is finished anyway so the task cannot hang. Before the
-   * runtime has spawned it resolves "not_needed" at once, and the runtime is never started.
+   * runtime has spawned it resolves "not_needed" at once, and the runtime is never started. What the kill causes
+   * (the runtime's exit, its held prompts abandoned) reaches the turn's callbacks only after this returns, never
+   * from inside it: the engine calls it while performing a committed transition, where a callback's own record
+   * cannot be committed.
    */
   interrupt(): Promise<RuntimeCancellation>;
 }

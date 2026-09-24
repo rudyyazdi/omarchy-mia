@@ -81,6 +81,8 @@ const reachHold = (holdsByPath: Map<string, PendingHold>, path: string): Promise
 const CONNECT_TIMEOUT_MS = 10_000;
 /** How long closing waits for a turn the test left running; a scripted turn that survives interruption never ends. */
 const TEARDOWN_TURN_WAIT_MS = 3_000;
+/** What the engine logs when the kernel refuses a dispatch nested inside another's effects (see `createKernel`). */
+const NESTED_DISPATCH = "dispatch while another dispatch is in progress";
 
 export const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 /** The fake Claude Code executable the real adapter launches in offline tests. */
@@ -254,6 +256,10 @@ export const startTestServer = async (
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
+      // The kernel refuses a dispatch from inside another's effects, and the engine only logs the refusal: a runtime
+      // or fake that calls back synchronously from an effect would lose that record without any test failing.
+      const nested = logs.filter((line) => line.includes(NESTED_DISPATCH));
+      if (nested.length > 0) throw new Error(`nested dispatch refused: ${nested.join("; ")}`);
     },
   };
 };
@@ -290,17 +296,20 @@ export const useScriptedSession = (
   hold: (session: ScriptedSession) => void,
 ): ((overrides?: Partial<Profile["runtime"]>) => Promise<void>) => {
   let current: TestServer | null = null;
+  // Forgotten before it closes, so a close that throws is not repeated by the next test's hooks.
+  const closeCurrent = async (): Promise<void> => {
+    const closing = current;
+    current = null;
+    await closing?.close();
+  };
   const start = async (overrides: Partial<Profile["runtime"]> = {}): Promise<void> => {
-    await current?.close();
+    await closeCurrent();
     const session = await startScriptedSession(overrides);
     current = session.server;
     hold(session);
   };
   beforeEach(() => start());
-  afterEach(async () => {
-    await current?.close();
-    current = null;
-  });
+  afterEach(closeCurrent);
   return start;
 };
 

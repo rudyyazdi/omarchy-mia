@@ -376,7 +376,10 @@ export class Engine {
    * commit that throws keeps the state and performs no effect, so nothing is released or delivered. After a commit
    * each effect runs on its own: one that throws is logged as a delivery failure, never reported as a persistence
    * failure, and the records, the state and the remaining effects stand. An effect may not dispatch: the kernel
-   * fails a nested dispatch without committing it.
+   * fails a nested dispatch without committing it, so nothing an effect calls may call back into the engine
+   * synchronously (a runtime reports what an interrupt causes only after `interrupt` returns; see `TurnHandle`). Only
+   * the machine is kept: nothing reads the kernel's change feed yet, until reconnect replay (D3) or the debug watch
+   * (#6) keeps the kernel beside it.
    */
   private openConversation(conversationId: string): ConversationMachine {
     const kernel = createKernel<EngineRecord, EventChange, EngineEffect>({
@@ -395,6 +398,16 @@ export class Engine {
   private dispatch(event: ConversationEvent): Dispatched<ConversationRejection, EventChange> {
     if (!this.machine) throw new Error("engine has no active conversation");
     return this.machine.dispatch(event);
+  }
+
+  /**
+   * Dispatch an event its transition never refuses, and commit it or throw: with the commit's own error when its
+   * records did not commit, and as a bug when the transition refused it after all.
+   */
+  private dispatchUnrefused(event: ConversationEvent): void {
+    const dispatched = this.dispatch(event);
+    if (dispatched.kind === "rejected") expectRejection(dispatched.rejection, []);
+    if (dispatched.kind === "failed") throw dispatched.error;
   }
 
   /**
@@ -615,6 +628,8 @@ export class Engine {
     this.activeClientId = event.origin.clientId;
     // The conversation starting has a machine of its own, from no state (see ./decide-conversation.ts); the one it
     // closes is named by id. A start that does not commit drops the new machine, and the previous one stays active.
+    // The start's effects run inside its dispatch, before the new machine is the active one, so they read no engine
+    // state: its one effect delivers conversation_started under the id its own kernel carries (see `perform`).
     const machine = this.openConversation(event.ids.conversation);
     let error: unknown;
     try {
@@ -887,14 +902,13 @@ export class Engine {
     try {
       if (about) {
         // Never rejected: a report about the conversation is always recorded.
-        const dispatched = this.dispatch({
+        this.dispatchUnrefused({
           kind: "client_diagnostics",
           origin: this.origin,
           from: { clientId: ctx.clientId, connectionId: ctx.connectionId },
           diagnostics: payload.diagnostics,
           ids,
         });
-        if (dispatched.kind === "failed") return fail("record_failure", String(dispatched.error));
       } else
         this.deps.writer.recordDiagnostics({
           id: ids.diagnostics,
@@ -946,14 +960,12 @@ export class Engine {
     if (this.conversation) {
       try {
         // Never rejected: a disconnect of the conversation's connection is always recorded.
-        const dispatched = this.dispatch({
+        this.dispatchUnrefused({
           kind: "client_disconnected",
           origin: this.origin,
           connectionId,
           ids: { event: this.deps.newId("evt") },
         });
-        if (dispatched.kind === "failed")
-          this.deps.log(`could not record disconnect: ${String(dispatched.error)}`);
       } catch (error) {
         this.deps.log(`could not record disconnect: ${String(error)}`);
       }
@@ -1312,17 +1324,13 @@ export class Engine {
   private recordRefusal(taskId: string, detail: string): void {
     try {
       // Rejected, the task ended; unreachable, as the refusal was decided against it just before.
-      const dispatched = this.dispatch({
+      this.dispatchUnrefused({
         kind: "permission_refused",
         origin: this.origin,
         taskId,
         detail,
         ids: { event: this.deps.newId("evt") },
       });
-      if (dispatched.kind === "failed")
-        this.deps.log(
-          `could not record a refused permission request: ${errorMessage(dispatched.error)}`,
-        );
     } catch (error) {
       this.deps.log(`could not record a refused permission request: ${errorMessage(error)}`);
     }
@@ -1451,7 +1459,14 @@ export class Engine {
     this.starting?.abandon.abort(new Error("the server is shutting down"));
     const task = this.task;
     if (!task) return;
-    const interruption = this.interrupt(task);
+    const interruption = ((): CommandResult => {
+      try {
+        return this.interrupt(task);
+      } catch (error) {
+        // A transition that throws is a bug; the runtime is killed below all the same.
+        return fail("internal", `interruption failed: ${errorMessage(error)}`);
+      }
+    })();
     const turn = this.running;
     if (!interruption.ok) {
       this.deps.log(`shutdown: ${interruption.message}; killing the runtime anyway`);

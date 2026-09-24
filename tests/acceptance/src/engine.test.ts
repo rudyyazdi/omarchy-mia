@@ -1632,6 +1632,19 @@ describe("interruption path", () => {
     expect(finished.payload.status).toBe("interrupted");
   });
 
+  it("records the killed runtime's exit after the interruption that killed it", async () => {
+    const { turn, taskId } = await submit("interrupted");
+    turn.init();
+    expect((await client.interrupt(taskId)).disposition).toBe("accepted");
+    await client.waitFor("task_finished");
+    const types = rows<{ type: string }>(
+      "SELECT type FROM events WHERE task_id = ? ORDER BY sequence",
+      taskId,
+    ).map(({ type }) => type);
+    expect(types.indexOf("runtime_exit")).toBeGreaterThan(types.indexOf("interruption_requested"));
+    expect(types.indexOf("interruption_requested")).toBeGreaterThan(-1);
+  });
+
   it("kills the runtime at shutdown even when the interruption cannot be recorded", async () => {
     const { turn } = await submitHeldCall("change");
     failNextCommit();
