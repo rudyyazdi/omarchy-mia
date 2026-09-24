@@ -218,14 +218,14 @@ export interface EngineDeps {
   /** Captures a tool output a completed call declared: `collectArtifact`, or a test's own. */
   collectArtifact: ArtifactCollector;
   /**
-   * Names the conversations, tasks, executions, tool calls, approvals, events, provenance sets and entries, artifacts
-   * and artifact links the engine records (see RecordWriter), and every event it sends: `newId`. Injected randomness, so a transition's ids are
-   * chosen before its records are written and can refer to each other.
+   * Names the conversations, tasks, executions, tool calls, approvals, events, provenance sets and entries, artifacts,
+   * artifact links and diagnostics the engine records (see RecordWriter), and every event it sends: `newId`. Injected
+   * randomness, so a transition's ids are chosen before its records are written and can refer to each other.
    */
   newId: NewId;
   /**
-   * The clock. Each transaction reads it once, and every row it writes carries that time except a diagnostics row,
-   * which stamps itself (see RecordWriter); each event sent reads it for its `server_time`.
+   * The clock. Each transaction reads it once, and every row it writes carries that time; a heartbeat's diagnostics
+   * row, written outside any transaction, reads it too, and so does each event sent, for its `server_time`.
    */
   now: () => Date;
   log: (message: string) => void;
@@ -383,7 +383,7 @@ export class Engine {
   /**
    * When the transaction in progress was decided, or null outside one. One reading per transaction, as a kernel
    * dispatch hands its `decide` one `now`, so the transition rows of one commit (see `EngineDeps.now`) agree on when
-   * it happened. The rows the writer still names (diagnostics) stamp themselves.
+   * it happened.
    */
   private transactionTime: string | null = null;
 
@@ -1023,6 +1023,8 @@ export class Engine {
             )
           : null;
         this.deps.writer.recordDiagnostics({
+          id: this.deps.newId("diag"),
+          receivedAt: this.recordedAt,
           conversationId,
           clientId: ctx.clientId,
           clientConnectionId: ctx.connectionId,
@@ -1049,6 +1051,8 @@ export class Engine {
           ? payload.conversation_id
           : null;
       this.deps.writer.recordDiagnostics({
+        id: this.deps.newId("diag"),
+        receivedAt: this.deps.now().toISOString(),
         conversationId,
         clientId: ctx.clientId,
         clientConnectionId: ctx.connectionId,
