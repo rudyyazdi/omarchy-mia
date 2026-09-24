@@ -70,6 +70,7 @@ on the same fixture-ledger evidence.
 | `apps/text-client`        | terminal client and the reusable `MiaClient`                                                                       |
 | `apps/debug-cli`          | `mia debug …` read-only inspection, export, verify, reconcile                                                      |
 | `packages/protocol`       | versioned client/server messages (zod), canonical digests, redaction                                               |
+| `packages/kernel`         | dependency-free commit-first kernel: decide, commit, apply, perform; committed-change feed; held replies           |
 | `packages/agent-adapter`  | profile loading, Claude Code adapter: launch plan, stream-json parsing, approval bridge, static probe, live budget |
 | `packages/records`        | SQLite catalog, content-addressed objects, record writer, snapshot queries, export/verify, HTML report             |
 | `packages/mcp-http`       | loopback Streamable-HTTP host used by the fixture and the bridge                                                   |
