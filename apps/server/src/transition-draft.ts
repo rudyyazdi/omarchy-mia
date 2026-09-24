@@ -41,17 +41,20 @@ export const taskLinks = (task: TaskState): EventLinks => ({
   executionId: task.executionId,
 });
 
-/** What one transition built: the state it moves to, and the records and effects that take it there. */
-export interface BuiltTransition {
-  next: ConversationState | null;
-  records: readonly EngineRecord[];
-  effects: readonly EngineEffect[];
-}
+/**
+ * What one transition built, as a kernel machine's accepted decision: the state it moves to, and the records and
+ * effects that take it there.
+ */
+export type BuiltTransition = Extract<
+  Decision<ConversationState, never, EngineRecord, EngineEffect>,
+  { kind: "accepted" }
+>;
 
 /**
  * One transition as it is built: the records it will commit, the effects it will perform once they have, and the
- * conversation state it moves to (the draft). Building touches nothing outside it, so a pure `decide` and the engine's
- * own transactions build the same way, and a transition whose records never commit leaves nothing behind. Records and
+ * conversation state it moves to (the draft). Building touches nothing outside it, so each pure transition of
+ * ./decide-conversation.ts builds through one, and a transition whose records never commit leaves nothing behind. A
+ * conversation's start builds from no state (null) and advances to the conversation before it records anything. Records and
  * effects keep the order they were added in; that order is the order the catalog numbers events in and the order the
  * effects run in.
  */
@@ -95,16 +98,8 @@ export class TransitionDraft {
     this.effects.push(effect);
   }
 
-  /** What the transition built, for the engine to commit. */
-  built(): BuiltTransition {
-    return { next: this.next, records: this.records, effects: this.effects };
-  }
-
-  /** What the transition built as a kernel machine's accepted decision, which always has a next state. */
-  accepted(): Extract<
-    Decision<ConversationState, never, EngineRecord, EngineEffect>,
-    { kind: "accepted" }
-  > {
+  /** What the transition built, as a kernel machine's accepted decision, which always has a next state. */
+  accepted(): BuiltTransition {
     return { kind: "accepted", next: this.draft, records: this.records, effects: this.effects };
   }
 

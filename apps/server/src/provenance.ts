@@ -331,6 +331,18 @@ export const nameProvenance = (
 });
 
 /**
+ * The object a stored plan retains the agent prompt as, or null when the prompt file was missing: the summary records
+ * its digest, and every turn of the conversation hands the runtime that very object.
+ */
+export const agentPromptObject = (plan: {
+  items: readonly ProvenanceItem<StoredObject>[];
+}): StoredObject | null => {
+  for (const item of plan.items)
+    if (item.role === "agent_prompt" && item.availability === "retained") return item.content;
+  return null;
+};
+
+/**
  * The records of a stored, named provenance plan, stamped `createdAt`, and the summary they record. Pure: the bytes
  * were stored and the ids drawn beforehand, so the start's transaction commits these rows and does no file I/O.
  */
@@ -347,7 +359,6 @@ export const provenanceRecords = (
   ];
   const entries: ProvenanceSummary["entries"] = [];
   const artifacts = new Map<ProvenanceRole, string>();
-  let promptDigest: string | null = null;
   for (const item of plan.items) {
     if (item.availability === "unavailable") {
       records.push({
@@ -401,8 +412,6 @@ export const provenanceRecords = (
       reason: null,
     });
     artifacts.set(item.role, artifactId);
-    // The digest the object was stored under, so the engine can hand the runtime that very object.
-    if (item.role === "agent_prompt") promptDigest = item.content.digest;
   }
   const build = artifacts.get("server_build");
   const localChanges = artifacts.get("server_local_changes");
@@ -417,7 +426,7 @@ export const provenanceRecords = (
     records,
     summary: {
       provenance_set_id: setId,
-      agent_prompt_digest: promptDigest,
+      agent_prompt_digest: agentPromptObject(plan)?.digest ?? null,
       ...plan.summary,
       entries,
     },

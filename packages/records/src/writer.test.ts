@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Catalog } from "./catalog.ts";
 import type { CommandReply } from "./schema.ts";
-import { RecordWriter } from "./writer.ts";
+import { conversationDirectory, RecordWriter } from "./writer.ts";
 
 /** When the rows these tests write say they were recorded. */
 const AT = "2026-01-01T00:00:00.000Z";
@@ -136,7 +136,9 @@ describe("record writer", () => {
     expect(conv.directory.startsWith(catalog.paths.conversations)).toBe(true);
     expect(existsSync(conv.directory)).toBe(false);
     // Named before the commit by whoever records it, and the same directory.
-    expect(writer.conversationDirectory({ id: "conv-1", startedAt: AT })).toBe(conv.directory);
+    expect(
+      conversationDirectory({ root: catalog.paths.conversations, id: "conv-1", startedAt: AT }),
+    ).toBe(conv.directory);
   });
 
   it("assigns a dense per-conversation sequence and redacts payloads", () => {
