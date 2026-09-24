@@ -85,6 +85,8 @@ const storedReply = (row: unknown): CommandReply | null => {
 };
 
 export interface EventInput {
+  /** Given by the caller (see RecordWriter). */
+  id: string;
   conversationId: string;
   type: JournalEventType;
   payload: unknown;
@@ -137,10 +139,6 @@ export interface LinkInput {
   provenanceSetId?: string | null;
 }
 
-/**
- * All writes to the private catalog go through here. Payloads are redacted before persistence.
- * Callers wrap related writes in catalog.transaction so events and state rows commit together.
- */
 /** What a finished turn cost; stored in the execution's `usage` column under snake_case keys. */
 export interface ExecutionUsage {
   /** The runtime's own token accounting, kept as reported. */
@@ -151,6 +149,18 @@ export interface ExecutionUsage {
   numTurns?: number;
 }
 
+/**
+ * All writes to the private catalog go through here. Payloads are redacted before persistence.
+ * Callers wrap related writes in catalog.transaction so events and state rows commit together.
+ *
+ * The rows a state transition creates and refers to within one transaction (conversations, tasks, executions,
+ * tool calls, approvals and events) take their id from the caller, so a transition can name a record before it
+ * is written: an approval_requested event carries its approval's id, and the approval row its requesting event's.
+ * Callers generate them with `newId`; a reused id fails the insert, and with it the transaction. The other rows
+ * (commands, provenance, artifacts, links, diagnostics) are still named here, which holds only while whatever
+ * refers to one is written after it in the same transaction, as a conversation names its provenance set and an
+ * artifact_registered event its artifact.
+ */
 export class RecordWriter {
   readonly objects: ObjectStore;
 
@@ -380,13 +390,16 @@ export class RecordWriter {
    * Records a conversation and names its directory without creating it, so recording one does no file I/O; whoever
    * first writes into the directory creates it.
    */
-  createConversation(input: { provenanceSetId: string; runtimeConversationId: string }): {
+  createConversation(input: {
     id: string;
+    provenanceSetId: string;
+    runtimeConversationId: string;
+  }): {
     startedAt: string;
     directory: string;
   } {
+    const { id } = input;
     const startedAt = nowIso();
-    const id = newId("conv");
     const directory = join(
       this.catalog.paths.conversations,
       `${startedAt.replace(/[:.]/g, "-")}_${id}`,
@@ -399,24 +412,27 @@ export class RecordWriter {
       directory,
       runtime_conversation_id: input.runtimeConversationId,
     });
-    return { id, startedAt, directory };
+    return { startedAt, directory };
   }
 
   updateConversation(id: string, fields: { status?: ConversationStatus }): void {
     this.catalog.update("conversations", id, { status: fields.status });
   }
 
-  createTask(input: { conversationId: string; text: string; clientId: string | null }): string {
-    const id = newId("task");
+  createTask(input: {
+    id: string;
+    conversationId: string;
+    text: string;
+    clientId: string | null;
+  }): void {
     this.catalog.insert("tasks", {
-      id,
+      id: input.id,
       conversation_id: input.conversationId,
       status: "running",
       created_at: nowIso(),
       text: redactString(input.text),
       client_id: input.clientId,
     });
-    return id;
   }
 
   updateTask(id: string, fields: { status?: TaskStatus; finishedAt?: string | null }): void {
@@ -424,6 +440,7 @@ export class RecordWriter {
   }
 
   createExecution(input: {
+    id: string;
     taskId: string;
     conversationId: string;
     runtimeIdentity: string;
@@ -432,10 +449,9 @@ export class RecordWriter {
     requestedEffort: Effort;
     provenanceSetId: string | null;
     executionEpoch: number;
-  }): string {
-    const id = newId("exec");
+  }): void {
     this.catalog.insert("executions", {
-      id,
+      id: input.id,
       task_id: input.taskId,
       conversation_id: input.conversationId,
       runtime_identity: input.runtimeIdentity,
@@ -447,7 +463,6 @@ export class RecordWriter {
       status: "running",
       started_at: nowIso(),
     });
-    return id;
   }
 
   updateExecution(
@@ -489,8 +504,8 @@ export class RecordWriter {
   // ---- events ----
 
   appendEvent(input: EventInput): AppendedEvent {
+    const { id } = input;
     const receivedAt = nowIso();
-    const id = newId("evt");
     const sequence = this.catalog.nextSequence(input.conversationId);
     this.catalog.insert("events", {
       id,
@@ -517,6 +532,7 @@ export class RecordWriter {
   // ---- tool calls & approvals ----
 
   createToolCall(input: {
+    id: string;
     conversationId: string;
     taskId: string;
     executionId: string;
@@ -528,11 +544,10 @@ export class RecordWriter {
     policy: ToolCallPolicy;
     status: ToolCallStatus;
     proposalEventId: string | null;
-  }): string {
-    const id = newId("call");
+  }): void {
     const now = nowIso();
     this.catalog.insert("tool_calls", {
-      id,
+      id: input.id,
       conversation_id: input.conversationId,
       task_id: input.taskId,
       execution_id: input.executionId,
@@ -547,7 +562,6 @@ export class RecordWriter {
       created_at: now,
       updated_at: now,
     });
-    return id;
   }
 
   updateToolCall(
@@ -571,20 +585,19 @@ export class RecordWriter {
   }
 
   createApproval(input: {
+    id: string;
     toolCallId: string;
     executionEpoch: number;
     requestingEventId: string | null;
-  }): string {
-    const id = newId("appr");
+  }): void {
     this.catalog.insert("approvals", {
-      id,
+      id: input.id,
       tool_call_id: input.toolCallId,
       execution_epoch: input.executionEpoch,
       status: "pending",
       requesting_event_id: input.requestingEventId,
       requested_at: nowIso(),
     });
-    return id;
   }
 
   updateApproval(

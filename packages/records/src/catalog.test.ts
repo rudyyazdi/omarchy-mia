@@ -2,7 +2,7 @@ import { existsSync, mkdtempDisposableSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished } from "vitest";
-import { Catalog, defaultStateDir } from "./catalog.ts";
+import { Catalog, defaultStateDir, newId } from "./catalog.ts";
 import { RecordWriter } from "./writer.ts";
 import { SCHEMA_VERSION, type JournalEventType } from "./schema.ts";
 
@@ -62,12 +62,13 @@ describe("savepoint", () => {
       rmSync(path, { recursive: true, force: true });
     });
     const writer = new RecordWriter(catalog);
-    const conversation = writer.createConversation({
+    writer.createConversation({
+      id: "conv-1",
       provenanceSetId: writer.createProvenanceSet("test"),
       runtimeConversationId: "rt-1",
     });
     const append = (type: JournalEventType) =>
-      writer.appendEvent({ conversationId: conversation.id, type, payload: {} });
+      writer.appendEvent({ id: newId("evt"), conversationId: "conv-1", type, payload: {} });
     const eventTypes = () =>
       catalog
         .all<{ type: JournalEventType }>("SELECT type FROM events ORDER BY sequence")

@@ -10,7 +10,7 @@ import {
   type RuntimeFileReader,
 } from "@mia/agent-adapter";
 import { errorMessage } from "@mia/protocol";
-import { Catalog, RecordWriter } from "@mia/records";
+import { Catalog, RecordWriter, newId } from "@mia/records";
 import { collectArtifact, type ArtifactCollector } from "./artifact-collector.ts";
 import { collectBuildInfoSync } from "./build-info.ts";
 import { Engine, type TurnRunner } from "./engine.ts";
@@ -114,6 +114,7 @@ export const startServer = async (input: {
         evidenceReadDeadline: input.evidenceReadDeadline,
         readEvidence: input.readEvidence ?? readRuntimeFile,
         collectArtifact: input.collectArtifact ?? collectArtifact,
+        newId,
         log,
       });
       const gateway = await startGateway({

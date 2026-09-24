@@ -12,7 +12,22 @@ type Column = [name: string, value: SQLInputValue];
 const definedColumns = (row: Row): Column[] =>
   Object.entries(row).filter((entry): entry is Column => entry[1] !== undefined);
 
-export const newId = (prefix: string): string => `${prefix}_${randomUUID().replace(/-/g, "")}`;
+/** What kind of row an id names, as the start of the id. */
+export type IdPrefix =
+  | "appr"
+  | "art"
+  | "call"
+  | "cmd"
+  | "conv"
+  | "diag"
+  | "evt"
+  | "exec"
+  | "link"
+  | "pe"
+  | "prov"
+  | "task";
+
+export const newId = (prefix: IdPrefix): string => `${prefix}_${randomUUID().replace(/-/g, "")}`;
 
 export const nowIso = (): string => new Date().toISOString();
 

@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Catalog, RecordWriter } from "@mia/records";
+import { Catalog, RecordWriter, newId } from "@mia/records";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { exportToDirectory, reconcile } from "./commands.ts";
 
@@ -36,7 +36,9 @@ describe("debug commands open the catalog read-only", () => {
     const conversationId = catalog.transaction(() => {
       const writer = new RecordWriter(catalog);
       const provenanceSetId = writer.createProvenanceSet("debug-cli fixture");
-      return writer.createConversation({ provenanceSetId, runtimeConversationId: "runtime" }).id;
+      const id = newId("conv");
+      writer.createConversation({ id, provenanceSetId, runtimeConversationId: "runtime" });
+      return id;
     });
     catalog.close();
     // A writable open resets the database to 0600 and runs the migration; a read-only one does neither.
