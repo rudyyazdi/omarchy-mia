@@ -1295,6 +1295,43 @@ describe("approval path", () => {
     turn.end();
     await again.waitFor("task_finished");
   });
+
+  it("lists and resolves pending approvals in the order they were requested, not the order their calls were seen", async () => {
+    const { turn, taskId } = await submit("two changes");
+    turn.init();
+    turn.propose("toolu_a", "mcp__d1__change", { delta: 1 });
+    turn.propose("toolu_b", "mcp__d1__change", { delta: 2 });
+    await client.waitFor("tool_call", (event) => event.payload.runtime_call_id === "toolu_b");
+    const heldB = turn.request("mcp__d1__change", { delta: 2 }, "toolu_b");
+    const askedB = await client.waitFor(
+      "approval_requested",
+      (event) => event.payload.runtime_call_id === "toolu_b",
+    );
+    const heldA = turn.request("mcp__d1__change", { delta: 1 }, "toolu_a");
+    const askedA = await client.waitFor(
+      "approval_requested",
+      (event) => event.payload.runtime_call_id === "toolu_a",
+    );
+    const requestOrder = [askedB.payload.approval_id, askedA.payload.approval_id];
+    client.close();
+    await tick();
+    await tick();
+    const disconnected = rows<{ payload: string }>(
+      "SELECT payload FROM events WHERE type = 'client_disconnected'",
+    ).map((row) => JSON.parse(row.payload).pending_approvals);
+    expect(disconnected).toEqual([requestOrder]);
+    const again = await ts.connect("client-A");
+    again.conversationId = client.conversationId;
+    expect((await again.interrupt(taskId)).disposition).toBe("accepted");
+    expect((await heldA).behavior).toBe("deny");
+    expect((await heldB).behavior).toBe("deny");
+    expect(
+      rows<{ payload: string }>(
+        "SELECT payload FROM events WHERE type = 'approval_resolved' ORDER BY sequence",
+      ).map((row) => JSON.parse(row.payload).approval_id),
+    ).toEqual(requestOrder);
+    await again.waitFor("task_finished");
+  });
 });
 
 describe("record times", () => {
