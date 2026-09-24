@@ -386,9 +386,18 @@ export const decideInterruption = <Call extends CallFacts>(input: {
 // ---------------------------------------------------------------- abandonment
 
 /**
- * The runtime dropped a held prompt (process gone or turn aborted). A still-pending approval expires and
- * its call is invalidated, which resumes the task if it was the last one pending; either way the call is
- * refused, never released.
+ * What the runtime is told when it drops a held prompt (process gone or turn aborted), whatever the records then
+ * say: the call is refused, never released.
+ */
+export const abandonedPromptDenial = (toolIdentity: string): PermissionDecision => ({
+  behavior: "deny",
+  message: `Mia: the approval prompt for ${toolIdentity} was abandoned before the user decided. This call was never released and did not run; its outcome is known, not unknown. Do not retry it.`,
+});
+
+/**
+ * The runtime dropped a held prompt. A still-pending approval expires and its call is invalidated, which resumes
+ * the task if it was the last one pending; null when the approval is no longer pending, so nothing changes. Either
+ * way the runtime gets `abandonedPromptDenial`.
  */
 export const decideAbandonment = (input: {
   call: CallFacts;
@@ -397,33 +406,23 @@ export const decideAbandonment = (input: {
   task: PendingTask;
   /** The approval_resolved event that records the expiry, if the approval is still pending. */
   resolvedEventId: string;
-}): {
-  expire: { approval: ApprovalChange; call: CallChange; taskStatus: TaskStatus } | null;
-  settle: PermissionDecision;
-} => {
-  const settle: PermissionDecision = {
-    behavior: "deny",
-    message: `Mia: the approval prompt for ${input.call.toolIdentity} was abandoned before the user decided. This call was never released and did not run; its outcome is known, not unknown. Do not retry it.`,
-  };
-  if (!input.approvalId || !input.pending) return { expire: null, settle };
+}): { approval: ApprovalChange; call: CallChange; taskStatus: TaskStatus } | null => {
+  if (!input.approvalId || !input.pending) return null;
   return {
-    expire: {
-      taskStatus: taskStatusAfterResolving(input.task.status, input.task.otherPending),
-      approval: {
-        approvalId: input.approvalId,
-        eventId: input.resolvedEventId,
-        callId: input.call.id,
-        status: "expired",
-        reason: "runtime abandoned the prompt",
-      },
-      call: {
-        callId: input.call.id,
-        status: "invalidated",
-        detail: "runtime abandoned the held call",
-        settle: null,
-      },
+    taskStatus: taskStatusAfterResolving(input.task.status, input.task.otherPending),
+    approval: {
+      approvalId: input.approvalId,
+      eventId: input.resolvedEventId,
+      callId: input.call.id,
+      status: "expired",
+      reason: "runtime abandoned the prompt",
     },
-    settle,
+    call: {
+      callId: input.call.id,
+      status: "invalidated",
+      detail: "runtime abandoned the held call",
+      settle: null,
+    },
   };
 };
 
