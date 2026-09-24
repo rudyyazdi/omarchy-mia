@@ -1293,6 +1293,16 @@ describe("conversation start", () => {
       },
     });
     expect(records).toContainEqual({
+      kind: "link_artifact",
+      input: {
+        id: "link_prompt",
+        conversationId: "conv_new",
+        artifactId: "art_prompt",
+        relation: "provenance",
+        provenanceSetId: "prov_new",
+      },
+    });
+    expect(records).toContainEqual({
       kind: "update_conversation",
       id: "conv_1",
       fields: { status: "closed" },
@@ -1321,7 +1331,9 @@ describe("conversation start", () => {
         },
       },
     ]);
-    expect(effectLabels(effects)).toEqual(["deliver conversation_started"]);
+    expect(effects).toMatchObject([
+      { kind: "deliver_event", eventId: "evt_started", event: { type: "conversation_started" } },
+    ]);
     expect(next).toEqual({
       id: "conv_new",
       runtimeConversationId: "runtime_conv_new",
@@ -1344,7 +1356,21 @@ describe("conversation start", () => {
       "conversation_started",
       "captured_in_debug_mode",
     ]);
-    expect(records.at(-1)).toMatchObject({ input: { id: "evt_debug", payload: {} } });
+    expect(records.at(-1)).toEqual({
+      kind: "append_event",
+      input: {
+        id: "evt_debug",
+        receivedAt: AT,
+        conversationId: "conv_new",
+        type: "captured_in_debug_mode",
+        payload: {},
+        taskId: null,
+        executionId: null,
+        clientId: ORIGIN.clientId,
+        clientConnectionId: ORIGIN.connectionId,
+        causedByEventId: null,
+      },
+    });
   });
 
   it("refuses a second start of a started conversation, and anything but a start before one", () => {

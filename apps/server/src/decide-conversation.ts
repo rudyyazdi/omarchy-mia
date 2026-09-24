@@ -41,7 +41,12 @@ import type { EngineEffect, PermissionAnswer } from "./engine-effects.ts";
 import type { EngineRecord } from "./engine-records.ts";
 import { MCP_BODY_EVENT, type McpBodyRecord } from "./mcp-bodies.ts";
 import { provenanceLinks, provenanceRecords, type NamedProvenancePlan } from "./provenance.ts";
-import { TransitionDraft, taskLinks, type Origin } from "./transition-draft.ts";
+import {
+  TransitionDraft,
+  taskLinks,
+  type BuiltTransition,
+  type Origin,
+} from "./transition-draft.ts";
 import {
   bindPermissionRequest,
   bindStreamProposal,
@@ -1537,15 +1542,14 @@ export const disconnectTransition: ConversationTransition<ClientDisconnectedEven
 /**
  * Start the conversation: its provenance rows, the conversation that names them and its links to them, the close of
  * the conversation it replaces, then its provenance_recorded and conversation_started events, and in debug mode
- * captured_in_debug_mode, all in one commit. It decides from no conversation (null); one already started refuses it.
+ * captured_in_debug_mode, all in one commit. Built from no conversation, so it is never refused; the machine refuses
+ * a start of one already started (`conversationStartTransition`).
  */
-export const conversationStartTransition = (input: {
-  state: ConversationState | null;
+export const conversationStart = (input: {
   event: ConversationStartEvent;
   now: Date;
-}): ConversationDecision<StartRejection> => {
-  const { state, event, now } = input;
-  if (state !== null) return rejected({ kind: "already_started" });
+}): BuiltTransition => {
+  const { event, now } = input;
   const { ids, provenance: plan } = event;
   const draft = new TransitionDraft({ state: null, now, origin: event.origin });
   const startedAt = draft.at;
@@ -1595,6 +1599,14 @@ export const conversationStartTransition = (input: {
   if (event.debugMode) draft.record("captured_in_debug_mode", {}, { id: ids.captured });
   return draft.accepted();
 };
+
+/** A start decided by the conversation's machine: from no conversation (null) only, as each starts once. */
+export const conversationStartTransition = (input: {
+  state: ConversationState | null;
+  event: ConversationStartEvent;
+  now: Date;
+}): ConversationDecision<StartRejection> =>
+  input.state === null ? conversationStart(input) : rejected({ kind: "already_started" });
 
 /** Decide with `transition` over a started conversation; before its start commits, nothing but a start is decided. */
 const whenStarted = (

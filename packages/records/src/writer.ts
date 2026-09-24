@@ -157,6 +157,16 @@ export interface ExecutionUsage {
 }
 
 /**
+ * The directory a conversation recorded with this id and start time owns, under `root` (a catalog's
+ * `paths.conversations`). A pure path, so a caller can name it before the conversation's transaction commits.
+ */
+export const conversationDirectory = (input: {
+  root: string;
+  id: string;
+  startedAt: string;
+}): string => join(input.root, `${input.startedAt.replace(/[:.]/g, "-")}_${input.id}`);
+
+/**
  * All writes to the private catalog go through here. Payloads are redacted before persistence.
  * Callers wrap related writes in catalog.transaction so events and state rows commit together.
  *
@@ -174,16 +184,6 @@ export interface ExecutionUsage {
  * records it returns carry that time rather than whenever the writer runs. The rows named here, and clients and
  * connections, stamp themselves.
  */
-/**
- * The directory a conversation recorded with this id and start time owns, under `root` (a catalog's
- * `paths.conversations`). A pure path, so a caller can name it before the conversation's transaction commits.
- */
-export const conversationDirectory = (input: {
-  root: string;
-  id: string;
-  startedAt: string;
-}): string => join(input.root, `${input.startedAt.replace(/[:.]/g, "-")}_${input.id}`);
-
 export class RecordWriter {
   readonly objects: ObjectStore;
 

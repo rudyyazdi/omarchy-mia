@@ -54,7 +54,7 @@ export type BuiltTransition = Extract<
  * One transition as it is built: the records it will commit, the effects it will perform once they have, and the
  * conversation state it moves to (the draft). Building touches nothing outside it, so each pure transition of
  * ./decide-conversation.ts builds through one, and a transition whose records never commit leaves nothing behind. A
- * conversation's start builds from no state (null) and advances to the conversation before it records anything. Records and
+ * conversation's start builds from no state (null), and advances to the conversation before it records any event. Records and
  * effects keep the order they were added in; that order is the order the catalog numbers events in and the order the
  * effects run in.
  */

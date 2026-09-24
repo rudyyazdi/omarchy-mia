@@ -53,7 +53,7 @@ import {
 import {
   abandonmentTransition,
   approvalDecisionTransition,
-  conversationStartTransition,
+  conversationStart,
   diagnosticsTransition,
   disconnectTransition,
   interruptionTransition,
@@ -558,12 +558,9 @@ export class Engine {
     };
     const previous = { connection: this.activeConnectionId, client: this.activeClientId };
     try {
-      // Decided from no state: the conversation starting has none until its start commits, and the one it closes is
+      // Built from no state: the conversation starting has none until its start commits, and the one it closes is
       // named by id (see ./decide-conversation.ts).
-      const decision = conversationStartTransition({ state: null, event, now: this.deps.now() });
-      // Unreachable: a start decided from no state is never refused.
-      if (decision.kind === "rejected")
-        return fail("invalid_state", "the conversation has already started");
+      const decision = conversationStart({ event, now: this.deps.now() });
       // Unlike the conversation, which moves with the commit, the active connection and client are set before it,
       // because the start's effects deliver conversation_started to the connection active when they run; the catch
       // below restores them if the commit throws.
