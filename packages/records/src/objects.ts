@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { access, chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { access, chmod, mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
-import { sha256Hex } from "@mia/protocol";
+import { isNotFound, sha256Hex } from "@mia/protocol";
 import type { CatalogPaths } from "./catalog.ts";
 import type { ObjectIntegrity } from "./schema.ts";
 
@@ -74,6 +74,12 @@ export interface StoredObject {
  * that points at unwritten bytes. An object already in place counts as stored: a put that finds it does not
  * fsync again, so it relies on the put that renamed it having synced it.
  */
+/** What `readVerified` found: the bytes, or which integrity problem kept it from returning them. */
+export type VerifiedRead =
+  | { status: "verified"; bytes: Buffer }
+  | { status: Exclude<ObjectIntegrity, "verified"> }
+  | { status: "over_limit" };
+
 export class ObjectStore {
   constructor(
     readonly paths: CatalogPaths,
@@ -136,9 +142,33 @@ export class ObjectStore {
     return stored;
   }
 
-  /** The stored bytes of `digest`, as written; the caller checks them against the digest when it matters. */
-  read(digest: string, options: { signal: AbortSignal }): Promise<Buffer> {
-    return readFile(this.pathFor(digest), { signal: options.signal });
+  /**
+   * The stored bytes of `digest`, once they match it, or why they cannot be trusted. The size on disk is checked
+   * before anything is read, so a replaced object over `maxBytes` never enters memory; `expectedBytes` is the size
+   * the catalog recorded, when it did. A failure to open or read other than a missing file rejects, as does an abort.
+   */
+  async readVerified(
+    digest: string,
+    options: { expectedBytes: number | null; maxBytes: number; signal: AbortSignal },
+  ): Promise<VerifiedRead> {
+    const { expectedBytes, maxBytes, signal } = options;
+    const handle = await open(this.pathFor(digest), "r").catch((error: unknown) => {
+      if (isNotFound(error)) return null;
+      throw error;
+    });
+    if (!handle) return { status: "missing" };
+    try {
+      const { size } = await handle.stat();
+      if (size > maxBytes) return { status: "over_limit" };
+      if (expectedBytes !== null && size !== expectedBytes) return { status: "corrupt" };
+      // Stored objects are read-only and never rewritten, so the file keeps the size just checked.
+      const bytes = await handle.readFile({ signal });
+      return ObjectStore.digestOf(bytes) === digest
+        ? { status: "verified", bytes }
+        : { status: "corrupt" };
+    } finally {
+      await handle.close();
+    }
   }
 
   readSync(digest: string): Buffer {

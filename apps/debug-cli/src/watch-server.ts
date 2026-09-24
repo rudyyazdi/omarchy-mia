@@ -57,7 +57,9 @@ export interface Watch {
   ended: Promise<WatchEnd>;
 }
 
-export type WatchStart = { kind: "watching"; watch: Watch } | { kind: "unknown_conversation" };
+/** `interrupted`: the signal aborted before the server listened, so nothing was served. */
+export type WatchStart =
+  { kind: "watching"; watch: Watch } | { kind: "unknown_conversation" } | { kind: "interrupted" };
 
 export interface WatchOptions {
   /** Opened read-only by the caller, which closes it once `ended` settles. */
@@ -95,13 +97,13 @@ const stoppedMessage = (end: WatchEnd): string =>
     .with({ kind: "failed" }, () => "the watch stopped after an error")
     .exhaustive();
 
-/** The most the retained tool contracts may hold: a profile's servers and policy, measured in KiB. */
+/** The most the retained tool contracts may hold; a profile's servers and policy take a few KiB. */
 const MAX_TOOL_CONTRACTS_BYTES = 1024 * 1024;
 
 /**
  * Which of the conversation's MCP servers write a body log, from the tool contracts its provenance retained, read
  * once: they never change. Contracts that cannot be read leave it unknown, so the page says so on each call instead
- * of refusing to show the conversation. A stop while reading leaves it unknown too, and the watch then stops.
+ * of refusing to show the conversation. A stop while reading leaves it unknown, and the watch starts no server.
  */
 const readBodyLogServers = async (
   catalog: Catalog,
@@ -126,11 +128,12 @@ const readBodyLogServers = async (
   }
 };
 
-/** Starts watching `conversationId`, or reports that the catalog has no such conversation. */
+/** Starts watching `conversationId`, or reports that the catalog has no such conversation or that it was stopped. */
 export const startWatch = async (options: WatchOptions): Promise<WatchStart> => {
   const { catalog, conversationId, timers } = options;
   if (!findConversation(catalog, conversationId)) return { kind: "unknown_conversation" };
   const bodyLogServers = await readBodyLogServers(catalog, conversationId, options.signal);
+  if (options.signal.aborted) return { kind: "interrupted" };
   const assets = await Promise.all(
     PAGE_FILES.map(async (asset) => ({
       ...asset,

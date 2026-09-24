@@ -8,7 +8,7 @@ import {
   type ToolCallStatus,
 } from "@mia/protocol";
 import { match } from "ts-pattern";
-import { writesBodyLog, type BodyLogServers } from "@mia/agent-adapter";
+import { serverBodyLog, type BodyLogServers } from "@mia/agent-adapter";
 import type {
   ApprovalRow,
   ConversationRow,
@@ -111,15 +111,13 @@ export interface Capture {
  */
 const mcpBodiesGap = (call: ToolCallRow, capture: Capture): string | null => {
   if (call.dispatch_event_id === null) return null;
-  return match(capture.bodyLogServers)
-    .with({ status: "known" }, ({ servers }) => {
-      if (!writesBodyLog(servers, call.tool_identity)) return "not recorded";
-      return capture.debugMode ? null : "not recorded (debug mode off)";
-    })
-    .with(
-      { status: "unknown" },
-      ({ reason }) =>
-        `not recorded unless shown below (whether its server records bodies is unknown: ${reason})`,
+  return match(serverBodyLog(capture.bodyLogServers, call.tool_identity))
+    .with({ kind: "none" }, () => "not recorded")
+    .with({ kind: "writes" }, () => (capture.debugMode ? null : "not recorded (debug mode off)"))
+    .with({ kind: "unknown" }, ({ reason }) =>
+      capture.debugMode
+        ? `not recorded unless shown below (whether its server records bodies is unknown: ${reason})`
+        : `not recorded (debug mode off, and whether its server records bodies is unknown: ${reason})`,
     )
     .exhaustive();
 };

@@ -417,7 +417,7 @@ describe("mia debug watch", () => {
       },
     });
     expect(toolCallNode(messages).view.body).toContain(
-      "MCP request and response: not recorded unless shown below (whether its server records bodies is unknown: its tool_contracts object could not be read",
+      "MCP request and response: not recorded (debug mode off, and whether its server records bodies is unknown: its tool_contracts object is missing)",
     );
   });
 
@@ -556,12 +556,13 @@ describe("mia debug watch", () => {
     expect(message).toMatchObject({ op: "node", kind: "task" });
   });
 
-  it("refuses an unknown conversation without serving anything", async () => {
+  /** Starts a watch of `id` whose signal has already aborted, as a Ctrl-C before it listens. */
+  const startStopped = async (id: string) => {
     const catalog = ts.catalog();
     try {
-      const started = await startWatch({
+      return await startWatch({
         catalog,
-        conversationId: "conv_unknown",
+        conversationId: id,
         signal: AbortSignal.abort(),
         timers: {
           nextPoll: manualTimer().wait,
@@ -569,10 +570,17 @@ describe("mia debug watch", () => {
           stopDrain: manualTimer().wait,
         },
       });
-      expect(started).toEqual({ kind: "unknown_conversation" });
     } finally {
       catalog.close();
     }
+  };
+
+  it("refuses an unknown conversation without serving anything", async () => {
+    expect(await startStopped("conv_unknown")).toEqual({ kind: "unknown_conversation" });
+  });
+
+  it("serves nothing when stopped before it listens", async () => {
+    expect(await startStopped(conversationId())).toEqual({ kind: "interrupted" });
   });
 
   it("tells the page and closes the server on Ctrl-C", async () => {

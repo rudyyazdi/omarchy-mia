@@ -99,9 +99,9 @@ describe("readConversationProvenance", () => {
       reason: "its tool_contracts object does not match its digest",
     });
     rmSync(path);
-    expect(await read(fresh.catalog)).toMatchObject({
+    expect(await read(fresh.catalog)).toEqual({
       status: "unavailable",
-      reason: expect.stringContaining("its tool_contracts object could not be read"),
+      reason: "its tool_contracts object is missing",
     });
   });
 

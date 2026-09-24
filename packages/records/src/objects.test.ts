@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempDisposableSync,
@@ -166,5 +167,47 @@ describe("ObjectStore.put", () => {
     writeFileSync(parent, ""); // a file where the object's directory belongs
     await expect(store.put(bytes, live())).rejects.toThrow();
     expect(readdirSync(store.paths.staging)).toEqual([]);
+  });
+});
+
+describe("ObjectStore.readVerified", () => {
+  /** A store under a fresh directory holding `bytes`, removed when the test's `using` scope ends. */
+  const storing = async () => {
+    const directory = mkdtempDisposableSync(join(tmpdir(), "mia-objects-"));
+    const store = new ObjectStore(catalogPaths(directory.path));
+    const { digest } = await store.put(bytes, live());
+    return { directory, store, digest, [Symbol.dispose]: () => directory.remove() };
+  };
+  const options = { expectedBytes: null, maxBytes: 1024, ...live() };
+
+  it("returns the stored bytes once they match their digest and recorded size", async () => {
+    using stored = await storing();
+    expect(
+      await stored.store.readVerified(stored.digest, {
+        ...options,
+        expectedBytes: bytes.byteLength,
+      }),
+    ).toEqual({ status: "verified", bytes });
+  });
+
+  it("refuses by the size on disk, before reading, an object over the bound or of another size", async () => {
+    using stored = await storing();
+    const { store, digest } = stored;
+    expect(
+      await store.readVerified(digest, { ...options, maxBytes: bytes.byteLength - 1 }),
+    ).toEqual({ status: "over_limit" });
+    expect(
+      await store.readVerified(digest, { ...options, expectedBytes: bytes.byteLength + 1 }),
+    ).toEqual({ status: "corrupt" });
+  });
+
+  it("reports a missing object, and one whose bytes no longer match its digest", async () => {
+    using stored = await storing();
+    const { store, digest } = stored;
+    expect(await store.readVerified("0".repeat(64), options)).toEqual({ status: "missing" });
+    const path = store.pathFor(digest);
+    chmodSync(path, 0o600);
+    writeFileSync(path, "altered bytes!");
+    expect(await store.readVerified(digest, options)).toEqual({ status: "corrupt" });
   });
 });
