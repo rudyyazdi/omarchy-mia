@@ -161,11 +161,13 @@ export interface ExecutionUsage {
  * Callers wrap related writes in catalog.transaction so events and state rows commit together.
  *
  * The rows a state transition creates and refers to within one transaction (conversations, tasks, executions,
- * tool calls, approvals and events, and the provenance sets, provenance entries, artifacts and artifact links
- * recorded with them) take their id from the caller, so a transition can name a record before it is written: an
- * approval_requested event carries its approval's id, the approval row its requesting event's, and a conversation
- * its provenance set's. Callers generate them with `newId`; a reused id fails the insert, and with it the
- * transaction. The rows a client's report or command creates (commands, diagnostics) are still named here.
+ * tool calls, approvals and events, and the provenance sets, provenance entries, artifacts, artifact links and
+ * diagnostics recorded with them) take their id from the caller, so a transition can name a record before it is
+ * written: an approval_requested event carries its approval's id, the approval row its requesting event's, a
+ * conversation its provenance set's, and a diagnostics row its client_diagnostics event's. Callers generate them
+ * with `newId`; a reused id fails the insert, and with it the transaction. A diagnostics row takes both from its
+ * caller even outside a transition (a heartbeat's). The row a client's command creates (commands) is still named
+ * here: it is recorded before the command runs, outside any transition.
  *
  * The same rows take their timestamps from the caller too (`startedAt`, `createdAt`, `receivedAt`, `updatedAt`,
  * `requestedAt`, `consumedAt`), as ISO strings: a pure transition decides with the time it is handed, so the
@@ -613,6 +615,8 @@ export class RecordWriter {
   // ---- diagnostics ----
 
   recordDiagnostics(input: {
+    id: string;
+    receivedAt: string;
     conversationId: string | null;
     clientId: string;
     clientConnectionId: string | null;
@@ -620,19 +624,17 @@ export class RecordWriter {
     eventId: string | null;
     capturedAt: string;
     state: unknown;
-  }): string {
-    const id = newId("diag");
+  }): void {
     this.catalog.insert("diagnostics", {
-      id,
+      id: input.id,
       conversation_id: input.conversationId,
       client_id: input.clientId,
       client_connection_id: input.clientConnectionId,
       task_id: input.taskId ?? null,
       event_id: input.eventId,
       captured_at: input.capturedAt,
-      received_at: nowIso(),
+      received_at: input.receivedAt,
       state: JSON.stringify(redactValue(input.state)),
     });
-    return id;
   }
 }

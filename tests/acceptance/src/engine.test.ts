@@ -1386,6 +1386,32 @@ describe("record times", () => {
     ]);
     expect(new Set([conversation.started_at, registered, finishedAt]).size).toBe(3);
   });
+
+  it("stamps a diagnostics report with the reading of its commit, and a heartbeat with a reading of its own", async () => {
+    useSteppingClock();
+    expect((await client.sendDiagnostics()).disposition).toBe("accepted");
+    expect((await client.heartbeat()).disposition).toBe("accepted");
+    // The session's own report came before the stepping clock, so only these two rows are stamped after `start`.
+    const stamped = rows<{ received_at: string; event_id: string | null }>(
+      "SELECT received_at, event_id FROM diagnostics WHERE received_at > ? ORDER BY received_at",
+      start,
+    );
+    expect(stamped).toHaveLength(2);
+    const [snapshot, heartbeat] = [
+      must(stamped[0], "diagnostic_snapshot row"),
+      must(stamped[1], "heartbeat row"),
+    ];
+    const event = must(
+      rows<{ received_at: string }>(
+        "SELECT received_at FROM events WHERE id = ? AND type = 'client_diagnostics'",
+        mustString(snapshot.event_id, "diagnostics event_id"),
+      )[0],
+      "client_diagnostics event",
+    );
+    expect(event.received_at).toBe(snapshot.received_at);
+    expect(heartbeat.event_id).toBeNull();
+    expect(heartbeat.received_at > snapshot.received_at).toBe(true);
+  });
 });
 
 describe("interruption path", () => {

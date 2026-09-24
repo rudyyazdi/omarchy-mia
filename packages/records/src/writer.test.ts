@@ -335,6 +335,26 @@ describe("record writer", () => {
     ]);
   });
 
+  it("names and stamps a diagnostics row with the id and time its caller gives, and refuses a reused id", () => {
+    writer.ensureClient("client-1", "text-client");
+    const report = () =>
+      writer.recordDiagnostics({
+        id: "diag-1",
+        receivedAt: second(2),
+        conversationId: null,
+        clientId: "client-1",
+        clientConnectionId: null,
+        eventId: null,
+        capturedAt: second(1),
+        state: {},
+      });
+    report();
+    expect(report).toThrow();
+    expect(catalog.all("SELECT id, captured_at, received_at FROM diagnostics")).toEqual([
+      { id: "diag-1", captured_at: second(1), received_at: second(2) },
+    ]);
+  });
+
   it("rejects duplicate approvals for the same binding and epoch, and duplicate command IDs", () => {
     seedToolCall();
     const approval = {
