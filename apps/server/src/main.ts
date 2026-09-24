@@ -5,7 +5,11 @@ import { EVIDENCE_READ_TIMEOUT_MS, SHUTDOWN_TURN_WAIT_MS, startServer } from "./
 const program = new Command()
   .name("mia-server")
   .requiredOption("--config <profile.json>", "server profile to run")
-  .option("--debug", "record debug detail for the conversations this server starts", false)
+  .option(
+    "--debug",
+    "debug mode: mark each conversation this server starts as captured in it",
+    false,
+  )
   // Usage errors exit 2 (as before commander); --help and --version keep commander's exit 0.
   .exitOverride((commanderError) => process.exit(commanderError.exitCode === 0 ? 0 : 2))
   .parse();

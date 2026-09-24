@@ -24,7 +24,7 @@ interface Recorded {
 
 /**
  * One conversation on a fresh server with debug mode on or off: a user command whose turn streams text and a
- * message, runs an allowed call, and has a forbidden call rejected by policy.
+ * message, runs an allowed call, and has a forbidden call and an unlisted call rejected by policy.
  */
 const recordConversation = async (debugMode: boolean): Promise<Recorded> => {
   const runtime = new ScriptedRuntime();
@@ -46,6 +46,8 @@ const recordConversation = async (debugMode: boolean): Promise<Recorded> => {
   expect((await turn.request("mcp__d1__read", {}, "toolu_read")).behavior).toBe("allow");
   await turn.toolResult("toolu_read", JSON.stringify({ unread: 3 }));
   expect((await turn.request("mcp__d1__forbidden", {}, "toolu_forbidden")).behavior).toBe("deny");
+  const mystery = await turn.request("mcp__d1__mystery", { query: "is:unread" }, "toolu_mystery");
+  expect(mystery.behavior).toBe("deny");
   turn.end();
   await client.waitFor("task_finished");
   const conversationId = must(client.conversationId, "conversation id");
@@ -67,10 +69,50 @@ const eventsOf = (tables: SnapshotTables, type: JournalEventType) =>
 
 const payloadOf = (event: { payload: string }): unknown => JSON.parse(event.payload);
 
+/**
+ * The tables that hold what the conversation did. The provenance tables (objects, artifacts and their links) are
+ * left out: their rows follow the source tree the server runs from, such as whether it has local changes.
+ */
+const CONVERSATION_TABLES: readonly (keyof SnapshotTables)[] = [
+  "conversations",
+  "clients",
+  "client_connections",
+  "tasks",
+  "executions",
+  "events",
+  "commands",
+  "tool_calls",
+  "approvals",
+  "diagnostics",
+];
+
+const POLICY_EVALUATED = [
+  "tool_call_id",
+  "tool_identity",
+  "policy",
+  "gate_open",
+  "execution_epoch",
+  "binding_revision",
+];
+const PERMISSION_PROPOSAL = [
+  "runtime_call_id",
+  "tool_identity",
+  "redacted_arguments",
+  "argument_digest",
+  "source",
+];
+
+/** A call's row, found by the runtime's id for it: rows come back in id order, and ids are random. */
+const callOf = (tables: SnapshotTables, runtimeCallId: string) =>
+  must(
+    tables.tool_calls.find((row) => row.runtime_call_id === runtimeCallId),
+    `call ${runtimeCallId}`,
+  );
+
 describe("debug mode on", () => {
-  it("records that the conversation was captured in debug mode, once, at its start", async () => {
+  it("records that the conversation was captured in debug mode, once, right after it started", async () => {
     const { tables } = await recordConversation(true);
-    const flags = eventsOf(tables, "debug_mode_enabled");
+    const flags = eventsOf(tables, "captured_in_debug_mode");
     expect(flags).toHaveLength(1);
     const started = must(eventsOf(tables, "conversation_started")[0], "conversation_started");
     expect(must(flags[0], "flag").sequence).toBe(started.sequence + 1);
@@ -96,64 +138,125 @@ describe("debug mode on", () => {
       execution_id: executionId,
       client_id: "client-A",
     });
-    const calls = tables.tool_calls.map((row) => [row.runtime_call_id, row.execution_id]);
-    expect(calls).toEqual([
-      ["toolu_read", executionId],
-      ["toolu_forbidden", executionId],
-    ]);
+    for (const runtimeCallId of ["toolu_read", "toolu_forbidden", "toolu_mystery"])
+      expect(callOf(tables, runtimeCallId)).toMatchObject({
+        id: expect.stringMatching(/^call_/),
+        task_id: taskId,
+        execution_id: executionId,
+      });
   });
 
-  it("records the model's actions: its text, its messages and its tool calls", async () => {
+  it("records the model's actions: its text, its messages, its tool calls and their results", async () => {
     const { tables } = await recordConversation(true);
     expect(eventsOf(tables, "text_delta").map(payloadOf)).toMatchObject([
       { text: "Looking at your inbox." },
     ]);
-    expect(eventsOf(tables, "assistant_message")).toHaveLength(1);
+    expect(eventsOf(tables, "assistant_message").map(payloadOf)).toEqual([
+      { role: "assistant", content: [{ type: "text", text: "Looking at your inbox." }] },
+    ]);
     expect(eventsOf(tables, "tool_proposed").map(payloadOf)).toMatchObject([
       { runtime_call_id: "toolu_read", tool_identity: "mcp__d1__read" },
       { runtime_call_id: "toolu_forbidden", tool_identity: "mcp__d1__forbidden" },
+      {
+        runtime_call_id: "toolu_mystery",
+        tool_identity: "mcp__d1__mystery",
+        redacted_arguments: { query: "is:unread" },
+      },
     ]);
-    expect(eventsOf(tables, "tool_result")).toHaveLength(1);
+    expect(eventsOf(tables, "tool_result").map(payloadOf)).toMatchObject([
+      { runtime_call_id: "toolu_read", content: JSON.stringify({ unread: 3 }) },
+    ]);
   });
 
-  it("records a rejection the harness made on its own, with its reason", async () => {
+  it("records each rejection the harness made on its own, with its reason", async () => {
     const { tables } = await recordConversation(true);
-    const forbidden = must(
-      tables.tool_calls.find((row) => row.runtime_call_id === "toolu_forbidden"),
-      "forbidden call",
-    );
-    expect(forbidden).toMatchObject({
+    expect(callOf(tables, "toolu_forbidden")).toMatchObject({
       policy: "deny",
       status: "denied",
       detail: "denied by policy",
     });
-    expect(eventsOf(tables, "policy_evaluated").map(payloadOf)).toContainEqual(
-      expect.objectContaining({ tool_call_id: forbidden.id, policy: "deny" }),
-    );
+    expect(callOf(tables, "toolu_mystery")).toMatchObject({
+      status: "denied",
+      detail: "tool not listed in toolPolicy",
+    });
+    expect(eventsOf(tables, "error").map(payloadOf)).toMatchObject([
+      {
+        code: "configuration_error",
+        message: "tool mcp__d1__mystery is not listed in toolPolicy; call denied",
+      },
+    ]);
   });
 });
 
 describe("debug mode off", () => {
-  it("records nothing of debug mode, and the same records as with it on otherwise", async () => {
-    const off = await recordConversation(false);
-    const on = await recordConversation(true);
-    expect(eventsOf(off.tables, "debug_mode_enabled")).toEqual([]);
-    // Two servers differ in ids, times and directories, so compare which records were written, with which
-    // columns, rather than their bytes.
-    const shape = (tables: SnapshotTables) => ({
-      rows: Object.entries(tables).map(([table, rows]) => [
-        table,
-        Array.isArray(rows) ? rows.map((row) => (isRecord(row) ? Object.keys(row) : row)) : rows,
-      ]),
-      events: tables.events.map((event) => {
-        const payload = payloadOf(event);
-        return [event.type, isRecord(payload) ? Object.keys(payload) : payload];
-      }),
-    });
-    const withoutFlag = {
-      ...on.tables,
-      events: on.tables.events.filter((event) => event.type !== "debug_mode_enabled"),
-    };
-    expect(shape(off.tables)).toEqual(shape(withoutFlag));
+  /**
+   * What a conversation records with debug mode off, pinned: which rows each table holds and which events, with
+   * which payload fields. Ids, times and directories differ between servers, so they are left out, and so are the
+   * provenance tables (see CONVERSATION_TABLES). Change this
+   * only for a deliberate change to what every conversation records; debug mode must never change it.
+   */
+  const OFF_MODE_RECORDS = {
+    rows: [
+      ["conversations", 1],
+      ["clients", 1],
+      ["client_connections", 1],
+      ["tasks", 1],
+      ["executions", 1],
+      ["events", 19],
+      ["commands", 1],
+      ["tool_calls", 3],
+      ["approvals", 0],
+      ["diagnostics", 0],
+    ],
+    events: [
+      [
+        "provenance_recorded",
+        [
+          "provenance_set_id",
+          "agent_prompt_digest",
+          "agent_prompt_version",
+          "configuration_digest",
+          "architecture_revision",
+          "server_build",
+          "runtime_version",
+          "entries",
+        ],
+      ],
+      ["conversation_started", ["conversation_id", "started_at", "provenance_set_id"]],
+      ["task_submitted", ["text", "runtime_prompt", "mia_note", "command_id"]],
+      ["task_started", ["conversation_id", "task_id", "execution_id", "execution_epoch", "text"]],
+      ["runtime_init", ["scripted", "session", "model"]],
+      ["text_delta", ["conversation_id", "task_id", "execution_id", "text"]],
+      ["assistant_message", ["role", "content"]],
+      [
+        "tool_proposed",
+        ["runtime_call_id", "tool_identity", "redacted_arguments", "argument_digest"],
+      ],
+      ["policy_evaluated", POLICY_EVALUATED],
+      ["tool_dispatched", ["tool_call_id", "runtime_call_id", "tool_identity", "policy", "via"]],
+      ["tool_result", ["runtime_call_id", "is_error", "content", "raw"]],
+      ["tool_proposed", PERMISSION_PROPOSAL],
+      ["policy_evaluated", POLICY_EVALUATED],
+      ["tool_proposed", PERMISSION_PROPOSAL],
+      ["policy_evaluated", POLICY_EVALUATED],
+      ["error", ["code", "message", "conversation_id", "task_id"]],
+      ["runtime_result", ["scripted", "session"]],
+      ["runtime_exit", ["code", "signal"]],
+      ["task_finished", ["conversation_id", "task_id", "status", "usage"]],
+    ],
+  };
+
+  const recordedShape = (tables: SnapshotTables) => ({
+    rows: CONVERSATION_TABLES.map((table) => [table, tables[table].length]),
+    events: tables.events.map((event) => {
+      const payload = payloadOf(event);
+      return [event.type, isRecord(payload) ? Object.keys(payload) : payload];
+    }),
+  });
+
+  it("records exactly what a conversation recorded before debug mode existed", async () => {
+    const { tables } = await recordConversation(false);
+    expect(eventsOf(tables, "captured_in_debug_mode")).toEqual([]);
+    expect(recordedShape(tables)).toEqual(OFF_MODE_RECORDS);
   });
 });

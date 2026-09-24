@@ -301,7 +301,7 @@ export type ObjectIntegrity = "verified" | "missing" | "corrupt";
 export type JournalEventType =
   | ServerEventType
   | "provenance_recorded"
-  | "debug_mode_enabled"
+  | "captured_in_debug_mode"
   | "task_submitted"
   | "client_diagnostics"
   | "client_disconnected"

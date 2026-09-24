@@ -230,7 +230,7 @@ export interface EngineDeps {
   now: () => Date;
   /**
    * Debug mode, chosen once per server start: each conversation started while it is on records a
-   * `debug_mode_enabled` event, so a viewer can tell detail that was never captured from detail that is absent.
+   * `captured_in_debug_mode` event, so a viewer can tell detail that was never captured from detail that is absent.
    * Off records exactly what the engine records without it.
    */
   debugMode: boolean;
@@ -683,7 +683,7 @@ export class Engine {
           },
         });
         // After conversation_started, so that event keeps the sequence it has with debug mode off.
-        if (this.deps.debugMode) this.record("debug_mode_enabled", {});
+        if (this.deps.debugMode) this.record("captured_in_debug_mode", {});
         return {
           ok: true,
           result: {
