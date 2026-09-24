@@ -10,11 +10,29 @@ import {
   renameSync,
   writeSync,
 } from "node:fs";
-import { access, chmod, mkdir, open, rename } from "node:fs/promises";
+import { access, chmod, mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { sha256Hex } from "@mia/protocol";
 import type { CatalogPaths } from "./catalog.ts";
 import type { ObjectIntegrity } from "./schema.ts";
+
+/** Writes `bytes` to a new owner-only file at `path` and fsyncs it. */
+const writeDurably = async (
+  path: string,
+  bytes: Uint8Array,
+  signal: AbortSignal,
+): Promise<void> => {
+  const handle = await open(path, "wx", 0o600);
+  try {
+    await handle.writeFile(bytes, { signal });
+    await handle.sync();
+  } finally {
+    await handle.close().catch(() => {
+      // The bytes are fsynced before the close, so a failed close loses nothing, and it must not hide the
+      // error of a write that failed.
+    });
+  }
+};
 
 export interface StoredObject {
   digest: string;
@@ -51,9 +69,10 @@ export class ObjectStore {
   /**
    * Store `bytes` before the transaction that references them opens, so the write, fsync and rename stall only
    * the commit that needs the object, never the other connections. Idempotent: bytes already stored are left as
-   * they are.
+   * they are. An abort or a failure removes the staged file and leaves no object.
    */
-  async put(bytes: Uint8Array): Promise<StoredObject> {
+  async put(bytes: Uint8Array, options: { signal: AbortSignal }): Promise<StoredObject> {
+    const { signal } = options;
     const stored = this.describe(bytes);
     const target = this.pathFor(stored.digest);
     const present = await access(target).then(
@@ -61,17 +80,18 @@ export class ObjectStore {
       () => false,
     );
     if (present) return stored;
+    signal.throwIfAborted();
     await mkdir(this.paths.staging, { recursive: true, mode: 0o700 });
     const staged = join(this.paths.staging, `${randomUUID()}.tmp`);
-    const handle = await open(staged, "w", 0o600);
     try {
-      await handle.writeFile(bytes);
-      await handle.sync();
-    } finally {
-      await handle.close();
+      await writeDurably(staged, bytes, signal);
+      signal.throwIfAborted();
+      await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+      await rename(staged, target);
+    } catch (error) {
+      await rm(staged, { force: true });
+      throw error;
     }
-    await mkdir(dirname(target), { recursive: true, mode: 0o700 });
-    await rename(staged, target);
     await chmod(target, 0o400).catch(() => {
       /* best effort */
     });

@@ -288,7 +288,9 @@ describe("records, report and export", () => {
     const path = store.pathFor(artifact.object_digest);
     rmSync(path, { force: true });
     // Orphan object: bytes published without a catalog row (simulated crash between publish and commit).
-    const orphan = await store.put(Buffer.from("orphan bytes"));
+    const orphan = await store.put(Buffer.from("orphan bytes"), {
+      signal: new AbortController().signal,
+    });
     // Corrupt a provenance object.
     const prov = must(
       catalog.get<{ object_digest: string }>(

@@ -106,21 +106,25 @@ export interface AppendedEvent {
   receivedAt: string;
 }
 
-export interface ArtifactInput {
+/**
+ * What was captured for an artifact: the object its bytes were already stored as (`ObjectStore.put`), so
+ * registering it does no file I/O, or why nothing was retained.
+ */
+export type ArtifactCapture =
+  | { stored: StoredObject }
+  | { captureStatus: Exclude<CaptureStatus, "retained">; captureReason: string };
+
+export type ArtifactInput = ArtifactCapture & {
   kind: ArtifactKind;
   logicalName: string;
   mimeType?: string | null;
   schemaVersion?: string | null;
-  /** The object already stored for the artifact's bytes (`ObjectStore.put`), so registering it does no file I/O. */
-  stored?: StoredObject | null;
   producerExecutionId?: string | null;
   producerEventId?: string | null;
   originalPath?: string | null;
-  captureStatus?: CaptureStatus;
   externalLocator?: string | null;
-  captureReason?: string | null;
   redaction?: string | null;
-}
+};
 
 export interface LinkInput {
   conversationId: string;
@@ -269,23 +273,19 @@ export class RecordWriter {
     byteSize: number | null;
   } {
     const id = newId("art");
-    let digest: string | null = null;
-    let byteSize: number | null = null;
-    let status = input.captureStatus ?? (input.stored ? "retained" : "missing");
-    const { stored } = input;
-    if (stored) {
-      digest = stored.digest;
-      byteSize = stored.byteCount;
-      if (!this.catalog.get("SELECT digest FROM objects WHERE digest = ?", digest)) {
-        this.catalog.insert("objects", {
-          digest,
-          byte_count: byteSize,
-          storage_key: stored.storageKey,
-          integrity: "verified",
-          created_at: nowIso(),
-        });
-      }
-      status = "retained";
+    const stored = "stored" in input ? input.stored : null;
+    const capture: { capture_status: CaptureStatus; capture_reason: string | null } =
+      "stored" in input
+        ? { capture_status: "retained", capture_reason: null }
+        : { capture_status: input.captureStatus, capture_reason: input.captureReason };
+    if (stored && !this.catalog.get("SELECT digest FROM objects WHERE digest = ?", stored.digest)) {
+      this.catalog.insert("objects", {
+        digest: stored.digest,
+        byte_count: stored.byteCount,
+        storage_key: stored.storageKey,
+        integrity: "verified",
+        created_at: nowIso(),
+      });
     }
     this.catalog.insert("artifacts", {
       id,
@@ -296,15 +296,14 @@ export class RecordWriter {
       created_at: nowIso(),
       producer_execution_id: input.producerExecutionId ?? null,
       producer_event_id: input.producerEventId ?? null,
-      object_digest: digest,
-      byte_size: byteSize,
-      capture_status: status,
+      object_digest: stored?.digest ?? null,
+      byte_size: stored?.byteCount ?? null,
+      ...capture,
       external_locator: input.externalLocator ?? null,
-      capture_reason: input.captureReason ?? null,
       redaction: input.redaction ?? null,
       original_path: input.originalPath ?? null,
     });
-    return { artifactId: id, digest, byteSize };
+    return { artifactId: id, digest: stored?.digest ?? null, byteSize: stored?.byteCount ?? null };
   }
 
   addProvenanceEntry(input: {

@@ -82,12 +82,16 @@ describe("record writer", () => {
     const one = writer.registerArtifact({
       kind: "tool_output",
       logicalName: "a.txt",
-      stored: await writer.objects.put(Buffer.from("same")),
+      stored: await writer.objects.put(Buffer.from("same"), {
+        signal: new AbortController().signal,
+      }),
     });
     const two = writer.registerArtifact({
       kind: "tool_output",
       logicalName: "b.txt",
-      stored: await writer.objects.put(Buffer.from("same")),
+      stored: await writer.objects.put(Buffer.from("same"), {
+        signal: new AbortController().signal,
+      }),
     });
     expect(one.digest).toBe(two.digest);
     expect(one.artifactId).not.toBe(two.artifactId);

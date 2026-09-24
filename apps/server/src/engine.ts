@@ -179,8 +179,9 @@ export interface EngineDeps {
   /** Computed once at startup; every conversation's provenance records it. */
   identity: ServerIdentity;
   /**
-   * A fresh deadline for one turn's evidence reads (the transcript and the hook evidence). A read still pending
-   * when it aborts is recorded unreadable, so a read that never returns cannot keep the task from finishing.
+   * A fresh deadline for one turn's evidence reads and stores (the transcript and the hook evidence). A read still
+   * pending when it aborts is recorded unreadable, so a read that never returns cannot keep the task from
+   * finishing; a store it interrupts is recorded not retained (an fsync already under way still completes).
    */
   evidenceReadDeadline: () => AbortSignal;
   /** Reads the transcript and the hook evidence at turn end: `readRuntimeFile`, or a test's own. */
@@ -1047,7 +1048,7 @@ export class Engine {
    * recorded before this returns.
    * A failed result never completes its call, so the file it declares is not read.
    * The adapter hands over the next stdout event only once this settles, so events still commit in the order the
-   * runtime wrote them. The turn ends before the capture only when the adapter stops reading a runtime whose
+   * runtime wrote them. The turn ends before the capture and store only when the adapter stops reading a runtime whose
    * interruption did not end it; the result is then dropped with a log line, because the turn has already been
    * recorded without it.
    */
@@ -1066,17 +1067,19 @@ export class Engine {
         status: "failed",
         reason: `declared file unreadable: ${errorMessage(error)}`,
       }));
-    this.recordRuntimeEvent(task, event, { declared, retention: await this.store(capture) });
+    const retention = await this.store(capture, this.stopping.signal);
+    this.recordRuntimeEvent(task, event, { declared, retention });
   }
 
   /**
    * Stores a retained capture's bytes, before the transaction that registers them opens. Retaining is best-effort,
-   * so bytes that cannot be stored become a failed capture that says why. A transaction that then fails leaves
-   * an unreferenced object, never a row that points at unwritten bytes.
+   * so bytes that cannot be stored before `signal` aborts become a failed capture that says why. Bytes whose
+   * transaction then fails, or that it does not register (an event dropped because its runtime ended, a result
+   * that completes no call), are left as an unreferenced object, never a row that points at unwritten bytes.
    */
-  private async store(capture: Capture): Promise<Retention> {
+  private async store(capture: Capture, signal: AbortSignal): Promise<Retention> {
     if (capture.status !== "retained") return capture;
-    return this.deps.writer.objects.put(capture.bytes).then(
+    return this.deps.writer.objects.put(capture.bytes, { signal }).then(
       (stored): Retention => ({ status: "retained", stored }),
       (error: unknown): Retention => ({
         status: "failed",
@@ -1588,13 +1591,16 @@ export class Engine {
     const hookEvidence = hookEvidenceFrom(hookRead);
     const { records: hooks, malformedLines, readError } = hookEvidence;
     const [transcriptRetention, hookRetention] = await Promise.all([
-      transcript.status === "absent" ? null : this.store(evidenceCapture(transcript)),
+      transcript.status === "absent" ? null : this.store(evidenceCapture(transcript), signal),
       hooks.length === 0
         ? null
-        : this.store({
-            status: "retained",
-            bytes: Buffer.from(hooks.map((hook) => JSON.stringify(hook)).join("\n") + "\n"),
-          }),
+        : this.store(
+            {
+              status: "retained",
+              bytes: Buffer.from(hooks.map((hook) => JSON.stringify(hook)).join("\n") + "\n"),
+            },
+            signal,
+          ),
     ]);
     const conversation = this.conversation;
     if (!conversation) return;
@@ -1816,8 +1822,8 @@ export class Engine {
    * gate closes, pending approvals are invalidated, the outcome is recorded), then wait for the task to
    * finish or for `turnWait` to abort. It never rejects. When the interruption cannot be recorded the
    * runtime is killed anyway, because a runtime left running outlives the server and can keep calling tools.
-   * When `turnWait` aborts, a turn whose runtime has ended but whose evidence is still being read is recorded
-   * without the evidence still pending (recording is then synchronous, so the wait for it is bounded). A task
+   * When `turnWait` aborts, a turn whose runtime has ended but whose evidence is still being read or stored is
+   * recorded without the evidence still pending (recording is then synchronous, so the wait for it is bounded). A task
    * whose runtime is still running then finishes, if ever, into a closed catalog and stays unrecorded.
    */
   async shutdown(turnWait: AbortSignal): Promise<void> {

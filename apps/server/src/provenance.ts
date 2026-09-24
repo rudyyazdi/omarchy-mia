@@ -112,7 +112,6 @@ export const createConversationProvenance = (input: {
       schemaVersion: input.version ?? null,
       // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 makes engine commands async
       stored: writer.objects.putSync(bytes),
-      captureStatus: "retained",
     });
     writer.addProvenanceEntry({
       provenanceSetId: setId,
