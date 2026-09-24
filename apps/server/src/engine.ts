@@ -535,6 +535,8 @@ export class Engine {
   private tx<T>(build: () => T): T {
     let result: T;
     let changes: CommittedChange[];
+    // A transition inside another would commit the outer one's half-built records.
+    if (this.transactionTime !== null) throw new Error("transitions do not nest");
     this.transactionTime = this.deps.now().toISOString();
     try {
       result = build();
@@ -768,8 +770,8 @@ export class Engine {
       client: this.activeClientId,
     };
     try {
-      // Unlike task transitions, this sets state inside the transaction, because `record` reads the active
-      // conversation; the catch below restores it.
+      // Unlike task transitions, this sets state while its records are built, because `record` reads the active
+      // conversation; the catch below restores it if the build or the commit throws.
       return this.tx(() => {
         const startedAt = this.recordedAt;
         const { records: provenanceRows, summary: provenance } = provenanceRecords(
@@ -2206,14 +2208,15 @@ export class Engine {
       finished: this.newId("evt"),
       error: this.newId("evt"),
     };
-    // Every approval the records still hold pending, not only the ones in memory: an abandonment whose commit failed
-    // left memory without its approval and the catalog with a pending row. Read just before the transaction, with
-    // nothing awaited in between, so no approval can be requested or resolved after the read and before the commit.
-    const stillPending = this.deps.catalog.all<{ id: string }>(
-      "SELECT a.id FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id WHERE t.task_id = ? AND a.status = 'pending'",
-      task.id,
-    );
     try {
+      // Every approval the records still hold pending, not only the ones in memory: an abandonment whose commit
+      // failed left memory without its approval and the catalog with a pending row. Read just before the
+      // transaction, with nothing awaited in between, so no approval can be requested or resolved after the read
+      // and before the commit; inside the try, so a failed read is handled as a failed commit.
+      const stillPending = this.deps.catalog.all<{ id: string }>(
+        "SELECT a.id FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id WHERE t.task_id = ? AND a.status = 'pending'",
+        task.id,
+      );
       this.tx(() => {
         for (const action of actions)
           this.write({

@@ -57,7 +57,7 @@ describe("commitRecords", () => {
       kind: "create_task",
       input: { id: "task-1", createdAt: AT, conversationId: "no-such", text: "x", clientId: null },
     };
-    expect(() => commitRecords(store.writer, [event("evt-1"), failing])).toThrow();
+    expect(() => commitRecords(store.writer, [event("evt-1"), failing])).toThrow(/FOREIGN KEY/);
     expect(store.catalog.all("SELECT id FROM events")).toEqual([]);
     expect(commitRecords(store.writer, [event("evt-1")])).toEqual([
       { kind: "event", id: "evt-1", sequence: 1 },

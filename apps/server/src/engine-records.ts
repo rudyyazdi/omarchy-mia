@@ -14,6 +14,9 @@ type ArgumentsOf<Name extends Operation> = Parameters<RecordWriter[Name]>;
 /** The input a single-argument writer operation takes. */
 type InputOf<Name extends Operation> = ArgumentsOf<Name>[0];
 
+/** The id of the row an update writer operation changes. */
+type IdOf<Name extends Operation> = ArgumentsOf<Name>[0];
+
 /** The fields an update writer operation takes after the row's id. */
 type FieldsOf<Name extends Operation> = ArgumentsOf<Name>[1];
 
@@ -30,21 +33,25 @@ export type EngineRecord =
   | { kind: "register_artifact"; input: InputOf<"registerArtifact"> }
   | {
       kind: "add_dependency";
-      parentArtifactId: string;
-      requiredArtifactId: string;
+      parentArtifactId: ArgumentsOf<"addDependency">[0];
+      requiredArtifactId: ArgumentsOf<"addDependency">[1];
       relation: ArgumentsOf<"addDependency">[2];
     }
   | { kind: "link_artifact"; input: InputOf<"linkArtifact"> }
   | { kind: "create_conversation"; input: InputOf<"createConversation"> }
-  | { kind: "update_conversation"; id: string; fields: FieldsOf<"updateConversation"> }
+  | {
+      kind: "update_conversation";
+      id: IdOf<"updateConversation">;
+      fields: FieldsOf<"updateConversation">;
+    }
   | { kind: "create_task"; input: InputOf<"createTask"> }
-  | { kind: "update_task"; id: string; fields: FieldsOf<"updateTask"> }
+  | { kind: "update_task"; id: IdOf<"updateTask">; fields: FieldsOf<"updateTask"> }
   | { kind: "create_execution"; input: InputOf<"createExecution"> }
-  | { kind: "update_execution"; id: string; fields: FieldsOf<"updateExecution"> }
+  | { kind: "update_execution"; id: IdOf<"updateExecution">; fields: FieldsOf<"updateExecution"> }
   | { kind: "create_tool_call"; input: InputOf<"createToolCall"> }
-  | { kind: "update_tool_call"; id: string; fields: FieldsOf<"updateToolCall"> }
+  | { kind: "update_tool_call"; id: IdOf<"updateToolCall">; fields: FieldsOf<"updateToolCall"> }
   | { kind: "create_approval"; input: InputOf<"createApproval"> }
-  | { kind: "update_approval"; id: string; fields: FieldsOf<"updateApproval"> }
+  | { kind: "update_approval"; id: IdOf<"updateApproval">; fields: FieldsOf<"updateApproval"> }
   | { kind: "record_diagnostics"; input: InputOf<"recordDiagnostics"> };
 
 /** What committing one record changed: an event, with the sequence the catalog gave it, or some other row. */
