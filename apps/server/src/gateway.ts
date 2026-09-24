@@ -15,7 +15,7 @@ import {
   type ClientCommand,
   type ServerEvent,
 } from "@mia/protocol";
-import { nowIso, type CommandReply, type RecordedCommand, type RecordWriter } from "@mia/records";
+import { type CommandReply, type RecordedCommand, type RecordWriter } from "@mia/records";
 import { decodeEnvelope } from "./decode.ts";
 import type { CommandResult, Delivery, Engine } from "./engine.ts";
 
@@ -25,6 +25,8 @@ export interface GatewayOptions {
   secretFile: string;
   engine: Engine;
   writer: RecordWriter;
+  /** The clock an ack's `server_time` reads: the engine's, so acks and events agree. */
+  now: () => Date;
   log: (message: string) => void;
 }
 
@@ -167,7 +169,7 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
       type: "ack",
       conversation_id: options.engine.conversation?.id ?? null,
       sequence: null,
-      server_time: nowIso(),
+      server_time: options.now().toISOString(),
       payload,
     };
     if (conn.socket.readyState === conn.socket.OPEN) conn.socket.send(JSON.stringify(event));

@@ -381,7 +381,8 @@ export class Engine {
   private readonly prompts = new Holds<PermissionDecision>(MAX_HELD_PROMPTS);
   /**
    * When the transaction in progress was decided, or null outside one. One reading per transaction, as a kernel
-   * dispatch hands its `decide` one `now`, so the rows of one commit agree on when it happened.
+   * dispatch hands its `decide` one `now`, so the transition rows of one commit (see `EngineDeps.now`) agree on when
+   * it happened. The rows the writer still names (provenance, artifacts, diagnostics) stamp themselves.
    */
   private transactionTime: string | null = null;
 
