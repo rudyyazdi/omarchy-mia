@@ -29,7 +29,6 @@ import {
   type Decision,
   type ErrorCode,
   type ServerEvent,
-  type TaskStatus,
   type ToolCallPolicy,
 } from "@mia/protocol";
 import {

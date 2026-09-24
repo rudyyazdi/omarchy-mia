@@ -69,6 +69,12 @@ const awaiting = (pending: number[], task: Partial<TaskState> = {}): Conversatio
   ),
 });
 
+/** The state a transition decided from is left as it was: only a commit makes the next one current. */
+const expectStillAwaiting = (state: ConversationState): void => {
+  expect(state.task?.pendingApprovals.has("appr_1")).toBe(true);
+  expect(state.task && callById(state.task, "call_1")?.status).toBe("awaiting_approval");
+};
+
 const decide = (state: ConversationState, event: ConversationEvent): ConversationDecision =>
   decideConversation({ state, event, now: NOW });
 
@@ -150,9 +156,7 @@ describe("approval decisions", () => {
     ]);
     expect(next.task).toMatchObject({ status: "running", pendingApprovals: new Map() });
     expect(releasedBy(next, "appr_1")).toBe(true);
-    // The state it decided from is left as it was: only a commit makes the next one current.
-    expect(state.task?.pendingApprovals.has("appr_1")).toBe(true);
-    expect(state.task && callById(state.task, "call_1")?.status).toBe("awaiting_approval");
+    expectStillAwaiting(state);
   });
 
   it("records a rejection as a denial that releases nothing and keeps the task waiting on the others", () => {
@@ -332,8 +336,7 @@ describe("prompt abandonment", () => {
     });
     expect(next.task && callById(next.task, "call_1")?.status).toBe("invalidated");
     expect(state.task).toMatchObject({ status: "awaiting_approval", abandoned: [] });
-    expect(state.task?.pendingApprovals.has("appr_1")).toBe(true);
-    expect(state.task && callById(state.task, "call_1")?.status).toBe("awaiting_approval");
+    expectStillAwaiting(state);
   });
 
   it("changes nothing for an approval no longer pending, or a call or task it does not hold", () => {
