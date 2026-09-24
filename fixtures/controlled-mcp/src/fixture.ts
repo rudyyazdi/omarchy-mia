@@ -52,8 +52,9 @@ export interface FixtureOptions {
 /**
  * The fixture's body log, in its directory: each `tools/call` request and response body, keyed by the runtime's
  * tool-use id. A profile names it as the fixture server's `bodyLog`, and a server in debug mode records the lines of
- * each call from it (issue #6). It is append-only, like the ledger, and a harness reset leaves it: every line is
- * keyed by a call's own id.
+ * each call from it (issue #6). It is append-only, like the ledger, and a harness reset leaves it: lines are matched by
+ * tool-use id, which the real runtime never reuses. fake-claude's ids are fixed, so a test that runs it twice against
+ * one fixture in debug mode would see the first call's lines again; each such test gets a fixture of its own.
  */
 export const BODY_LOG_FILE = "mcp-bodies.jsonl";
 

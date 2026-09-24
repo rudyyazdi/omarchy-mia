@@ -264,6 +264,8 @@ export const startMcpHttpServer = async (
     });
     const ctx: McpRequestContext = { connectionClosed: closeController.signal, requestId: reqNo };
     const transport = await transportFor(parsedBody, bodyLog);
+    // The client may have gone while the body log was written; its close has fired, so nothing would close these.
+    if (res.destroyed) return;
     const server = options.createServer(ctx);
     res.on("close", () => {
       void transport.close().catch(() => undefined);

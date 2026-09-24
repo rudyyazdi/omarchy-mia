@@ -54,12 +54,13 @@ const READ_RESPONSE = {
 /**
  * One conversation on a fresh server with debug mode on or off: a user command whose turn streams text and a
  * message, runs an allowed call, and has a forbidden call and an unlisted call rejected by policy. The d1 server
- * names a body log, as the controlled fixture's profile does; the allowed call's lines are written to it before
- * its result arrives, unless `bodyLog` is "missing".
+ * names a body log, as the controlled fixture's profile does, and the allowed call's lines are written to it before
+ * its result arrives. With `bodyLog` "missing" none are written; with "expired" they are, but the result's read of
+ * them outlives its deadline; with "unconfigured" the server names no body log.
  */
 const recordConversation = async (
   debugMode: boolean,
-  bodyLog: "written" | "missing" = "written",
+  bodyLog: "written" | "missing" | "expired" | "unconfigured" = "written",
 ): Promise<Recorded> => {
   const logDirectory = mkdtempSync(join(tmpdir(), "mia-body-log-"));
   directories.push(logDirectory);
@@ -67,7 +68,11 @@ const recordConversation = async (
   const runtime = new ScriptedRuntime();
   const server = await startTestServer(
     runtime,
-    { mcpServers: { d1: { type: "http", url: "http://127.0.0.1:1/mcp", bodyLog: bodyLogFile } } },
+    bodyLog === "unconfigured"
+      ? {}
+      : {
+          mcpServers: { d1: { type: "http", url: "http://127.0.0.1:1/mcp", bodyLog: bodyLogFile } },
+        },
     { debugMode },
   );
   servers.push(server);
@@ -85,7 +90,7 @@ const recordConversation = async (
   });
   turn.propose("toolu_read", "mcp__d1__read", {});
   expect((await turn.request("mcp__d1__read", {}, "toolu_read")).behavior).toBe("allow");
-  if (bodyLog === "written")
+  if (bodyLog !== "missing")
     writeFileSync(
       bodyLogFile,
       [
@@ -96,7 +101,13 @@ const recordConversation = async (
         .map((line) => JSON.stringify(line) + "\n")
         .join(""),
     );
-  await turn.toolResult("toolu_read", JSON.stringify({ unread: 3 }));
+  const held = bodyLog === "expired" ? server.holdEvidenceRead(bodyLogFile) : null;
+  const result = turn.toolResult("toolu_read", JSON.stringify({ unread: 3 }));
+  if (held) {
+    await held.started;
+    server.expireEvidenceReads();
+  }
+  await result;
   expect((await turn.request("mcp__d1__forbidden", {}, "toolu_forbidden")).behavior).toBe("deny");
   const mystery = await turn.request("mcp__d1__mystery", { query: "is:unread" }, "toolu_mystery");
   expect(mystery.behavior).toBe("deny");
@@ -285,6 +296,24 @@ describe("debug mode on: MCP bodies", () => {
         },
       ]),
     );
+  });
+
+  it("records why a call's bodies are missing when reading its body log outlives the deadline", async () => {
+    const { tables } = await recordConversation(true, "expired");
+    expect(mcpBodiesOf(tables).map(payloadOf)).toEqual([
+      expect.objectContaining({
+        unrecorded: expect.stringMatching(/^the body log is unreadable: /),
+      }),
+      expect.objectContaining({
+        unrecorded: expect.stringMatching(/^the body log is unreadable: /),
+      }),
+    ]);
+  });
+
+  it("records no bodies for a call to a server that names no body log", async () => {
+    const { tables } = await recordConversation(true, "unconfigured");
+    expect(callOf(tables, "toolu_read").status).toBe("completed");
+    expect(mcpBodiesOf(tables)).toEqual([]);
   });
 });
 

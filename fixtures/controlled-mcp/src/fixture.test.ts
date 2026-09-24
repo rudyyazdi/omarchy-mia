@@ -270,7 +270,7 @@ describe("controlled fixture", () => {
       await mcpClient.close();
     }
     expect(fixture.bodyLogFile).toBe(join(dir, BODY_LOG_FILE));
-    const { lines } = bodyLogLinesFor(
+    const lines = bodyLogLinesFor(
       await readFile(fixture.bodyLogFile, "utf8"),
       "toolu_fixture_change",
     );

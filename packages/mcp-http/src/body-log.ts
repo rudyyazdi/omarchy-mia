@@ -55,28 +55,24 @@ export const responseId = (message: unknown): RpcId | null => {
 
 /**
  * The lines of a body log for one tool use, in log order. A line that is not a body log line (the truncated last
- * line of a process killed mid-write) is skipped and counted.
+ * line of a process killed mid-write) is skipped. Only lines that mention the id are parsed, so reading one call's
+ * lines does not parse every other call's bodies.
  */
-export const bodyLogLinesFor = (
-  text: string,
-  toolUseId: string,
-): { lines: BodyLogLine[]; malformed: number } => {
+export const bodyLogLinesFor = (text: string, toolUseId: string): BodyLogLine[] => {
+  const mention = JSON.stringify(toolUseId);
   const lines: BodyLogLine[] = [];
-  let malformed = 0;
   for (const raw of text.split("\n")) {
-    if (!raw.trim()) continue;
+    if (!raw.includes(mention)) continue;
     let json: unknown;
     try {
       json = JSON.parse(raw);
     } catch {
-      malformed += 1;
       continue;
     }
     const line = BodyLogLineSchema.safeParse(json);
-    if (!line.success) malformed += 1;
-    else if (line.data.tool_use_id === toolUseId) lines.push(line.data);
+    if (line.success && line.data.tool_use_id === toolUseId) lines.push(line.data);
   }
-  return { lines, malformed };
+  return lines;
 };
 
 /** Appends body log lines; `append` resolves once the line is written, so a reader then sees it. */

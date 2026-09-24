@@ -53,7 +53,7 @@ import {
   type Retention,
 } from "./artifact-capture.ts";
 import type { ArtifactCollector } from "./artifact-collector.ts";
-import { MAX_BODY_LOG_BYTES, mcpBodiesFrom, type McpBody } from "./mcp-bodies.ts";
+import { MAX_BODY_LOG_BYTES, mcpBodiesFrom, unrecordedBodies, type McpBody } from "./mcp-bodies.ts";
 import {
   linkConversationProvenance,
   nameProvenance,
@@ -1438,7 +1438,15 @@ export class Engine {
   private async readMcpBodies(path: string, runtimeCallId: string): Promise<McpBodyRecord[]> {
     const signal = AbortSignal.any([this.stopping.signal, this.deps.evidenceReadDeadline()]);
     const read = await this.deps.readEvidence(path, { signal, maxBytes: MAX_BODY_LOG_BYTES });
-    return mcpBodiesFrom(read, runtimeCallId).map((body) => ({
+    // Parsing and redacting can throw (a body nested past the stack), and this must not reject the result's event.
+    const bodies = ((): McpBody[] => {
+      try {
+        return mcpBodiesFrom(read, runtimeCallId);
+      } catch (error) {
+        return unrecordedBodies(`the body log could not be parsed: ${errorMessage(error)}`);
+      }
+    })();
+    return bodies.map((body) => ({
       ...body,
       eventId: this.newId("evt"),
     }));

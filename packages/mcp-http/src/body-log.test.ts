@@ -29,7 +29,7 @@ describe("responseId", () => {
 });
 
 describe("bodyLogLinesFor", () => {
-  it("returns one tool use's lines in log order, skipping and counting malformed ones", () => {
+  it("returns one tool use's lines in log order, skipping malformed ones", () => {
     const line = (toolUseId: string, direction: string, body: unknown) =>
       JSON.stringify({ tool_use_id: toolUseId, direction, body });
     const text = [
@@ -41,12 +41,11 @@ describe("bodyLogLinesFor", () => {
       '{"tool_use_id":"toolu_a","dire',
     ].join("\n");
 
-    expect(bodyLogLinesFor(text, "toolu_a")).toEqual({
-      lines: [
-        { tool_use_id: "toolu_a", direction: "request", body: 1 },
-        { tool_use_id: "toolu_a", direction: "response", body: 3 },
-      ],
-      malformed: 2,
-    });
+    expect(bodyLogLinesFor(text, "toolu_a")).toEqual([
+      { tool_use_id: "toolu_a", direction: "request", body: 1 },
+      { tool_use_id: "toolu_a", direction: "response", body: 3 },
+    ]);
+    // A line that mentions the id only in its body belongs to another call.
+    expect(bodyLogLinesFor(line("toolu_b", "request", "toolu_a"), "toolu_a")).toEqual([]);
   });
 });

@@ -621,7 +621,8 @@ export const boundedRuntimeFileReader = ({
  * threads by default) is per process, and every async fs call and `dns.lookup` queues behind it, so this keeps
  * threads free when a turn's two concurrent evidence reads (transcript and hook evidence) are the last to stick.
  * A conversation start's two reads (agent prompt and architecture document) share the budget, because the pool is
- * shared: a stale mount under either path can cost later turns their evidence until those reads return.
+ * shared: a stale mount under either path can cost later turns their evidence until those reads return. So does a
+ * debug-mode read of a body log at a tool result.
  */
 const MAX_STUCK_READS = 2;
 
