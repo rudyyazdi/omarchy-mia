@@ -1,6 +1,5 @@
 import { match } from "ts-pattern";
 import { describe, expect, it } from "vitest";
-import type { RuntimeEvent } from "@mia/agent-adapter";
 import { canonicalDigest } from "@mia/protocol";
 import {
   callById,
@@ -22,6 +21,7 @@ import {
   type PermissionRequestEvent,
   type PromptAbandonedEvent,
   type RuntimeEventReceived,
+  type RuntimeReport,
 } from "./decide-conversation.ts";
 import type { EngineEffect } from "./engine-effects.ts";
 import type { EngineRecord } from "./engine-records.ts";
@@ -493,6 +493,9 @@ describe("permission requests", () => {
       "error",
       "update_tool_call",
     ]);
+    expect(unlisted.records[3]).toMatchObject({
+      input: { id: "evt_outcome", payload: { code: "configuration_error" } },
+    });
     expect(effectLabels(unlisted.effects)).toEqual([
       "deliver error",
       "notify call_new denied",
@@ -550,6 +553,11 @@ describe("permission requests", () => {
       const decided = decide(state, event);
       return decided.kind === "rejected" ? decided.rejection : decided;
     };
+    // An empty id binds to nothing either, as the bridge accepts one.
+    expect(refusal(running(), request({ runtimeCallId: "" }))).toMatchObject({
+      kind: "refused",
+      detail: "permission request for mcp__d1__change carried no runtime call id; rejected",
+    });
     expect(refusal(running(), request({ runtimeCallId: null }))).toEqual({
       kind: "refused",
       detail: "permission request for mcp__d1__change carried no runtime call id; rejected",
@@ -609,28 +617,35 @@ const RUNTIME_IDS = {
   unmatched: "evt_unmatched",
 };
 
-const NOTHING_READ = { output: null, bodies: null, policy: null };
-
-const reported = (
-  event: RuntimeEvent,
-  reads: Partial<RuntimeEventReceived["reads"]> = {},
-): RuntimeEventReceived => ({
+const reported = (report: RuntimeReport): RuntimeEventReceived => ({
   kind: "runtime_event",
   origin: ORIGIN,
   taskId: "task_1",
-  event,
-  reads: { ...NOTHING_READ, ...reads },
+  report,
   ids: RUNTIME_IDS,
 });
 
 const AT_RUNTIME = "2026-09-24T11:59:59.000Z";
+
+/** A complete proposal the stream reported for `mcp__d1__change`, which the profile asks for. */
+const streamed = (runtimeCallId: string, args: unknown): RuntimeReport => ({
+  event: {
+    type: "tool_proposed",
+    runtimeCallId,
+    toolIdentity: "mcp__d1__change",
+    arguments: args,
+    complete: true,
+    at: AT_RUNTIME,
+  },
+  policy: "ask",
+});
 
 describe("runtime events", () => {
   it("records an init's model and marks the session started", () => {
     const state = { ...running(), sessionStarted: false };
     const init = { model: "claude-x", evidence: { session: 1 } };
     const { next, records } = accepted(
-      decide(state, reported({ type: "runtime_init", init, at: AT_RUNTIME })),
+      decide(state, reported({ event: { type: "runtime_init", init, at: AT_RUNTIME } })),
     );
     expect(labels(records)).toEqual(["runtime_init", "update_execution"]);
     expect(records[1]).toMatchObject({ id: "exec_1", fields: { reportedModel: "claude-x" } });
@@ -640,31 +655,45 @@ describe("runtime events", () => {
   });
 
   it("proposes a revision for a complete proposal with the policy read for its tool, and attaches a repeat to it", () => {
-    const args = { delta: 1 };
-    const proposal: RuntimeEvent = {
-      type: "tool_proposed",
-      runtimeCallId: "toolu_9",
-      toolIdentity: "mcp__d1__change",
-      arguments: args,
-      complete: true,
-      at: AT_RUNTIME,
-    };
-    const proposed = accepted(decide(running(), reported(proposal, { policy: "ask" })));
+    const proposal = reported(streamed("toolu_9", { delta: 1 }));
+    const proposed = accepted(decide(running(), proposal));
     expect(labels(proposed.records)).toEqual(["tool_proposed", "create_tool_call"]);
     expect(proposed.records[1]).toMatchObject({
       input: { id: "call_new", policy: "ask", status: "proposed", proposalEventId: "evt_runtime" },
     });
     expect(effectLabels(proposed.effects)).toEqual(["notify call_new proposed"]);
-    const attached = accepted(decide(proposed.next, reported(proposal, { policy: "ask" })));
+    const attached = accepted(decide(proposed.next, proposal));
     expect(labels(attached.records)).toEqual(["tool_proposed", "update_tool_call"]);
     expect(attached.records[1]).toMatchObject({
       id: "call_new",
       fields: { proposalEventId: "evt_runtime" },
     });
     expect(attached.effects).toEqual([]);
-    expect(() => decide(running(), reported(proposal))).toThrow(
-      "no policy was read for mcp__d1__change",
+  });
+
+  it("supersedes a held binding the stream reports changed, denying its prompt, and proposes the next revision", () => {
+    const { next, records, effects } = accepted(
+      decide(awaiting([1]), reported(streamed("toolu_1", { path: "changed" }))),
     );
+    expect(labels(records)).toEqual([
+      "tool_proposed",
+      "update_approval",
+      "approval_resolved",
+      "update_tool_call",
+      "update_task",
+      "create_tool_call",
+    ]);
+    expect(records[1]).toMatchObject({ id: "appr_1", fields: { status: "invalidated" } });
+    expect(records[2]).toMatchObject({ input: { id: "evt_superseded" } });
+    expect(records[4]).toMatchObject({ fields: { status: "running" } });
+    expect(records[5]).toMatchObject({ input: { id: "call_new", bindingRevision: 2 } });
+    expect(effectLabels(effects)).toEqual([
+      "deliver approval_resolved",
+      "answer appr_1 deny",
+      "notify call_new proposed",
+    ]);
+    expect(next.task?.pendingApprovals.size).toBe(0);
+    expect(next.task && callById(next.task, "call_1")?.status).toBe("invalidated");
   });
 
   it("completes the call a result binds to, with its retained output and MCP bodies, and notes an unmatched one", () => {
@@ -692,8 +721,8 @@ describe("runtime events", () => {
       },
     ];
     const result = (runtimeCallId: string) =>
-      reported(
-        {
+      reported({
+        event: {
           type: "tool_result",
           runtimeCallId,
           isError: false,
@@ -701,8 +730,9 @@ describe("runtime events", () => {
           raw: {},
           at: AT_RUNTIME,
         },
-        { output, bodies },
-      );
+        output,
+        bodies,
+      });
     const { next, records, effects } = accepted(decide(running([dispatched]), result("toolu_1")));
     expect(labels(records)).toEqual([
       "tool_result",
@@ -734,7 +764,7 @@ describe("runtime events", () => {
       const decided = decide(state, event);
       return decided.kind === "rejected" ? decided.rejection : decided;
     };
-    const stderr = reported({ type: "runtime_stderr", text: "late", at: AT_RUNTIME });
+    const stderr = reported({ event: { type: "runtime_stderr", text: "late", at: AT_RUNTIME } });
     expect(refusal(running([], { runtimeEnded: true }), stderr)).toEqual({ kind: "runtime_ended" });
     expect(refusal(running(), { ...stderr, taskId: "task_old" })).toEqual({ kind: "no_task" });
   });

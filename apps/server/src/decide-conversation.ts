@@ -161,24 +161,28 @@ export interface CapturedOutput {
   retention: Retention;
 }
 
+type RuntimeEventOf<Type extends RuntimeEvent["type"]> = Extract<RuntimeEvent, { type: Type }>;
+
 /**
- * What the boundary read for a runtime event before it was decided. Only a tool result reads its declared output
- * and its MCP bodies, and only a tool proposal reads the policy the profile gives its tool; null where nothing was
- * read.
+ * A runtime event with what the boundary read for it before it was decided. A tool proposal carries the policy the
+ * profile gives its tool. A tool result carries its declared output, captured and stored, and its MCP bodies, each
+ * null when it read none. Every other event reads nothing.
  */
-export interface RuntimeEventReads {
-  output: CapturedOutput | null;
-  bodies: readonly McpBodyRecord[] | null;
-  policy: ToolCallPolicy | null;
-}
+export type RuntimeReport =
+  | { event: RuntimeEventOf<"tool_proposed">; policy: ToolCallPolicy }
+  | {
+      event: RuntimeEventOf<"tool_result">;
+      output: CapturedOutput | null;
+      bodies: readonly McpBodyRecord[] | null;
+    }
+  | { event: Exclude<RuntimeEvent, { type: "tool_proposed" | "tool_result" }> };
 
 /** One event the runtime running the task's turn reported. */
 export interface RuntimeEventReceived {
   kind: "runtime_event";
   origin: Origin;
   taskId: string;
-  event: RuntimeEvent;
-  reads: RuntimeEventReads;
+  report: RuntimeReport;
   ids: RuntimeEventIds;
 }
 
@@ -644,7 +648,8 @@ export const permissionRequestTransition: ConversationTransition<
   if (task?.id !== event.taskId) return rejected({ kind: "no_task" });
   const { request, policy, ids } = event;
   const { runtimeCallId, toolIdentity } = request;
-  if (runtimeCallId === null)
+  // An empty id binds to nothing either: the bridge accepts one.
+  if (!runtimeCallId)
     return rejected({
       kind: "refused",
       detail: `permission request for ${toolIdentity} carried no runtime call id; rejected`,
@@ -807,12 +812,6 @@ const registerToolOutput = (
   }
 };
 
-/** The policy the boundary read for a complete proposal's tool; one missing is a bug there, and fails the transition. */
-const readPolicy = (reads: RuntimeEventReads, toolIdentity: string): ToolCallPolicy => {
-  if (reads.policy === null) throw new Error(`no policy was read for ${toolIdentity}`);
-  return reads.policy;
-};
-
 /**
  * Record one event the runtime reported, against the task as it is now. Most are evidence only. An init names the
  * reported model and marks the session started; a complete proposal attaches to the revision it announces or
@@ -826,15 +825,15 @@ export const runtimeEventTransition: ConversationTransition<
   const { task } = state;
   if (task?.id !== received.taskId) return rejected({ kind: "no_task" });
   if (task.runtimeEnded) return rejected({ kind: "runtime_ended" });
-  const { ids, reads } = received;
+  const { ids } = received;
   const draft = new TransitionDraft({ state, now, origin: received.origin });
   const links = taskLinks(task);
   const opts = { ...links, id: ids.event };
-  match(received.event)
-    .with({ type: "runtime_started" }, (started) => {
+  match(received.report)
+    .with({ event: { type: "runtime_started" } }, ({ event: started }) => {
       draft.record("runtime_started", { pid: started.pid, launch: started.launch }, opts);
     })
-    .with({ type: "runtime_init" }, ({ init }) => {
+    .with({ event: { type: "runtime_init" } }, ({ event: { init } }) => {
       draft.record("runtime_init", init.evidence, opts);
       draft.write({
         kind: "update_execution",
@@ -844,7 +843,7 @@ export const runtimeEventTransition: ConversationTransition<
       draft.advance({ ...draft.draft, sessionStarted: true });
       draft.advanceTask(task.id, (next) => ({ ...next, reportedModel: init.model }));
     })
-    .with({ type: "text_delta" }, (delta) => {
+    .with({ event: { type: "text_delta" } }, ({ event: delta }) => {
       draft.emit(
         {
           type: "text_delta",
@@ -858,7 +857,7 @@ export const runtimeEventTransition: ConversationTransition<
         opts,
       );
     })
-    .with({ type: "tool_proposed" }, (proposed) => {
+    .with({ event: { type: "tool_proposed" } }, ({ event: proposed, policy }) => {
       if (!proposed.complete) {
         draft.record(
           "tool_proposal_started",
@@ -904,15 +903,15 @@ export const runtimeEventTransition: ConversationTransition<
         toolIdentity: proposed.toolIdentity,
         digest,
         args: proposed.arguments,
-        policy: readPolicy(reads, proposed.toolIdentity),
+        policy,
         proposalEventId: ids.event,
       });
       draft.notifyCall(task.id, call.id);
     })
-    .with({ type: "assistant_message" }, (message) => {
+    .with({ event: { type: "assistant_message" } }, ({ event: message }) => {
       draft.record("assistant_message", message.message, opts);
     })
-    .with({ type: "tool_result" }, (toolResult) => {
+    .with({ event: { type: "tool_result" } }, ({ event: toolResult, output, bodies }) => {
       draft.record(
         "tool_result",
         {
@@ -939,9 +938,9 @@ export const runtimeEventTransition: ConversationTransition<
         id: call.id,
         fields: { updatedAt: draft.at, status, resultEventId: ids.event },
       });
-      if (status === "completed" && reads.output)
-        registerToolOutput(draft, { output: reads.output, task, call, eventId: ids.event });
-      for (const body of reads.bodies ?? [])
+      if (status === "completed" && output)
+        registerToolOutput(draft, { output, task, call, eventId: ids.event });
+      for (const body of bodies ?? [])
         draft.record(
           MCP_BODY_EVENT[body.direction],
           mcpPayload({ toolCallId: call.id, runtimeCallId: call.runtimeCallId }, body),
@@ -950,7 +949,7 @@ export const runtimeEventTransition: ConversationTransition<
       draft.advanceTask(task.id, (next) => withCall(next, call.id, { status }));
       draft.notifyCall(task.id, call.id);
     })
-    .with({ type: "turn_result" }, ({ summary }) => {
+    .with({ event: { type: "turn_result" } }, ({ event: { summary } }) => {
       draft.record("runtime_result", summary.evidence, opts);
       draft.write({
         kind: "update_execution",
@@ -966,10 +965,10 @@ export const runtimeEventTransition: ConversationTransition<
         },
       });
     })
-    .with({ type: "runtime_stderr" }, (stderr) => {
+    .with({ event: { type: "runtime_stderr" } }, ({ event: stderr }) => {
       draft.record("runtime_stderr", { text: stderr.text }, opts);
     })
-    .with({ type: "malformed_event" }, (malformed) => {
+    .with({ event: { type: "malformed_event" } }, ({ event: malformed }) => {
       draft.emit(
         {
           type: "error",
@@ -983,7 +982,7 @@ export const runtimeEventTransition: ConversationTransition<
         opts,
       );
     })
-    .with({ type: "runtime_exit" }, (exit) => {
+    .with({ event: { type: "runtime_exit" } }, ({ event: exit }) => {
       draft.record("runtime_exit", { code: exit.code, signal: exit.signal }, opts);
     })
     .exhaustive();

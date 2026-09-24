@@ -75,7 +75,7 @@ import {
   type ConversationDecision,
   type ConversationTransition,
   type OutputIds,
-  type RuntimeEventReads,
+  type RuntimeReport,
 } from "./decide-conversation.ts";
 import type { EngineEffect, OutgoingEvent, PermissionAnswer } from "./engine-effects.ts";
 import { commitRecords, eventSequence, type CommittedChange } from "./engine-records.ts";
@@ -153,6 +153,15 @@ const NO_ACTIVE_TASK: PermissionDecision = {
 const NOT_RECORDED: PermissionDecision = {
   behavior: "deny",
   message: "Mia could not record this call; it was not released.",
+};
+
+/**
+ * The answer to a permission request that was recorded but never answered, which a committed request's transition
+ * rules out; nothing is held or released for it.
+ */
+const UNANSWERED: PermissionDecision = {
+  behavior: "deny",
+  message: "Mia could not answer this call; it was not released.",
 };
 
 /** The permission request being committed, and the answer its `answer_permission` effect gave, once performed. */
@@ -238,11 +247,6 @@ interface UnresultedBodies {
   call: CallState;
   bodies: McpBodyRecord[];
 }
-
-/** What a runtime event read before it is decided: only a tool result reads anything. */
-type ResultReads = Pick<RuntimeEventReads, "output" | "bodies">;
-
-const NOTHING_READ: ResultReads = { output: null, bodies: null };
 
 /** What a turn-end read gives to retain: the bytes read, or why they could not be. */
 const evidenceCapture = (content: Exclude<RuntimeFileRead, { status: "absent" }>): Capture =>
@@ -484,6 +488,7 @@ export class Engine {
       )
       .with({ kind: "answer_permission" }, ({ answer }) => {
         if (!this.asking) throw new Error("no permission request is being committed");
+        if (this.asking.answer) throw new Error("a permission request is answered once");
         this.asking.answer = answer;
       })
       .with({ kind: "interrupt_runtime" }, ({ taskId }) => {
@@ -1137,22 +1142,29 @@ export class Engine {
    * been recorded without it.
    */
   private async onRuntimeEvent(taskId: string, event: RuntimeEvent): Promise<void> {
+    if (event.type === "tool_proposed") {
+      this.recordRuntimeEvent(taskId, {
+        event,
+        policy: policyFor(this.deps.profile.runtime, event.toolIdentity),
+      });
+      return;
+    }
     if (event.type !== "tool_result") {
-      this.recordRuntimeEvent(taskId, event, NOTHING_READ);
+      this.recordRuntimeEvent(taskId, { event });
       return;
     }
     const declared = event.isError ? null : extractDeclaredArtifact(event.content);
     const task = this.taskOf(taskId);
     const bodyLog = task ? this.bodyLogOf(task, event.runtimeCallId) : null;
     if (!declared && bodyLog === null) {
-      this.recordRuntimeEvent(taskId, event, NOTHING_READ);
+      this.recordRuntimeEvent(taskId, { event, output: null, bodies: null });
       return;
     }
     const [output, bodies] = await Promise.all([
       declared ? this.captureOutput(declared) : null,
       bodyLog === null ? null : this.readMcpBodies(bodyLog, event.runtimeCallId),
     ]);
-    this.recordRuntimeEvent(taskId, event, { output, bodies });
+    this.recordRuntimeEvent(taskId, { event, output, bodies });
   }
 
   /** Captures and stores a tool output a result declared, with the ids of the rows that will record it. */
@@ -1263,38 +1275,33 @@ export class Engine {
   }
 
   /**
-   * Records one runtime event of task `taskId`, with the tool output its result declared already captured, against
-   * the task as it is now (see `runtimeEventTransition`). An event decided after the task's runtime ended is dropped
-   * with a log line: the turn was recorded without it.
+   * Records one runtime event of task `taskId`, with what the boundary read for it, against the task as it is now
+   * (see `runtimeEventTransition`). An event decided after the task's runtime ended is dropped with a log line: the
+   * turn was recorded without it. It never throws: an event that cannot be recorded is logged.
    */
-  private recordRuntimeEvent(taskId: string, event: RuntimeEvent, read: ResultReads): void {
-    const decision = this.decide(runtimeEventTransition, {
-      kind: "runtime_event",
-      origin: this.origin,
-      taskId,
-      event,
-      reads: {
-        ...read,
-        policy:
-          event.type === "tool_proposed"
-            ? policyFor(this.deps.profile.runtime, event.toolIdentity)
-            : null,
-      },
-      ids: {
-        event: this.newId("evt"),
-        resolved: this.newId("evt"),
-        call: this.newId("call"),
-        unmatched: this.newId("evt"),
-      },
-    });
-    if (decision.kind === "rejected") {
-      const captured = read.output ? ` (output ${read.output.declared.path} captured)` : "";
-      this.deps.log(
-        `${event.type}${captured} for task ${taskId} handled after its runtime ended; not recorded`,
-      );
-      return;
-    }
+  private recordRuntimeEvent(taskId: string, report: RuntimeReport): void {
+    const { event } = report;
     try {
+      const decision = this.decide(runtimeEventTransition, {
+        kind: "runtime_event",
+        origin: this.origin,
+        taskId,
+        report,
+        ids: {
+          event: this.newId("evt"),
+          resolved: this.newId("evt"),
+          call: this.newId("call"),
+          unmatched: this.newId("evt"),
+        },
+      });
+      if (decision.kind === "rejected") {
+        const output = "output" in report ? report.output : null;
+        const captured = output ? ` (output ${output.declared.path} captured)` : "";
+        this.deps.log(
+          `${event.type}${captured} for task ${taskId} handled after its runtime ended; not recorded`,
+        );
+        return;
+      }
       this.commit(decision);
     } catch (error) {
       this.deps.log(`failed to record ${event.type}: ${errorMessage(error)}`);
@@ -1312,6 +1319,28 @@ export class Engine {
     taskId: string,
     req: PermissionRequest,
   ): Promise<PermissionDecision> {
+    let answer: PermissionAnswer;
+    try {
+      answer = this.decidePermission(taskId, req);
+    } catch (error) {
+      // Nothing was requested, so nothing is held: the runtime is denied at once.
+      this.deps.log(`permission handling failed: ${errorMessage(error)}`);
+      return NOT_RECORDED;
+    }
+    return match(answer)
+      .with({ kind: "answer" }, ({ decision }) => decision)
+      .with({ kind: "hold" }, ({ approvalId, callId }) =>
+        this.holdPrompt({ taskId, callId, approvalId, abandoned: req.abandoned }),
+      )
+      .exhaustive();
+  }
+
+  /**
+   * Decide and commit one permission request, returning what answers the runtime: the answer its committed transition
+   * gave through `answer_permission` (taken through `asking`), or the one a rejection carries. It throws when the
+   * transition fails or its records do not commit.
+   */
+  private decidePermission(taskId: string, req: PermissionRequest): PermissionAnswer {
     const decision = this.decide(permissionRequestTransition, {
       kind: "permission_request",
       origin: this.origin,
@@ -1334,35 +1363,29 @@ export class Engine {
     });
     if (decision.kind === "rejected")
       return match(decision.rejection)
-        .with({ kind: "no_task" }, (): PermissionDecision => NO_ACTIVE_TASK)
-        .with({ kind: "refused" }, ({ detail, answer }) => {
+        .with({ kind: "no_task" }, (): PermissionAnswer => ({
+          kind: "answer",
+          decision: NO_ACTIVE_TASK,
+        }))
+        .with({ kind: "refused" }, ({ detail, answer }): PermissionAnswer => {
           this.recordRefusal(taskId, detail);
-          return answer;
+          return { kind: "answer", decision: answer };
         })
         .exhaustive();
+    // Restored, not cleared, so a commit nested inside this one's effects could not take the outer request's slot.
+    const previous = this.asking;
     const asking: Asking = { answer: null };
     this.asking = asking;
     try {
       this.commit(decision);
-    } catch (error) {
-      // Nothing was requested, so nothing is held: the runtime is denied at once.
-      this.deps.log(`permission handling failed: ${errorMessage(error)}`);
-      return NOT_RECORDED;
     } finally {
-      this.asking = null;
+      this.asking = previous;
     }
-    const { answer } = asking;
-    // Unreachable: a committed request's transition always queues its answer, and performing it cannot throw.
-    if (!answer) {
-      this.deps.log(`permission request for ${req.toolName} was recorded but not answered`);
-      return NOT_RECORDED;
-    }
-    return match(answer)
-      .with({ kind: "answer" }, ({ decision: answered }) => answered)
-      .with({ kind: "hold" }, ({ approvalId, callId }) =>
-        this.holdPrompt({ taskId, callId, approvalId, abandoned: req.abandoned }),
-      )
-      .exhaustive();
+    if (asking.answer) return asking.answer;
+    // Unreachable: a committed request's transition always queues its answer, and taking it cannot fail. The request
+    // was recorded, so this denial does not claim otherwise.
+    this.deps.log(`permission request for ${req.toolName} was recorded but not answered`);
+    return { kind: "answer", decision: UNANSWERED };
   }
 
   /**
@@ -1397,17 +1420,16 @@ export class Engine {
    * holds the runtime's answer, so a record that fails only logs.
    */
   private recordRefusal(taskId: string, detail: string): void {
-    const decision = this.decide(permissionRefusedTransition, {
-      kind: "permission_refused",
-      origin: this.origin,
-      taskId,
-      detail,
-      ids: { event: this.newId("evt") },
-    });
-    // Rejected, the task ended; unreachable, as the refusal was decided against it just before.
-    if (decision.kind === "rejected") return;
     try {
-      this.commit(decision);
+      const decision = this.decide(permissionRefusedTransition, {
+        kind: "permission_refused",
+        origin: this.origin,
+        taskId,
+        detail,
+        ids: { event: this.newId("evt") },
+      });
+      // Rejected, the task ended; unreachable, as the refusal was decided against it just before.
+      if (decision.kind === "accepted") this.commit(decision);
     } catch (error) {
       this.deps.log(`could not record a refused permission request: ${errorMessage(error)}`);
     }
