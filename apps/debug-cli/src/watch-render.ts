@@ -7,13 +7,16 @@ import {
   redactValue,
   type ToolCallStatus,
 } from "@mia/protocol";
+import { match } from "ts-pattern";
 import type {
   ApprovalRow,
   ConversationRow,
   EventRow,
   ExecutionRow,
+  McpEventType,
   TaskRow,
   ToolCallRow,
+  WatchMcpMessage,
 } from "@mia/records";
 
 /** What a page shows for one node: the line it shows collapsed, and what expanding it reveals. */
@@ -139,7 +142,34 @@ export const toolCallView = (
   };
 };
 
+const MCP_LABEL: Record<McpEventType, string> = {
+  mcp_request: "MCP request",
+  mcp_response: "MCP response",
+};
+
+/** Every field of an event row, its payload decoded. */
+const eventFieldsHtml = (event: EventRow): string =>
+  fieldsHtml({ ...event, payload: parseStored(event.payload) });
+
+/**
+ * One MCP message of a call: its body on the collapsed line, clipped, or why no body was recorded, and the whole
+ * event when expanded. The body was redacted when it was recorded, and is redacted again here like everything shown.
+ */
+export const mcpView = ({ type, event, content }: WatchMcpMessage): NodeView => ({
+  summary: `<b>${MCP_LABEL[type]}</b> ${match(content)
+    .with(
+      { status: "recorded" },
+      ({ body }) => `<code>${escapeHtml(clipped(JSON.stringify(redactValue(body)), 160))}</code>`,
+    )
+    .with(
+      { status: "unrecorded" },
+      ({ reason }) => `<span class="not-recorded">not recorded: ${shown(reason)}</span>`,
+    )
+    .exhaustive()} <time>${shown(event.received_at)}</time>`,
+  body: eventFieldsHtml(event),
+});
+
 export const eventView = (event: EventRow): NodeView => ({
   summary: `#${event.sequence} ${shown(event.type)} <time>${shown(event.received_at)}</time>`,
-  body: fieldsHtml({ ...event, payload: parseStored(event.payload) }),
+  body: eventFieldsHtml(event),
 });

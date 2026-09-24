@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,7 +40,7 @@ const WatchMessageSchema = z.discriminatedUnion("op", [
     op: z.literal("node"),
     id: z.string(),
     parent: z.string(),
-    kind: z.enum(["task", "tool_call"]),
+    kind: z.enum(["task", "tool_call", "mcp"]),
     view: ViewSchema,
   }),
   z.object({ op: z.literal("event"), parent: z.string(), view: ViewSchema }),
@@ -244,6 +244,46 @@ const get = (url: string, headers: Record<string, string>) => {
   return promise;
 };
 
+/**
+ * What a page is sent on connecting to a finished conversation of a server started in debug mode: one task whose
+ * allowed read call runs. With `bodyLog`, the d1 server names that log, and `beforeResult` writes it as the fixture
+ * would, before the call's result arrives.
+ */
+const watchedInDebugMode = async (
+  body: { bodyLog: string; beforeResult: () => void } | null = null,
+): Promise<WatchMessage[]> => {
+  const debugRuntime = new ScriptedRuntime();
+  const debugServer = await startTestServer(
+    debugRuntime,
+    body
+      ? {
+          mcpServers: {
+            d1: { type: "http", url: "http://127.0.0.1:1/mcp", bodyLog: body.bodyLog },
+          },
+        }
+      : {},
+    { debugMode: true },
+  );
+  // After every afterEach hook, so after the watch's teardown has closed its catalog.
+  onTestFinished(() => debugServer.close());
+  const debugClient = await debugServer.connect("client-A");
+  await debugClient.startConversation();
+  const next = debugRuntime.nextTurn();
+  await debugClient.submitText("read it");
+  const turn = await next;
+  turn.init();
+  expect((await turn.request("mcp__d1__read", {}, "toolu_read")).behavior).toBe("allow");
+  body?.beforeResult();
+  await turn.toolResult("toolu_read", JSON.stringify({ unread: 3 }));
+  turn.end();
+  await debugClient.waitFor("task_finished");
+
+  const debugId = must(debugClient.conversationId, "conversation id");
+  const { watch, catalog } = await watchConversation(debugId, debugServer.catalog());
+  const page = await openPage(watch.url);
+  return page.take(initialCount(catalog, debugId));
+};
+
 describe("mia debug watch", () => {
   // The token is also redacted before it is stored, so the view's own redaction is covered by watch-render.test.ts.
   it("shows a finished conversation's whole tree, each node under its parent, without the token", async () => {
@@ -291,25 +331,7 @@ describe("mia debug watch", () => {
   });
 
   it("shows a conversation captured in debug mode as such, with nothing marked not recorded", async () => {
-    const debugRuntime = new ScriptedRuntime();
-    const debugServer = await startTestServer(debugRuntime, {}, { debugMode: true });
-    // After every afterEach hook, so after the watch's teardown has closed its catalog.
-    onTestFinished(() => debugServer.close());
-    const debugClient = await debugServer.connect("client-A");
-    await debugClient.startConversation();
-    const next = debugRuntime.nextTurn();
-    await debugClient.submitText("read it");
-    const turn = await next;
-    turn.init();
-    expect((await turn.request("mcp__d1__read", {}, "toolu_read")).behavior).toBe("allow");
-    await turn.toolResult("toolu_read", JSON.stringify({ unread: 3 }));
-    turn.end();
-    await debugClient.waitFor("task_finished");
-
-    const debugId = must(debugClient.conversationId, "conversation id");
-    const { watch, catalog } = await watchConversation(debugId, debugServer.catalog());
-    const page = await openPage(watch.url);
-    const messages = await page.take(initialCount(catalog, debugId));
+    const messages = await watchedInDebugMode();
     expect(messages[0]).toMatchObject({
       op: "conversation",
       view: { summary: expect.stringContaining("debug mode on") },
@@ -319,6 +341,46 @@ describe("mia debug watch", () => {
       "tool_call",
     ]);
     expect(JSON.stringify(messages)).not.toContain("not recorded");
+  });
+
+  it("shows the MCP request and response debug mode recorded for a call as nodes under it, redacted", async () => {
+    const logDirectory = mkdtempSync(join(tmpdir(), "mia-watch-body-log-"));
+    onTestFinished(() => rmSync(logDirectory, { recursive: true, force: true }));
+    const bodyLog = join(logDirectory, "mcp-bodies.jsonl");
+    // As the fixture writes it: the request only, so the response is recorded as missing, with why.
+    const request = {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "read", arguments: { token: "super-secret-value-123456" } },
+    };
+    const messages = await watchedInDebugMode({
+      bodyLog,
+      beforeResult: () =>
+        writeFileSync(
+          bodyLog,
+          `${JSON.stringify({ tool_use_id: "toolu_read", direction: "request", body: request })}\n`,
+        ),
+    });
+    const nodes = messages.filter((message): message is NodeMessage => message.op === "node");
+    expect(nodes.map((node) => node.kind)).toEqual(["task", "tool_call", "mcp", "mcp"]);
+    const [, call, sentRequest, response] = nodes;
+    expect([sentRequest?.parent, response?.parent]).toEqual([call?.id, call?.id]);
+    expect(sentRequest?.view.summary).toContain("MCP request");
+    expect(sentRequest?.view.summary).toContain("tools/call");
+    expect(response?.view.summary).toContain(
+      'MCP response</b> <span class="not-recorded">not recorded: the body log has no response for this call',
+    );
+    // Nodes, not raw events: the call's raw events hold none of them.
+    expect(
+      messages.filter(
+        (message) =>
+          message.op === "event" &&
+          message.parent === call?.id &&
+          /mcp_(request|response)/.test(message.view.summary),
+      ),
+    ).toEqual([]);
+    expect(JSON.stringify(messages)).not.toContain("super-secret-value");
   });
 
   it("appends a new command, a tool call, its result and an auto-rejection without a reload, and re-sends a status that changed", async () => {

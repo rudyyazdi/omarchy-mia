@@ -209,6 +209,7 @@ const shown = (entry: WatchEntry) => ({
   id: match(entry)
     .with({ kind: "task" }, ({ task }) => task.id)
     .with({ kind: "tool_call" }, ({ tool_call }) => tool_call.id)
+    .with({ kind: "mcp" }, ({ mcp }) => mcp.event.id)
     .with({ kind: "event" }, ({ event: row }) => row.id)
     .exhaustive(),
   sequence: entry.sequence,
@@ -226,6 +227,7 @@ const treeShape = (rows: WatchRows) => {
       calls: task.tool_calls.map((call) => ({
         id: call.tool_call.id,
         approvals: call.approvals.map((approval) => approval.id),
+        mcp: call.mcp.map((message) => [message.type, message.event.sequence, message.content]),
         events: sequences(call.events),
       })),
     })),
@@ -242,14 +244,16 @@ describe("watchTree", () => {
           id: "first",
           executions: ["x1"],
           events: [2, 3, 11],
-          calls: [{ id: "call-1", approvals: ["approval-1"], events: [4, 5, 6, 7, 8, 9, 10] }],
+          calls: [
+            { id: "call-1", approvals: ["approval-1"], mcp: [], events: [4, 5, 6, 7, 8, 9, 10] },
+          ],
         },
         {
           id: "second",
           executions: ["x2"],
           // The partial proposal comes before the call exists; the policy error names no call.
           events: [12, 13, 14, 18, 20],
-          calls: [{ id: "call-2", approvals: [], events: [15, 16, 17] }],
+          calls: [{ id: "call-2", approvals: [], mcp: [], events: [15, 16, 17] }],
         },
       ],
     });
@@ -285,7 +289,7 @@ describe("watchTree", () => {
       id: "second",
       executions: ["x2"],
       events: [],
-      calls: [{ id: "call-2", approvals: [], events: [] }],
+      calls: [{ id: "call-2", approvals: [], mcp: [], events: [] }],
     });
     expect(watchEntriesAfter(rows, -1).map(shown).slice(0, 3)).toEqual([
       { kind: "task", id: "second", sequence: 0, parent: { level: "conversation" } },
@@ -311,6 +315,52 @@ describe("watchTree", () => {
     expect(() => watchTree({ ...finalRows(), conversations: [] })).toThrow(
       "the rows hold no conversation",
     );
+  });
+});
+
+describe("MCP messages", () => {
+  const REQUEST = { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "read" } };
+  /** The final rows, then the MCP events debug mode records after the first call's result, and two it cannot place. */
+  const withMcp = (): WatchRows => {
+    const rows = finalRows();
+    rows.events.push(
+      first(21, "mcp_request", { tool_call_id: "call-1", runtime_call_id: "r1", body: REQUEST }),
+      first(22, "mcp_response", {
+        tool_call_id: "call-1",
+        runtime_call_id: "r1",
+        unrecorded: "the body log has no response for this call",
+      }),
+      // Neither a body nor a reason: kept as a raw event, so nothing recorded is hidden.
+      first(23, "mcp_request", { tool_call_id: "call-1" }),
+      // Of no known call: kept with its task.
+      second(24, "mcp_request", { tool_call_id: "no-such-call", body: {} }),
+    );
+    return rows;
+  };
+
+  it("nests each MCP request and response under its call, apart from the call's raw events", () => {
+    const [firstTask, secondTask] = treeShape(withMcp()).tasks;
+    expect(firstTask?.calls[0]).toMatchObject({
+      mcp: [
+        ["mcp_request", 21, { status: "recorded", body: REQUEST }],
+        [
+          "mcp_response",
+          22,
+          { status: "unrecorded", reason: "the body log has no response for this call" },
+        ],
+      ],
+      events: [4, 5, 6, 7, 8, 9, 10, 23],
+    });
+    expect(secondTask?.events).toEqual([12, 13, 14, 18, 20, 24]);
+  });
+
+  it("adds an MCP message once, as an entry under its call, after the sequence a view has shown", () => {
+    const call = { level: "tool_call", task_id: "first", tool_call_id: "call-1" };
+    expect(watchEntriesAfter(withMcp(), 21).map(shown)).toEqual([
+      { kind: "mcp", id: "e22", sequence: 22, parent: call },
+      { kind: "event", id: "e23", sequence: 23, parent: call },
+      { kind: "event", id: "e24", sequence: 24, parent: { level: "task", task_id: "second" } },
+    ]);
   });
 });
 

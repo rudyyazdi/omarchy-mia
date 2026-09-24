@@ -35,7 +35,10 @@ export type {
 } from "./queries.ts";
 export { capturedInDebugMode, watchEntriesAfter, watchTree } from "./watch.ts";
 export type {
+  McpEventType,
   WatchEntry,
+  WatchMcpContent,
+  WatchMcpMessage,
   WatchParent,
   WatchRows,
   WatchTask,

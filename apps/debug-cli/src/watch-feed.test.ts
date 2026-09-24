@@ -150,6 +150,46 @@ describe("messagesAfter", () => {
   });
 });
 
+describe("messagesAfter: MCP messages", () => {
+  /** The conversation with its call dispatched in debug mode, and the call's MCP request recorded. */
+  const withRequest = (): WatchRows => {
+    const rows = conversation();
+    rows.tool_calls = [toolCallRow({ proposal_event_id: "e3", dispatch_event_id: "e3" })];
+    rows.events.push(
+      eventRow({ sequence: 4, type: "captured_in_debug_mode" }),
+      eventRow({
+        sequence: 5,
+        type: "mcp_request",
+        task_id: "t1",
+        payload: JSON.stringify({ tool_call_id: "c1", body: { method: "tools/call" } }),
+      }),
+    );
+    return rows;
+  };
+
+  it("sends each MCP message once, as a node under its call", () => {
+    const rows = withRequest();
+    const { messages, sent } = poll(rows, NOTHING_SENT);
+    expect(messages.map(placement).slice(-2)).toEqual([
+      "event under conversation",
+      "node mcp:e5 under tool_call:c1",
+    ]);
+    expect(messages.at(-1)).toMatchObject({
+      kind: "mcp",
+      view: { summary: expect.stringContaining("MCP request") },
+    });
+    rows.events.push(
+      eventRow({
+        sequence: 6,
+        type: "mcp_response",
+        task_id: "t1",
+        payload: JSON.stringify({ tool_call_id: "c1", unrecorded: "no response" }),
+      }),
+    );
+    expect(poll(rows, sent).messages.map(placement)).toEqual(["node mcp:e6 under tool_call:c1"]);
+  });
+});
+
 describe("sseRecord", () => {
   it("encodes a message as one data line, whatever line breaks its text holds", () => {
     const message: WatchMessage = {
