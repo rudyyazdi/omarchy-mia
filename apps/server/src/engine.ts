@@ -576,11 +576,11 @@ export class Engine {
   }
 
   /**
-   * Queue effects (see `EngineEffect`) for after the commit and its state changes (inside tx); `perform` hands each
+   * Queue an effect (see `EngineEffect`) for after the commit and its state changes (inside tx); `perform` hands it
    * what the commit changed.
    */
-  private afterCommit(...effects: EngineEffect[]): void {
-    this.queued.effects.push(...effects);
+  private afterCommit(effect: EngineEffect): void {
+    this.queued.effects.push(effect);
   }
 
   /**
@@ -653,7 +653,7 @@ export class Engine {
   private toolCallNotice(
     task: TaskState,
     call: ToolCallState,
-    change: { status: ToolCallStatus; notice?: string | undefined },
+    change: Pick<CallChange, "status" | "notice">,
   ): EngineEffect {
     return {
       kind: "notify_tool_call",

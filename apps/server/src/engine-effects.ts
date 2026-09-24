@@ -8,9 +8,8 @@ export type OutgoingEvent = {
 
 /**
  * One thing the engine does once a transition's records have committed and its state has moved on, as data: what a
- * transition decides can then be returned by a pure `decide` and performed by the kernel. Effects keep the order they
- * were queued in, and each is performed on its own, so one that throws leaves the records, the state and the rest
- * standing.
+ * transition decides can then be returned by a pure `decide` and performed by the kernel. When and in what order
+ * they are performed, and what a throwing one leaves standing, is `Engine.tx`'s to say.
  *
  * - `deliver_event`: send a recorded event to the active connection. It carries the id the event was recorded
  *   under, and finds the sequence the catalog gave it among the commit's changes by that id.

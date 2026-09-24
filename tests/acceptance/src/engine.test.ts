@@ -697,11 +697,13 @@ describe("approval path", () => {
       detail?: string;
       committed: unknown;
     }[] = [];
+    let lastPayload: unknown = null;
     engine.attachDelivery((connectionId, event) => {
       if (event.type === "tool_call") {
         const { runtime_call_id: call, status, detail, tool_call_id: id } = event.payload;
         const committed = rows("SELECT status FROM tool_calls WHERE id = ?", id)[0]?.status;
         notified.push({ call, status, ...(detail ? { detail } : {}), committed });
+        lastPayload = event.payload;
       }
       gateway.send(connectionId, event);
     });
@@ -723,7 +725,7 @@ describe("approval path", () => {
     await decide(taskId, rejection.payload.approval_id, "reject");
     expect((await rejected).behavior).toBe("deny");
     const interrupted = turn.request("mcp__d1__change", { delta: 2 }, "toolu_interrupted");
-    await client.waitFor(
+    const asked = await client.waitFor(
       "approval_requested",
       (event) => event.payload.runtime_call_id === "toolu_interrupted",
     );
@@ -748,6 +750,17 @@ describe("approval path", () => {
       progress("toolu_interrupted", "awaiting_approval"),
       progress("toolu_interrupted", "invalidated", "interrupted"),
     ]);
+    // The whole payload, built with the transition, names the call and its task as the approval request did.
+    expect(lastPayload).toEqual({
+      conversation_id: asked.payload.conversation_id,
+      task_id: taskId,
+      tool_call_id: asked.payload.tool_call_id,
+      runtime_call_id: "toolu_interrupted",
+      tool_identity: "mcp__d1__change",
+      status: "invalidated",
+      detail: "interrupted",
+      redacted_arguments: { delta: 2 },
+    });
   });
 
   it("invalidates an approval when arguments change under the same runtime call id", async () => {
