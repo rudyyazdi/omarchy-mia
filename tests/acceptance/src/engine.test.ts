@@ -629,6 +629,23 @@ describe("streaming and commands", () => {
     expect(taskStatus(taskId)).toBe(statusBefore);
     expect(rows("SELECT 1 FROM events WHERE type = 'task_finished'")).toHaveLength(0);
   });
+
+  it("still carries an interrupted turn's note into the next turn when the turn's end cannot be recorded", async () => {
+    const { taskId } = await submitHeldCall("change");
+    ts.server.catalog.db.exec(`CREATE TRIGGER fail_task_finish BEFORE UPDATE ON tasks
+      WHEN NEW.finished_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'simulated finish failure'); END`);
+    const failed = ts.waitForLog((line) => line.includes("finishTurn record failure"));
+    expect((await client.interrupt(taskId)).disposition).toBe("accepted");
+    await failed;
+    ts.server.catalog.db.exec("DROP TRIGGER fail_task_finish");
+    expect(taskStatus(taskId)).toBe("interrupting");
+    // The task left memory all the same, so the next one starts, told what may have happened in this one.
+    const { turn: next, taskId: nextId } = await submit("and now?");
+    expect(next.options.text).toContain("[Mia note, not from the user]");
+    expect(next.options.text).toContain("mcp__d1__change: invalidated");
+    next.end();
+    await client.waitFor("task_finished", (event) => event.payload.task_id === nextId);
+  });
 });
 
 describe("diagnostics", () => {

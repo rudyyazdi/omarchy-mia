@@ -37,7 +37,6 @@ import type { ArtifactCollector } from "./artifact-collector.ts";
 import {
   callById,
   callsOf,
-  withTask,
   type CallState,
   type ConversationState,
   type TaskState,
@@ -52,6 +51,7 @@ import {
 } from "./mcp-bodies.ts";
 import {
   abandonmentTransition,
+  abandonmentUnrecordedTransition,
   approvalDecisionTransition,
   conversationStart,
   diagnosticsTransition,
@@ -61,14 +61,17 @@ import {
   permissionRequestTransition,
   releasedBy,
   runtimeEventTransition,
+  runtimeExitTransition,
+  taskClearedTransition,
   taskSubmissionTransition,
   turnEndTransition,
-  turnNote,
+  turnUnrecordedTransition,
   type CapturedOutput,
   type ConversationDecision,
   type ConversationStartEvent,
   type ConversationTransition,
   type OutputIds,
+  type PromptAbandonedEvent,
   type RuntimeReport,
   type UnresultedBodies,
 } from "./decide-conversation.ts";
@@ -258,16 +261,16 @@ interface ActiveTurn {
 /**
  * Conversation/task coordinator plus approval and interruption controller. One conversation, one task,
  * one active client. The rules live in ./transitions.ts, and ./decide-conversation.ts composes them into pure
- * transitions for every recorded change to a conversation, its start included; the engine commits what they decide,
- * replaces its state with the next one only after the commit, then performs the effects (see `commit`). A few
- * memory-only changes, which record nothing, replace the state directly (see `current`).
+ * transitions for every change to a conversation, its start and the few memory-only changes included; the engine
+ * commits what they decide, replaces its state with the next one only after the commit, then performs the effects
+ * (see `commit`).
  */
 export class Engine {
   activeConnectionId: string | null = null;
   activeClientId: string | null = null;
   /**
-   * The active conversation's state, replaced whole by the next state a transaction built once its records commit
-   * (see ConversationState), and never mutated. The few memory-only changes, which record nothing, replace it too.
+   * The active conversation's state, replaced whole by the next state a transition decided once its records commit
+   * (see ConversationState), and never mutated; only `commit` replaces it. A memory-only transition commits no records.
    */
   private current: ConversationState | null = null;
   /** The runtime running the active task's turn, if one has started (see ActiveTurn). */
@@ -367,6 +370,19 @@ export class Engine {
         this.deps.log(`delivery failed after commit; records stand: ${errorMessage(error)}`);
       }
     }
+  }
+
+  /**
+   * Decide and commit a memory-only transition (see `memoryOnly` in ./decide-conversation.ts): it records nothing, so a
+   * catalog that cannot commit does not refuse it. A rejection (the task or call it names is gone, or nothing is
+   * pending) changes nothing. It reads the clock once, as every decision does, though no memory-only transition uses it.
+   */
+  private commitMemoryOnly<Event, Rejection>(
+    transition: ConversationTransition<Event, Rejection>,
+    event: Event,
+  ): void {
+    const decision = this.decide(transition, event);
+    if (decision.kind === "accepted") this.commit(decision);
   }
 
   /**
@@ -662,10 +678,16 @@ export class Engine {
         // However finishTurn ended, even by throwing: the runtime has ended, so a prompt it never abandoned is
         // answered with a denial rather than left holding a place under MAX_HELD_PROMPTS. One already answered is
         // skipped.
-        const ended = this.taskOf(taskId);
-        for (const call of ended ? callsOf(ended) : []) this.answerPrompt(call, TURN_ENDED);
-        // Memory only, like the turn's end it follows: the task's end was recorded (or failed to be) by finishTurn.
-        if (ended && this.current) this.current = { ...this.current, task: null };
+        try {
+          const ended = this.taskOf(taskId);
+          for (const call of ended ? callsOf(ended) : []) this.answerPrompt(call, TURN_ENDED);
+          // The task's end was recorded (or failed to be) by finishTurn.
+          if (ended) this.commitMemoryOnly(taskClearedTransition, { kind: "task_cleared", taskId });
+        } catch (error) {
+          // Not expected, as nothing here touches the catalog; caught so the turn still settles below, and so this
+          // chain, which nothing awaits, cannot reject.
+          this.deps.log(`could not clear task ${taskId}: ${errorMessage(error)}`);
+        }
         if (this.running?.taskId === taskId) this.running = null;
         finished.resolve();
       });
@@ -1258,25 +1280,26 @@ export class Engine {
     const call = task ? callById(task, callId) : undefined;
     // Unreachable while the turn's end answers every prompt still held before its task is cleared (startTurn).
     if (!task || !call) return TURN_ENDED;
-    const decision = this.decide(abandonmentTransition, {
+    const abandoned: PromptAbandonedEvent = {
       kind: "prompt_abandoned",
       origin: this.origin,
       taskId,
       callId,
       ids: { resolved: this.deps.newId("evt") },
-    });
+    };
+    const decision = this.decide(abandonmentTransition, abandoned);
     // Rejected, the approval was no longer pending (or the call is gone), so there is nothing to expire.
     if (decision.kind === "accepted") {
       try {
         this.commit(decision);
       } catch (error) {
         this.deps.log(`could not record abandoned approval: ${String(error)}`);
-        // The runtime is denied below whatever the records say, so memory takes the expiry anyway: a later
-        // decision finds nothing pending and cannot release the call. The catalog keeps the approval pending
-        // until finishTurn records the call's final status and expires every approval still pending. Unlike the
-        // other memory-only changes, this one departs from what the records say (#165). The failed commit ran
-        // synchronously after the decision, so its next state is still the current one with the expiry applied.
-        this.current = decision.next;
+        // The runtime is denied below whatever the records say, so memory takes the expiry anyway (#165). Nothing
+        // has run since the failed commit, so it is decided from the state the expiry was decided from.
+        this.commitMemoryOnly(abandonmentUnrecordedTransition, {
+          ...abandoned,
+          kind: "abandonment_unrecorded",
+        });
       }
     }
     return abandonedPromptDenial(call.toolIdentity);
@@ -1286,20 +1309,13 @@ export class Engine {
 
   private async finishTurn(taskId: string, result: TurnResult): Promise<void> {
     const ended = this.taskOf(taskId);
-    const current = this.current;
     // Unreachable: only the turn's end clears its task, once this has returned (startTurn).
-    if (!ended || !current) {
+    if (!ended) {
       this.deps.log(`turn of task ${taskId} ended after its task was cleared; not recorded`);
       return;
     }
-    // Before the reads below yield: a decision or interruption handled while they are awaited must not release
-    // a call to, or record an interruption of, a runtime that already exited. An approval then ends blocked.
-    // Memory only: nothing records the runtime's end until the transaction below.
-    this.current = withTask(current, taskId, (task) => ({
-      ...task,
-      runtimeEnded: true,
-      gateOpen: false,
-    }));
+    // Before the reads below yield (see `runtimeExitTransition`).
+    this.commitMemoryOnly(runtimeExitTransition, { kind: "runtime_exited", taskId });
     // Read and store before the transaction: retaining evidence is best-effort, so a read or store that fails
     // becomes a failed capture that says why, and the transaction only records that outcome. Its rows then commit
     // or fail with the turn's end, like every other record of it. Read and store before anything else is
@@ -1340,6 +1356,7 @@ export class Engine {
       finished: this.deps.newId("evt"),
       error: this.deps.newId("evt"),
     };
+    let recorded = false;
     try {
       // Every approval the records still hold pending (see `TurnEndedEvent.stillPending`). Read just before the
       // decision, with nothing awaited in between, so no approval can be requested or resolved after the read and
@@ -1360,14 +1377,16 @@ export class Engine {
         ids,
       });
       // Rejected, the task was cleared; unreachable, as it was read just above with nothing awaited since.
-      if (decision.kind === "accepted") this.commit(decision);
+      if (decision.kind === "accepted") {
+        this.commit(decision);
+        recorded = true;
+      }
     } catch (recordError) {
       this.deps.log(`finishTurn record failure: ${String(recordError)}`);
     }
-    // Set even when the records failed: the note is how the next turn learns what may have happened.
-    const note = turnNote(task);
-    // Memory only: the next turn records the note it carries, with its task_submitted.
-    if (note && this.current) this.current = { ...this.current, pendingNote: note };
+    // A committed end left the note; one that was not still leaves it, as the next turn's only account of this one.
+    if (!recorded)
+      this.commitMemoryOnly(turnUnrecordedTransition, { kind: "turn_unrecorded", taskId });
   }
 
   /**

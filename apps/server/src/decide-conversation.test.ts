@@ -380,6 +380,34 @@ describe("prompt abandonment", () => {
       kind: "no_task",
     });
   });
+
+  it("takes the expiry into memory alone when it could not be recorded (#165), and refuses what the expiry would", () => {
+    const state = awaiting([1]);
+    const unrecorded = (event: PromptAbandonedEvent): ConversationEvent => ({
+      ...event,
+      kind: "abandonment_unrecorded",
+    });
+    const expired = accepted(decide(state, abandonment("call_1")));
+    expect(accepted(decide(state, unrecorded(abandonment("call_1"))))).toEqual({
+      kind: "accepted",
+      next: expired.next,
+      records: [],
+      effects: [],
+    });
+    expectStillAwaiting(state);
+    expect(decide(state, unrecorded(abandonment("call_missing")))).toEqual({
+      kind: "rejected",
+      rejection: { kind: "no_call" },
+    });
+    expect(decide(expired.next, unrecorded(abandonment("call_1")))).toEqual({
+      kind: "rejected",
+      rejection: { kind: "not_pending" },
+    });
+    expect(decide(state, unrecorded({ ...abandonment("call_1"), taskId: "task_old" }))).toEqual({
+      kind: "rejected",
+      rejection: { kind: "no_task" },
+    });
+  });
 });
 
 /** The conversation with its task running, holding `calls` as their runtime call ids' revisions. */
@@ -1009,6 +1037,9 @@ describe("turn end", () => {
     expect(next.task && callById(next.task, "call_2")?.status).toBe("unknown");
     // The boundary clears the task once it has answered its held prompts.
     expect(next.task?.id).toBe("task_1");
+    // The next turn is told the released call's outcome is unknown.
+    expect(next.pendingNote).toContain("mcp__d1__change: unknown");
+    expect(state.pendingNote).toBeNull();
   });
 
   it("tells the client an interrupted turn's outcome before the task finishes, and blocks a call still held", () => {
@@ -1042,10 +1073,11 @@ describe("turn end", () => {
       "deliver task_finished",
     ]);
     expect(next.task).toMatchObject({ status: "interrupted", pendingApprovals: new Map() });
+    expect(next.pendingNote).toContain("mcp__d1__change: blocked_gate");
   });
 
   it("reports a failed turn's error, and the one effort level its hook evidence reported", () => {
-    const { records, effects } = accepted(
+    const { next, records, effects } = accepted(
       decide(
         running(),
         turnEnded({
@@ -1087,6 +1119,8 @@ describe("turn end", () => {
       input: { id: "evt_error", payload: { code: "runtime_failure", message: "runtime crashed" } },
     });
     expect(effectLabels(effects)).toEqual(["deliver task_finished", "deliver error"]);
+    // A failure with no call left unknown leaves the next turn no note.
+    expect(next.pendingNote).toBeNull();
   });
 
   it("refuses the end of a task that is not the conversation's", () => {
@@ -1112,6 +1146,59 @@ describe("the next turn's note", () => {
     expect(turnNote(interrupted)).toContain("mcp__d1__change: blocked_gate");
     expect(turnNote(abandoned)).toContain('mcp__d1__change {"path":"file_2"}');
     expect(turnNote(clean)).toBeNull();
+  });
+});
+
+describe("memory-only transitions", () => {
+  /** What an accepted memory-only transition moved to; it records and performs nothing. */
+  const memoryOnly = (decided: Decided): ConversationState => {
+    const { next, records, effects } = accepted(decided);
+    expect([records, effects]).toEqual([[], []]);
+    return next;
+  };
+  const otherTask = { kind: "rejected", rejection: { kind: "no_task" } };
+
+  it("closes the gate of a task whose runtime exited, and remembers it ended, changing nothing else", () => {
+    const state = awaiting([1]);
+    const next = memoryOnly(decide(state, { kind: "runtime_exited", taskId: "task_1" }));
+    expect(next).toEqual({
+      ...state,
+      task: state.task && { ...state.task, runtimeEnded: true, gateOpen: false },
+    });
+    expect(state.task).toMatchObject({ runtimeEnded: false, gateOpen: true });
+    expect(decide(state, { kind: "runtime_exited", taskId: "task_old" })).toEqual(otherTask);
+  });
+
+  it("leaves the note of a turn whose end was not recorded, from the task as it stands, and nothing else", () => {
+    const state = awaiting([1], { interrupted: true });
+    const next = memoryOnly(decide(state, { kind: "turn_unrecorded", taskId: "task_1" }));
+    expect(next).toEqual({ ...state, pendingNote: state.task && turnNote(state.task) });
+    expect(next.pendingNote).toContain("mcp__d1__change: blocked_gate");
+    const clean = running([{ ...held(3), status: "completed" }]);
+    expect(memoryOnly(decide(clean, { kind: "turn_unrecorded", taskId: "task_1" }))).toEqual(clean);
+    expect(decide(state, { kind: "turn_unrecorded", taskId: "task_old" })).toEqual(otherTask);
+  });
+
+  it("clears the task of a turn that ended, keeping the rest of the conversation", () => {
+    const state = { ...awaiting([1]), pendingNote: "[Mia note] kept" };
+    const next = memoryOnly(decide(state, { kind: "task_cleared", taskId: "task_1" }));
+    expect(next).toEqual({ ...state, task: null });
+    expect(decide(state, { kind: "task_cleared", taskId: "task_old" })).toEqual(otherTask);
+    expect(decide(next, { kind: "task_cleared", taskId: "task_1" })).toEqual(otherTask);
+  });
+
+  it("decides none of them before the conversation has started", () => {
+    const events: ConversationEvent[] = [
+      { kind: "runtime_exited", taskId: "task_1" },
+      { kind: "turn_unrecorded", taskId: "task_1" },
+      { kind: "task_cleared", taskId: "task_1" },
+      { ...abandonment("call_1"), kind: "abandonment_unrecorded" },
+    ];
+    for (const event of events)
+      expect(decide(null, event)).toEqual({
+        kind: "rejected",
+        rejection: { kind: "not_started" },
+      });
   });
 });
 
