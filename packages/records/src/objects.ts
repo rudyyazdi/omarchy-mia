@@ -8,6 +8,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeSync,
 } from "node:fs";
 import { access, chmod, mkdir, open, rename, rm } from "node:fs/promises";
@@ -48,7 +49,9 @@ const fsyncDirectory = async (directory: string): Promise<void> => {
   try {
     await handle.sync();
   } finally {
-    await handle.close();
+    await handle.close().catch(() => {
+      // Closing a directory handle loses nothing, and it must not hide the error of a failed fsync.
+    });
   }
 };
 
@@ -89,7 +92,8 @@ export interface StoredObject {
  * Content-addressed immutable object store. Bytes are staged, hashed, fsynced and renamed into
  * place, and the directories the rename and mkdir changed are fsynced, before any catalog row references
  * them. A crash may leave an orphan in staging or an unreferenced object; it can never produce a catalog row
- * that points at unwritten bytes.
+ * that points at unwritten bytes. An object already in place counts as stored: a put that finds it does not
+ * fsync again, so it relies on the put that renamed it having synced it.
  */
 export class ObjectStore {
   constructor(
@@ -118,8 +122,9 @@ export class ObjectStore {
   /**
    * Store `bytes` before the transaction that references them opens, so the write, fsync and rename stall only
    * the commit that needs the object, never the other connections. Idempotent: bytes already stored are left as
-   * they are. An abort or a failure before the rename removes the staged file and leaves no object. A failed
-   * directory fsync after it rejects too, so no row references the object, which stays in place unreferenced.
+   * they are, without another fsync. An abort or a failure before the rename removes the staged file and leaves
+   * no object. A failed directory fsync after the rename rejects, so this caller records no reference; the object
+   * stays in place, and a later put of the same bytes finds it and trusts it like any stored object.
    */
   async put(bytes: Uint8Array, options: { signal: AbortSignal }): Promise<StoredObject> {
     const { signal } = options;
@@ -169,10 +174,15 @@ export class ObjectStore {
       closeSync(fd);
     }
     const directory = dirname(target);
-    const firstCreated = mkdirSync(directory, { recursive: true, mode: 0o700 });
-    for (const parent of parentsOfCreated(firstCreated, directory))
-      this.directories.flushSync(parent);
-    renameSync(staged, target);
+    try {
+      const firstCreated = mkdirSync(directory, { recursive: true, mode: 0o700 });
+      for (const parent of parentsOfCreated(firstCreated, directory))
+        this.directories.flushSync(parent);
+      renameSync(staged, target);
+    } catch (error) {
+      rmSync(staged, { force: true });
+      throw error;
+    }
     try {
       chmodSync(target, 0o400);
     } catch {

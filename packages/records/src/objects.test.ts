@@ -57,6 +57,17 @@ describe("ObjectStore durability", () => {
     expect(flushed).toEqual(firstStoreFsyncs(directory.path));
   });
 
+  it("fsyncs the objects directory, then the object's, when only the object's directory is new", async () => {
+    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-objects-"));
+    const { store, flushed } = recordingStore(directory.path);
+    mkdirSync(store.paths.objects, { recursive: true }); // as Catalog.openSync leaves it
+    await store.put(bytes, live());
+    expect(flushed).toEqual([
+      { directory: store.paths.objects, objectInPlace: false },
+      { directory: dirname(objectPathUnder(directory.path)), objectInPlace: true },
+    ]);
+  });
+
   it("fsyncs only the object's directory when its parents exist, and nothing for stored bytes", async () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-objects-"));
     const { store, flushed } = recordingStore(directory.path);
@@ -92,15 +103,42 @@ describe("ObjectStore durability", () => {
     expect(settled).toBe(true);
   });
 
-  it("rejects put when the object's directory cannot be fsynced", async () => {
+  it("rejects put, leaving the object in place, when the object's directory cannot be fsynced", async () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-objects-"));
+    const objectDirectory = dirname(objectPathUnder(directory.path));
     const store = new ObjectStore(catalogPaths(directory.path), {
-      flush: async () => {
-        throw new Error("fsync failed");
+      flush: async (flushed) => {
+        if (flushed === objectDirectory) throw new Error("fsync failed");
+        await Promise.resolve();
       },
       flushSync: () => undefined,
     });
     await expect(store.put(bytes, live())).rejects.toThrow("fsync failed");
+    expect(store.verifySync(ObjectStore.digestOf(bytes))).toBe("verified");
+    expect(readdirSync(store.paths.staging)).toEqual([]);
+  });
+
+  it("stores nothing when a directory it created cannot be fsynced", async () => {
+    const failing = () => {
+      throw new Error("fsync failed");
+    };
+    const fsync = {
+      flush: async () => {
+        await Promise.resolve();
+        failing();
+      },
+      flushSync: failing,
+    };
+    using asyncRoot = mkdtempDisposableSync(join(tmpdir(), "mia-objects-"));
+    using syncRoot = mkdtempDisposableSync(join(tmpdir(), "mia-objects-"));
+    const asyncStore = new ObjectStore(catalogPaths(asyncRoot.path), fsync);
+    const syncStore = new ObjectStore(catalogPaths(syncRoot.path), fsync);
+    await expect(asyncStore.put(bytes, live())).rejects.toThrow("fsync failed");
+    expect(() => syncStore.putSync(bytes)).toThrow("fsync failed");
+    for (const store of [asyncStore, syncStore]) {
+      expect(store.verifySync(ObjectStore.digestOf(bytes))).toBe("missing");
+      expect(readdirSync(store.paths.staging)).toEqual([]);
+    }
   });
 });
 
