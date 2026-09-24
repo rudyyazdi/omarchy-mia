@@ -1,4 +1,3 @@
-import { setTimeout as sleep } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -61,14 +60,16 @@ describe("approval bridge", () => {
   });
 
   it("signals abandonment when the caller disconnects before a decision", async () => {
-    let abandoned = false;
+    const received = Promise.withResolvers<undefined>();
+    const abandoned = Promise.withResolvers<undefined>();
     bridge.setHandler(
       (request) =>
         new Promise((resolve) => {
           request.abandoned.addEventListener("abort", () => {
-            abandoned = true;
+            abandoned.resolve(undefined);
             resolve({ behavior: "deny", message: "abandoned" });
           });
+          received.resolve(undefined);
         }),
     );
     const mcpClient = await client();
@@ -77,10 +78,10 @@ describe("approval bridge", () => {
       arguments: { tool_name: "mcp__d1__slow", input: {}, tool_use_id: "toolu_3" },
     });
     pending.catch(() => undefined);
-    await sleep(50);
+    await received.promise;
     await mcpClient.close();
-    for (let attempt = 0; attempt < 100 && !abandoned; attempt++) await sleep(10);
-    expect(abandoned).toBe(true);
+    // Resolved only by the abort listener: a bridge that never signals abandonment fails on the test's timeout.
+    await abandoned.promise;
     bridge.setHandler(null);
   });
 });

@@ -34,7 +34,6 @@ import {
   mustString,
   startTestServer,
   testProfile,
-  tick,
   useScriptedSession,
   type HeldRead,
   type TestServer,
@@ -687,7 +686,6 @@ describe("approval path", () => {
     expect(requested.payload.tool_identity).toBe("mcp__d1__change");
     expect(requested.payload.redacted_arguments).toEqual({ delta: 1 });
     expect(requested.payload.binding_revision).toBe(1);
-    await tick();
     expect(turn.decisions).toHaveLength(0); // still held
     expect(approvalStatuses()).toEqual(["pending"]);
     // The approval and the event that requested it name each other.
@@ -955,7 +953,6 @@ describe("approval path", () => {
     expect(approvalStatuses()).toEqual(["pending"]);
     // The refused request dropping its own prompt afterwards abandons nothing: the first one stays held.
     must(turn.pendingAbandons[1], "refused prompt").abort();
-    await tick();
     expect(approvalStatuses()).toEqual(["pending"]);
     const ack = await decide(taskId, requested.payload.approval_id, "approve");
     expect(ackResult(ack).released).toBe(true);
@@ -983,7 +980,6 @@ describe("approval path", () => {
       decision: "approve",
     });
     expect(ackError(foreign).code).toBe("busy");
-    await tick();
     expect(turn.decisions).toHaveLength(0);
     await decide(taskId, requested.payload.approval_id, "reject");
     expect((await held).behavior).toBe("deny");
@@ -1001,7 +997,8 @@ describe("approval path", () => {
     const noId = await turn.request("mcp__d1__change", { delta: 1 }, undefined);
     expect(noId.behavior).toBe("deny");
     expect(rows("SELECT id FROM approvals")).toHaveLength(0);
-    await tick();
+    await client.waitFor("error", (event) => event.payload.code === "configuration_error");
+    await client.waitFor("error", (event) => event.payload.code === "runtime_failure");
     const errors = client.events.flatMap((event) =>
       event.type === "error" ? [event.payload.code] : [],
     );
@@ -1063,7 +1060,6 @@ describe("approval path", () => {
     const ack = await decide(taskId, requested.payload.approval_id, "approve");
     expect(ack.disposition).toBe("rejected");
     expect(ackError(ack).code).toBe("record_failure");
-    await tick();
     expect(turn.decisions).toHaveLength(0);
     expect(approvalStatuses()).toEqual(["pending"]);
     const retry = await decide(taskId, requested.payload.approval_id, "approve");
@@ -1196,7 +1192,6 @@ describe("approval path", () => {
         code: "invalid_state",
         message: expect.stringContaining("can no longer be decided; its call was not released"),
       });
-      await tick();
       expect(turn.decisions.map(({ decision }) => decision.behavior)).toEqual(["deny"]);
       expect(rows("SELECT id FROM events WHERE type = 'tool_dispatched'")).toHaveLength(0);
       const busy = await client.submitText("another");
@@ -1411,9 +1406,9 @@ describe("approval path", () => {
 
   it("treats disconnection as no decision and keeps the pending record", async () => {
     const { turn, taskId, held, requested } = await submitHeldCall("change");
+    const closed = ts.waitForLog((line) => line.endsWith(" closed"));
     client.close();
-    await tick();
-    await tick();
+    await closed;
     expect(turn.decisions).toHaveLength(0);
     expect(approvalStatuses()).toEqual(["pending"]);
     expect(rows("SELECT id FROM events WHERE type = 'client_disconnected'")).toHaveLength(1);
@@ -1448,9 +1443,9 @@ describe("approval path", () => {
       (event) => event.payload.runtime_call_id === "toolu_a",
     );
     const requestOrder = [askedB.payload.approval_id, askedA.payload.approval_id];
+    const closed = ts.waitForLog((line) => line.endsWith(" closed"));
     client.close();
-    await tick();
-    await tick();
+    await closed;
     const disconnected = rows<{ payload: string }>(
       "SELECT payload FROM events WHERE type = 'client_disconnected'",
     ).map((row) => JSON.parse(row.payload).pending_approvals);
@@ -1661,7 +1656,6 @@ describe("interruption path", () => {
     failNextCommit();
     const ack = await client.interrupt(taskId);
     expect(ackError(ack).code).toBe("record_failure");
-    await tick();
     expect(turn.interrupted).toBe(false);
     expect(turn.decisions).toHaveLength(0);
     expect(approvalStatuses()).toEqual(["pending"]);
@@ -2073,9 +2067,9 @@ describe("conversation start", () => {
 
   it("leaves the conversation its client's when another client's start fails to commit", async () => {
     const current = must(client.conversationId, "conversation id");
+    const closed = ts.waitForLog((line) => line.endsWith(" closed"));
     client.close();
-    await tick();
-    await tick();
+    await closed;
     const other = await ts.connect("client-B");
     failNextCommit();
     expect(ackError(await other.send("start_conversation", {})).code).toBe("record_failure");
