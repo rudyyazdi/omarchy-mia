@@ -215,7 +215,7 @@ describe("shutdown mid-turn", () => {
     const testServer = await startTestServer(
       undefined,
       { executable: FAKE_RUNTIME },
-      FAKE_RUNTIME_ENV,
+      { env: FAKE_RUNTIME_ENV },
     );
     try {
       const client = await testServer.connect("client-A");

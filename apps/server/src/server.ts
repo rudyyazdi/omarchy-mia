@@ -79,6 +79,8 @@ export const startServer = async (input: {
   collectArtifact?: ArtifactCollector;
   /** The clock the engine stamps its records and events with, and acks read; defaults to the system clock. */
   now?: () => Date;
+  /** Debug mode (see `EngineDeps.debugMode`); off unless the entry point was asked for it. */
+  debugMode?: boolean;
   /**
    * The server process's environment: fills a profile's `${ENV}` placeholders, is what the runtime
    * inherits and is probed with at startup, and names the bridge's request log (`MIA_MCP_HTTP_LOG`).
@@ -119,6 +121,7 @@ export const startServer = async (input: {
         collectArtifact: input.collectArtifact ?? collectArtifact,
         newId,
         now,
+        debugMode: input.debugMode ?? false,
         log,
       });
       const gateway = await startGateway({

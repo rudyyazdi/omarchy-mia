@@ -44,6 +44,7 @@ which is ignored). Every profile states:
 
 ```sh
 npm run server -- --config path/to/profile.json      # loopback WebSocket, prints the URL
+npm run server -- --config path/to/profile.json --debug   # also marks each conversation it starts as captured in debug mode
 npm run client -- --config path/to/profile.json      # terminal client: text in, streamed text out, /approve /reject /interrupt
 npm run mia -- debug conversations --state <stateDirectory>
 npm run mia -- debug conversation <id> --state <stateDirectory>

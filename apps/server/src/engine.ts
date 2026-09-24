@@ -228,6 +228,12 @@ export interface EngineDeps {
    * row, written outside any transaction, reads it too, and so does each event sent, for its `server_time`.
    */
   now: () => Date;
+  /**
+   * Debug mode, chosen once per server start: each conversation started while it is on records a
+   * `captured_in_debug_mode` event, so a viewer can tell detail that was never captured from detail that is absent.
+   * Off records exactly what the engine records without it.
+   */
+  debugMode: boolean;
   log: (message: string) => void;
 }
 
@@ -676,6 +682,8 @@ export class Engine {
             provenance_set_id: provenance.provenance_set_id,
           },
         });
+        // After conversation_started, so that event keeps the sequence it has with debug mode off.
+        if (this.deps.debugMode) this.record("captured_in_debug_mode", {});
         return {
           ok: true,
           result: {
