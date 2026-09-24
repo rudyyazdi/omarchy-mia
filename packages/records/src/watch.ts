@@ -72,8 +72,6 @@ export interface WatchTask {
 
 export interface WatchTree {
   conversation: ConversationRow;
-  /** See `capturedInDebugMode`. */
-  captured_in_debug_mode: boolean;
   tasks: WatchTask[];
   /** Events of no known task. */
   events: EventRow[];
@@ -246,12 +244,7 @@ const nodeOf = <Node>(nodes: ReadonlyMap<string, Node>, id: string): Node => {
 export const watchTree = (rows: WatchRows): WatchTree => {
   const conversation = rows.conversations[0];
   if (!conversation) throw new Error("the rows hold no conversation");
-  const tree: WatchTree = {
-    conversation,
-    captured_in_debug_mode: capturedInDebugMode(rows),
-    tasks: [],
-    events: [],
-  };
+  const tree: WatchTree = { conversation, tasks: [], events: [] };
   const tasks = new Map<string, WatchTask>();
   const calls = new Map<string, WatchToolCall>();
   const appendEvent = (parent: WatchParent, event: EventRow) =>

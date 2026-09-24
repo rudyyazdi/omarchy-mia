@@ -49,10 +49,16 @@ describe("watch views", () => {
     expect(view.summary).toContain("✗ Mia denied mcp__d1__forbidden by policy");
   });
 
-  it("marks a call's MCP bodies as not recorded when the conversation was captured with debug mode off", () => {
+  it("marks a dispatched call's MCP bodies as not recorded when the conversation was captured with debug mode off", () => {
     const marker = "not recorded (debug mode off)";
-    expect(toolCallView(toolCallRow(), [], false).body).toContain(marker);
-    expect(toolCallView(toolCallRow(), [], true).body).not.toContain(marker);
+    const dispatched = toolCallRow({ status: "completed", dispatch_event_id: "e5" });
+    expect(toolCallView(dispatched, [], false).body).toContain(marker);
+    expect(toolCallView(dispatched, [], true).body).not.toContain(marker);
+  });
+
+  it("marks nothing on a call that never reached an MCP server", () => {
+    const denied = toolCallRow({ status: "denied", detail: "Mia denied it by policy" });
+    expect(toolCallView(denied, [], false).body).not.toContain("not recorded");
   });
 
   it("shows on the conversation's line whether it was captured in debug mode", () => {

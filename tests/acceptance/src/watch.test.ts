@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished } from "vitest";
 import { z } from "zod";
 import { startWatch, type Watch, type WatchMessage, type WatchTimers } from "@mia/debug-cli";
 import {
@@ -31,12 +31,6 @@ let ts: TestServer;
 let client: MiaClient;
 useScriptedSession((session) => {
   ({ runtime, server: ts, client } = session);
-});
-
-/** Servers a test starts beside the session's. Registered before the watch's teardown, so they close after it. */
-const ownServers: TestServer[] = [];
-afterEach(async () => {
-  await Promise.all(ownServers.splice(0).map((server) => server.close()));
 });
 
 const ViewSchema = z.object({ summary: z.string(), body: z.string() });
@@ -299,7 +293,8 @@ describe("mia debug watch", () => {
   it("shows a conversation captured in debug mode as such, with nothing marked not recorded", async () => {
     const debugRuntime = new ScriptedRuntime();
     const debugServer = await startTestServer(debugRuntime, {}, { debugMode: true });
-    ownServers.push(debugServer);
+    // After every afterEach hook, so after the watch's teardown has closed its catalog.
+    onTestFinished(() => debugServer.close());
     const debugClient = await debugServer.connect("client-A");
     await debugClient.startConversation();
     const next = debugRuntime.nextTurn();
@@ -368,7 +363,10 @@ describe("mia debug watch", () => {
     expect(statusOf(proposed)).toBe("proposed");
     expect((await turn.request("mcp__d1__forbidden", {}, "toolu_forbidden")).behavior).toBe("deny");
     await poll.fire();
-    expect(statusOf(await page.untilNode((node) => node.id === proposed.id))).toBe("denied");
+    const denied = await page.untilNode((node) => node.id === proposed.id);
+    expect(statusOf(denied)).toBe("denied");
+    // It never reached the MCP server, so there were no bodies to record, even with debug mode off.
+    expect(denied.view.body).not.toContain("not recorded");
 
     turn.end();
     await client.waitFor("task_finished");

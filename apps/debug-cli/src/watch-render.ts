@@ -88,7 +88,9 @@ const STOPPED_CALLS: ReadonlySet<ToolCallStatus> = new Set([
 
 /**
  * What only debug mode records, marked where it would appear in a conversation captured with debug mode off, so
- * the page never shows a silent gap (issue #6). Every tool call is an MCP call: the runtime is launched with no built-in tools.
+ * the page never shows a silent gap (issue #6). Only a dispatched call has MCP bodies: a call denied, blocked or
+ * cancelled before dispatch never reached a server. A dispatched call is always an MCP call, since only listed
+ * `mcp__…` identities are permitted and the runtime is launched with no built-in tools.
  */
 const NOT_RECORDED = `<p class="not-recorded">MCP request and response: not recorded (debug mode off)</p>`;
 
@@ -132,7 +134,7 @@ export const toolCallView = (
     body: [
       fieldsHtml({ ...call, redacted_arguments: parseStored(call.redacted_arguments) }),
       ...approvals.map((row) => `<h4>approval ${shown(row.id)}</h4>${fieldsHtml({ ...row })}`),
-      debugMode ? "" : NOT_RECORDED,
+      !debugMode && call.dispatch_event_id !== null ? NOT_RECORDED : "",
     ].join(""),
   };
 };
