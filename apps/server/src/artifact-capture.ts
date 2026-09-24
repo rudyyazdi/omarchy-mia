@@ -1,7 +1,7 @@
 import { isAbsolute, sep } from "node:path";
 import { z } from "zod";
 import { sha256Hex } from "@mia/protocol";
-import type { CaptureStatus } from "@mia/records";
+import type { CaptureStatus, StoredObject } from "@mia/records";
 
 const DeclaredArtifactSchema = z.object({
   path: z.string(),
@@ -45,13 +45,20 @@ export type Eligibility =
 
 export type Capture = { status: Extract<CaptureStatus, "retained">; bytes: Buffer } | NotRetained;
 
-/** The artifact fields a capture sets: its bytes, or its capture status and why nothing was retained. */
+/**
+ * A capture once its bytes are stored: the object they were stored as, or why nothing was retained. Bytes are
+ * stored before the transaction that registers them opens, so the transaction does no file I/O.
+ */
+export type Retention =
+  { status: Extract<CaptureStatus, "retained">; stored: StoredObject } | NotRetained;
+
+/** The artifact fields a retention sets: its stored object, or its capture status and why nothing was retained. */
 export const captureFields = (
-  capture: Capture,
-): { bytes: Buffer } | { captureStatus: NotRetained["status"]; captureReason: string } =>
-  capture.status === "retained"
-    ? { bytes: capture.bytes }
-    : { captureStatus: capture.status, captureReason: capture.reason };
+  retention: Retention,
+): { stored: StoredObject } | { captureStatus: NotRetained["status"]; captureReason: string } =>
+  retention.status === "retained"
+    ? { stored: retention.stored }
+    : { captureStatus: retention.status, captureReason: retention.reason };
 
 /** Text blocks of a tool result: a bare string, or the `text` of every block that carries one. */
 const resultTexts = (content: unknown): string[] => {

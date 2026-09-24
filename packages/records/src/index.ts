@@ -10,7 +10,7 @@ export type {
   ProvenanceRole,
 } from "./schema.ts";
 export { Catalog, defaultStateDir, newId, nowIso } from "./catalog.ts";
-export { ObjectStore } from "./objects.ts";
+export { ObjectStore, type StoredObject } from "./objects.ts";
 export { RecordWriter } from "./writer.ts";
 export type { RecordedCommand } from "./writer.ts";
 export { diagnosticsViews, listConversations, snapshotConversation, taskViews } from "./queries.ts";

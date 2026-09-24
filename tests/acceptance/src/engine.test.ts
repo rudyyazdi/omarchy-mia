@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   existsSync,
   readFileSync,
+  readdirSync,
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -121,6 +122,32 @@ const failNextCommit = (): void => {
     });
   };
 };
+
+/**
+ * Watch every catalog transaction from now on for one that writes an object: a write inside a transaction stalls
+ * every connection while it runs. Returns whether any did.
+ */
+const watchObjectWrites = (): (() => boolean) => {
+  const catalog = ts.server.catalog;
+  const objects = join(catalog.paths.root, "objects");
+  const entries = () =>
+    existsSync(objects) ? readdirSync(objects, { recursive: true }).length : 0;
+  let writtenInside = false;
+  const original = catalog.transaction.bind(catalog);
+  catalog.transaction = <T>(fn: () => T): T => {
+    const before = entries();
+    try {
+      return original(fn);
+    } finally {
+      writtenInside ||= entries() > before;
+    }
+  };
+  return () => writtenInside;
+};
+
+/** Whether the object store holds bytes for `digest`. */
+const objectStored = (digest: string | null): boolean =>
+  digest !== null && existsSync(new ObjectStore(ts.server.catalog.paths).pathFor(digest));
 
 /** Make every object write fail: a file where the object store stages its writes. */
 const failObjectWrites = (): void => {
@@ -536,6 +563,18 @@ describe("streaming and commands", () => {
     expect(taskStatus(taskId)).toBe("completed");
     return transcriptArtifacts(taskId);
   };
+
+  it("stores a turn's transcript before the transaction that records the turn finished opens", async () => {
+    const { turn, taskId } = await submit("hello");
+    turn.init();
+    const writtenInside = watchObjectWrites();
+    turn.end();
+    await client.waitFor("task_finished");
+    const [transcript] = transcriptArtifacts(taskId);
+    expect(transcript?.capture_status).toBe("retained");
+    expect(objectStored(transcript?.object_digest ?? null)).toBe(true);
+    expect(writtenInside()).toBe(false);
+  });
 
   it("records a turn finished, and why its transcript is missing, when the transcript cannot be read", async () => {
     const transcripts = await finishLosingTranscript((turn) => {
@@ -1562,6 +1601,39 @@ describe("configuration and provenance", () => {
     );
     return { file, digest: ObjectStore.digestOf(Buffer.from("D1")), artifacts };
   };
+
+  it("stores a declared tool output before the transaction that registers it opens", async () => {
+    const { file, turn } = await approvedArtifactCall();
+    const writtenInside = watchObjectWrites();
+    await declareOutput(turn, file);
+    const digest = ObjectStore.digestOf(Buffer.from("D1"));
+    expect(rows("SELECT object_digest FROM artifacts WHERE kind = 'tool_output'")).toEqual([
+      { object_digest: digest },
+    ]);
+    expect(objectStored(digest)).toBe(true);
+    expect(writtenInside()).toBe(false);
+    turn.end();
+    await client.waitFor("task_finished");
+  });
+
+  it("leaves the call as it was, and no row pointing at the stored output, when the tool result cannot commit", async () => {
+    const { file, turn, taskId } = await approvedArtifactCall();
+    const statusBefore = rows("SELECT status FROM tool_calls");
+    const digest = ObjectStore.digestOf(Buffer.from("D1"));
+    failNextCommit();
+    await declareOutput(turn, file);
+    expect(ts.logs).toContain("failed to record tool_result: simulated commit failure");
+    // Stored before the transaction, and referenced by no row once it rolled back.
+    expect(objectStored(digest)).toBe(true);
+    expect(rows("SELECT 1 FROM objects WHERE digest = ?", digest)).toHaveLength(0);
+    expect(rows("SELECT 1 FROM artifacts WHERE kind = 'tool_output'")).toHaveLength(0);
+    expect(rows("SELECT status FROM tool_calls")).toEqual(statusBefore);
+    turn.end();
+    const finished = await client.waitFor("task_finished");
+    // In memory the call never completed either, so the turn cannot say what it did.
+    expect(finished.payload.status).toBe("outcome_unknown");
+    expect(taskStatus(taskId)).toBe("outcome_unknown");
+  });
 
   it("records a tool result, and why its output is missing, when the output cannot be stored", async () => {
     const { file, artifacts } = await completeLosingToolOutput(failObjectWrites);

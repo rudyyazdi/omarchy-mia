@@ -15,7 +15,7 @@ import {
   type ToolCallStatus,
 } from "@mia/protocol";
 import { Catalog, newId, nowIso } from "./catalog.ts";
-import { ObjectStore } from "./objects.ts";
+import { ObjectStore, type StoredObject } from "./objects.ts";
 import type {
   ArtifactKind,
   CaptureStatus,
@@ -111,7 +111,8 @@ export interface ArtifactInput {
   logicalName: string;
   mimeType?: string | null;
   schemaVersion?: string | null;
-  bytes?: Uint8Array | null;
+  /** The object already stored for the artifact's bytes (`ObjectStore.put`), so registering it does no file I/O. */
+  stored?: StoredObject | null;
   producerExecutionId?: string | null;
   producerEventId?: string | null;
   originalPath?: string | null;
@@ -270,9 +271,9 @@ export class RecordWriter {
     const id = newId("art");
     let digest: string | null = null;
     let byteSize: number | null = null;
-    let status = input.captureStatus ?? (input.bytes ? "retained" : "missing");
-    if (input.bytes) {
-      const stored = this.objects.put(input.bytes);
+    let status = input.captureStatus ?? (input.stored ? "retained" : "missing");
+    const { stored } = input;
+    if (stored) {
       digest = stored.digest;
       byteSize = stored.byteCount;
       if (!this.catalog.get("SELECT digest FROM objects WHERE digest = ?", digest)) {

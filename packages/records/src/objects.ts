@@ -10,6 +10,7 @@ import {
   renameSync,
   writeSync,
 } from "node:fs";
+import { access, chmod, mkdir, open, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { sha256Hex } from "@mia/protocol";
 import type { CatalogPaths } from "./catalog.ts";
@@ -41,39 +42,66 @@ export class ObjectStore {
     return join(this.paths.root, this.storageKey(digest));
   }
 
-  put(bytes: Uint8Array): StoredObject {
+  /** Where `bytes` are stored, computed without touching the disk. */
+  private describe(bytes: Uint8Array): StoredObject {
     const digest = ObjectStore.digestOf(bytes);
-    const target = this.pathFor(digest);
-    // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
-    if (existsSync(target))
-      return { digest, byteCount: bytes.byteLength, storageKey: this.storageKey(digest) };
-    // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
+    return { digest, byteCount: bytes.byteLength, storageKey: this.storageKey(digest) };
+  }
+
+  /**
+   * Store `bytes` before the transaction that references them opens, so the write, fsync and rename stall only
+   * the commit that needs the object, never the other connections. Idempotent: bytes already stored are left as
+   * they are.
+   */
+  async put(bytes: Uint8Array): Promise<StoredObject> {
+    const stored = this.describe(bytes);
+    const target = this.pathFor(stored.digest);
+    const present = await access(target).then(
+      () => true,
+      () => false,
+    );
+    if (present) return stored;
+    await mkdir(this.paths.staging, { recursive: true, mode: 0o700 });
+    const staged = join(this.paths.staging, `${randomUUID()}.tmp`);
+    const handle = await open(staged, "w", 0o600);
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+    await rename(staged, target);
+    await chmod(target, 0o400).catch(() => {
+      /* best effort */
+    });
+    return stored;
+  }
+
+  /** `put`, blocking: only for a caller that cannot await yet (conversation start, until #53 makes engine commands async). */
+  putSync(bytes: Uint8Array): StoredObject {
+    const stored = this.describe(bytes);
+    const target = this.pathFor(stored.digest);
+    if (existsSync(target)) return stored;
     mkdirSync(this.paths.staging, { recursive: true, mode: 0o700 });
     const staged = join(this.paths.staging, `${randomUUID()}.tmp`);
-    // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
     const fd = openSync(staged, "w", 0o600);
     try {
       let offset = 0;
       while (offset < bytes.byteLength)
-        // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
         offset += writeSync(fd, bytes, offset, bytes.byteLength - offset);
-      // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
       fsyncSync(fd);
     } finally {
-      // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
       closeSync(fd);
     }
-    // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
-    // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
     renameSync(staged, target);
     try {
-      // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 moves it before the transaction
       chmodSync(target, 0o400);
     } catch {
       /* best effort */
     }
-    return { digest, byteCount: bytes.byteLength, storageKey: this.storageKey(digest) };
+    return stored;
   }
 
   readSync(digest: string): Buffer {

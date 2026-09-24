@@ -110,7 +110,8 @@ export const createConversationProvenance = (input: {
       logicalName: input.logicalName ?? role,
       mimeType: input.mime ?? "application/json",
       schemaVersion: input.version ?? null,
-      bytes,
+      // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 makes engine commands async
+      stored: writer.objects.putSync(bytes),
       captureStatus: "retained",
     });
     writer.addProvenanceEntry({

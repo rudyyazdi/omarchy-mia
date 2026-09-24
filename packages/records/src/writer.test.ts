@@ -78,16 +78,16 @@ describe("record writer", () => {
     expect(row.payload).toContain("[REDACTED]");
   });
 
-  it("stores artifact bytes once and keeps distinct logical records", () => {
+  it("stores artifact bytes once and keeps distinct logical records", async () => {
     const one = writer.registerArtifact({
       kind: "tool_output",
       logicalName: "a.txt",
-      bytes: Buffer.from("same"),
+      stored: await writer.objects.put(Buffer.from("same")),
     });
     const two = writer.registerArtifact({
       kind: "tool_output",
       logicalName: "b.txt",
-      bytes: Buffer.from("same"),
+      stored: await writer.objects.put(Buffer.from("same")),
     });
     expect(one.digest).toBe(two.digest);
     expect(one.artifactId).not.toBe(two.artifactId);
