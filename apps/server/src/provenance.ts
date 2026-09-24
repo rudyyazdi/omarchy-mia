@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { match } from "ts-pattern";
 import {
   ADAPTER_VERSION,
   type Profile,
@@ -313,10 +314,19 @@ export const nameProvenance = (
 ): NamedProvenancePlan => ({
   ...plan,
   setId: newId("prov"),
-  items: plan.items.map((item): NamedProvenanceItem =>
-    item.availability === "unavailable"
-      ? { ...item, entryId: newId("pe") }
-      : { ...item, entryId: newId("pe"), artifactId: newId("art"), linkId: newId("link") },
+  items: plan.items.map((item) =>
+    match(item)
+      .with({ availability: "unavailable" }, (unavailable): NamedProvenanceItem => ({
+        ...unavailable,
+        entryId: newId("pe"),
+      }))
+      .with({ availability: "retained" }, (retained): NamedProvenanceItem => ({
+        ...retained,
+        entryId: newId("pe"),
+        artifactId: newId("art"),
+        linkId: newId("link"),
+      }))
+      .exhaustive(),
   ),
 });
 

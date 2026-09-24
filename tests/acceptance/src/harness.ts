@@ -18,7 +18,7 @@ import {
 } from "@mia/server";
 import type { AckError, AckPayload } from "@mia/protocol";
 import { describeAck, MiaClient } from "@mia/text-client";
-import { Catalog } from "@mia/records";
+import { Catalog, newId } from "@mia/records";
 import { ScriptedRuntime } from "./scripted-runtime.ts";
 
 export interface TestServer {
@@ -189,6 +189,13 @@ export const startTestServer = async (
     return collectArtifact(declared, outputDirectories);
   };
   let clock = () => new Date();
+  // Every id the engine records is drawn before its transaction opens (#132), so a draw inside one fails that commit
+  // here too, whatever the engine itself checks. Set once the server's catalog is open.
+  let inTransaction = (): boolean => false;
+  const drawOutsideTransactions = (prefix: Parameters<typeof newId>[0]): string => {
+    if (inTransaction()) throw new Error(`id "${prefix}" drawn inside a transaction`);
+    return newId(prefix);
+  };
   const server = await startServer({
     profile,
     ...(adapter ? { adapter } : {}),
@@ -197,9 +204,11 @@ export const startTestServer = async (
     readEvidence,
     collectArtifact: captureArtifact,
     now: () => clock(),
+    newId: drawOutsideTransactions,
     debugMode,
     env,
   });
+  inTransaction = () => server.catalog.db.isTransaction;
   const clients: MiaClient[] = [];
   return {
     server,

@@ -301,8 +301,8 @@ interface RuntimeEventIds {
 }
 
 /**
- * The ids a permission request's transaction may record, drawn before it opens: the approval the binding it
- * supersedes resolves, the proposal and revision of a new binding, the policy evaluation, the event recording what the
+ * The ids a permission request's transaction may record, drawn before it opens: the approval_resolved event of the
+ * approval the superseded binding held, the proposal and revision of a new binding, the policy evaluation, the event recording what the
  * rule decided (the configuration error of an unlisted tool, the dispatch, or the approval request), and the
  * approval a request that asks creates.
  */

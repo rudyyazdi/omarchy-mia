@@ -10,7 +10,7 @@ import {
   type RuntimeFileReader,
 } from "@mia/agent-adapter";
 import { errorMessage } from "@mia/protocol";
-import { Catalog, RecordWriter, newId } from "@mia/records";
+import { Catalog, RecordWriter, newId, type NewId } from "@mia/records";
 import { collectArtifact, type ArtifactCollector } from "./artifact-collector.ts";
 import { collectBuildInfoSync } from "./build-info.ts";
 import { Engine, type TurnRunner } from "./engine.ts";
@@ -79,6 +79,8 @@ export const startServer = async (input: {
   collectArtifact?: ArtifactCollector;
   /** The clock the engine stamps its records and events with, and acks read; defaults to the system clock. */
   now?: () => Date;
+  /** Names what the engine records (see `EngineDeps.newId`); defaults to `newId`. A test injects one that checks when it is called. */
+  newId?: NewId;
   /** Debug mode (see `EngineDeps.debugMode`); off unless the entry point was asked for it. */
   debugMode?: boolean;
   /**
@@ -119,7 +121,7 @@ export const startServer = async (input: {
         evidenceReadDeadline: input.evidenceReadDeadline,
         readEvidence: input.readEvidence ?? readRuntimeFile,
         collectArtifact: input.collectArtifact ?? collectArtifact,
-        newId,
+        newId: input.newId ?? newId,
         now,
         debugMode: input.debugMode ?? false,
         log,
