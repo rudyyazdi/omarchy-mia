@@ -1,6 +1,8 @@
 import { match } from "ts-pattern";
 import { describe, expect, it } from "vitest";
-import { canonicalDigest } from "@mia/protocol";
+import type { TurnResult } from "@mia/agent-adapter";
+import { canonicalDigest, type ClientDiagnostics } from "@mia/protocol";
+import type { Retention } from "./artifact-capture.ts";
 import {
   callById,
   withPending,
@@ -15,13 +17,18 @@ import {
   type ApprovalDecisionEvent,
   type CapturedOutput,
   type ConversationDecision,
+  type ClientDisconnectedEvent,
   type ConversationEvent,
+  type DiagnosticsReportedEvent,
   type InterruptTaskEvent,
   type PermissionRefusedEvent,
   type PermissionRequestEvent,
   type PromptAbandonedEvent,
   type RuntimeEventReceived,
   type RuntimeReport,
+  type TaskSubmittedEvent,
+  type TurnEndedEvent,
+  turnNote,
 } from "./decide-conversation.ts";
 import type { EngineEffect } from "./engine-effects.ts";
 import type { EngineRecord } from "./engine-records.ts";
@@ -114,6 +121,7 @@ const effectLabels = (effects: readonly EngineEffect[]): string[] =>
           .exhaustive(),
       )
       .with({ kind: "interrupt_runtime" }, ({ taskId }) => `interrupt ${taskId}`)
+      .with({ kind: "start_turn" }, ({ turn }) => `start ${turn.taskId}`)
       .exhaustive(),
   );
 
@@ -767,5 +775,431 @@ describe("runtime events", () => {
     const stderr = reported({ event: { type: "runtime_stderr", text: "late", at: AT_RUNTIME } });
     expect(refusal(running([], { runtimeEnded: true }), stderr)).toEqual({ kind: "runtime_ended" });
     expect(refusal(running(), { ...stderr, taskId: "task_old" })).toEqual({ kind: "no_task" });
+  });
+});
+
+/** The conversation between tasks: its last turn left `pendingNote`, and nothing runs. */
+const idle = (pendingNote: string | null = null): ConversationState => ({
+  ...awaiting([]),
+  pendingNote,
+  task: null,
+});
+
+const submission = (overrides: Partial<TaskSubmittedEvent> = {}): TaskSubmittedEvent => ({
+  kind: "submit_task",
+  origin: ORIGIN,
+  text: "hello",
+  clientId: "client_owner",
+  commandId: "cmd_1",
+  requested: { model: "model-pin", effort: "high" },
+  ids: {
+    task: "task_new",
+    execution: "exec_new",
+    submitted: "evt_submitted",
+    started: "evt_started",
+  },
+  ...overrides,
+});
+
+describe("task submission", () => {
+  it("records the task under the next epoch, carries the last turn's note into its prompt, then starts its turn", () => {
+    const state = idle("[Mia note] earlier");
+    const { next, records, effects } = accepted(decide(state, submission()));
+    expect(labels(records)).toEqual([
+      "create_task",
+      "create_execution",
+      "task_submitted",
+      "task_started",
+    ]);
+    expect(records[0]).toMatchObject({
+      input: { id: "task_new", createdAt: AT, conversationId: "conv_1", clientId: "client_owner" },
+    });
+    expect(records[1]).toMatchObject({
+      input: {
+        id: "exec_new",
+        taskId: "task_new",
+        runtimeIdentity: "claude-code",
+        runtimeConversationId: "runtime_conv_1",
+        requestedModel: "model-pin",
+        requestedEffort: "high",
+        provenanceSetId: "prov_1",
+        executionEpoch: 3,
+      },
+    });
+    expect(records[2]).toMatchObject({
+      input: {
+        id: "evt_submitted",
+        taskId: "task_new",
+        executionId: "exec_new",
+        payload: {
+          text: "hello",
+          runtime_prompt: "[Mia note] earlier\n\nhello",
+          mia_note: "[Mia note] earlier",
+          command_id: "cmd_1",
+        },
+      },
+    });
+    expect(effectLabels(effects)).toEqual(["deliver task_started", "start task_new"]);
+    expect(effects.at(-1)).toEqual({
+      kind: "start_turn",
+      turn: { taskId: "task_new", prompt: "[Mia note] earlier\n\nhello" },
+    });
+    expect(next).toMatchObject({ epoch: 3, turnCount: 3, pendingNote: null });
+    expect(next.task).toMatchObject({
+      id: "task_new",
+      executionId: "exec_new",
+      epoch: 3,
+      status: "running",
+      gateOpen: true,
+      clientId: "client_owner",
+    });
+    // Only a commit makes the next state current: the note stays until then.
+    expect(state.pendingNote).toBe("[Mia note] earlier");
+  });
+
+  it("sends the text alone when the last turn left no note", () => {
+    const { records, effects } = accepted(decide(idle(), submission()));
+    expect(records[2]).toMatchObject({
+      input: { payload: { runtime_prompt: "hello", mia_note: null } },
+    });
+    expect(effects.at(-1)).toMatchObject({ turn: { prompt: "hello" } });
+  });
+
+  it("refuses a submission while a task runs, naming its pending approvals in request order", () => {
+    const decided = decide(awaiting([2, 1]), submission());
+    expect(decided).toEqual({
+      kind: "rejected",
+      rejection: {
+        kind: "busy",
+        taskId: "task_1",
+        status: "awaiting_approval",
+        pendingApprovals: ["appr_2", "appr_1"],
+      },
+    });
+  });
+});
+
+const turnResult = (overrides: Partial<TurnResult> = {}): TurnResult => ({
+  status: "completed",
+  summary: null,
+  exit: { code: 0, signal: null },
+  error: null,
+  streamLogPath: "/tmp/runtime/turn-002.stream.jsonl",
+  hookEvidencePath: "/tmp/runtime/hooks.jsonl",
+  launch: {
+    model: "model-pin",
+    effort: "high",
+    session_id: "runtime_conv_1",
+    resume: true,
+    builtin_tools: [],
+    mcp_servers: [],
+    permission_prompt_tool: "mcp__mia_approval__request",
+    settings: {},
+    mcp_config: {},
+  },
+  init: null,
+  interrupted: false,
+  runtimeCancellation: "not_needed",
+  ...overrides,
+});
+
+const RETAINED: Retention = {
+  status: "retained",
+  stored: { digest: "sha256:t", byteCount: 1, storageKey: "objects/t" },
+};
+
+const turnEnded = (overrides: Partial<TurnEndedEvent> = {}): TurnEndedEvent => ({
+  kind: "turn_ended",
+  origin: ORIGIN,
+  taskId: "task_1",
+  result: turnResult(),
+  transcript: null,
+  hooks: { evidence: { records: [], malformedLines: 0, readError: null }, retention: null },
+  unresultedBodies: [],
+  stillPending: [],
+  ids: {
+    transcript: { artifact: "art_transcript", link: "link_transcript" },
+    hooks: { artifact: "art_hooks", link: "link_hooks" },
+    outcome: "evt_outcome",
+    finished: "evt_finished",
+    error: "evt_error",
+  },
+  ...overrides,
+});
+
+describe("turn end", () => {
+  it("records each call's final status, expires what the records hold pending, registers evidence and ends the task", () => {
+    const completed: CallState = { ...held(1), status: "completed" };
+    const released: CallState = { ...held(2), status: "dispatched" };
+    const state = running([completed, released]);
+    const { next, records, effects } = accepted(
+      decide(
+        state,
+        turnEnded({
+          transcript: RETAINED,
+          unresultedBodies: [
+            {
+              call: released,
+              bodies: [{ direction: "request", status: "recorded", body: {}, eventId: "evt_req" }],
+            },
+          ],
+          stillPending: ["appr_lost"],
+        }),
+      ),
+    );
+    expect(labels(records)).toEqual([
+      "update_tool_call",
+      "update_tool_call",
+      "mcp_request",
+      "update_approval",
+      "register_artifact",
+      "link_artifact",
+      "update_execution",
+      "update_task",
+      "task_finished",
+    ]);
+    expect(records[0]).toMatchObject({ id: "call_1", fields: { status: "completed" } });
+    expect(records[1]).toMatchObject({ id: "call_2", fields: { status: "unknown" } });
+    expect(records[2]).toMatchObject({
+      input: { id: "evt_req", taskId: "task_1", causedByEventId: null },
+    });
+    expect(records[3]).toMatchObject({
+      id: "appr_lost",
+      fields: { status: "expired", consumedAt: AT, reason: "task ended" },
+    });
+    expect(records[4]).toMatchObject({
+      input: {
+        id: "art_transcript",
+        kind: "runtime_transcript",
+        logicalName: "turn-2.stream.jsonl",
+        originalPath: "/tmp/runtime/turn-002.stream.jsonl",
+        producerExecutionId: "exec_1",
+      },
+    });
+    expect(records[5]).toMatchObject({
+      input: { id: "link_transcript", conversationId: "conv_1", relation: "runtime_transcript" },
+    });
+    expect(records[6]).toMatchObject({
+      id: "exec_1",
+      fields: {
+        status: "completed",
+        endedAt: AT,
+        reportedEffort: null,
+        effortEvidence: {
+          samples: 0,
+          note: "no tool use in this turn; effective effort unreported",
+        },
+      },
+    });
+    // A released call whose outcome is unknown makes the task's outcome unknown too.
+    expect(records[7]).toMatchObject({
+      id: "task_1",
+      fields: { status: "outcome_unknown", finishedAt: AT },
+    });
+    expect(effectLabels(effects)).toEqual(["deliver task_finished"]);
+    expect(next.task).toMatchObject({ status: "outcome_unknown", pendingApprovals: new Map() });
+    expect(next.task && callById(next.task, "call_2")?.status).toBe("unknown");
+    // The boundary clears the task once it has answered its held prompts.
+    expect(next.task?.id).toBe("task_1");
+  });
+
+  it("tells the client an interrupted turn's outcome before the task finishes, and blocks a call still held", () => {
+    const { next, records, effects } = accepted(
+      decide(
+        awaiting([1], { status: "interrupting", interrupted: true, gateOpen: false }),
+        turnEnded({ result: turnResult({ status: "killed", runtimeCancellation: "forced_kill" }) }),
+      ),
+    );
+    expect(labels(records)).toEqual([
+      "update_tool_call",
+      "update_execution",
+      "interruption_outcome",
+      "update_task",
+      "task_finished",
+    ]);
+    expect(records[0]).toMatchObject({ id: "call_1", fields: { status: "blocked_gate" } });
+    expect(records[1]).toMatchObject({ fields: { status: "killed" } });
+    expect(records[2]).toMatchObject({
+      input: {
+        id: "evt_outcome",
+        payload: {
+          task_status: "interrupted",
+          actions: [{ tool_call_id: "call_1", status: "blocked_gate" }],
+          runtime_cancellation: "forced_kill",
+        },
+      },
+    });
+    expect(effectLabels(effects)).toEqual([
+      "deliver interruption_outcome",
+      "deliver task_finished",
+    ]);
+    expect(next.task).toMatchObject({ status: "interrupted", pendingApprovals: new Map() });
+  });
+
+  it("reports a failed turn's error, and the one effort level its hook evidence reported", () => {
+    const { records, effects } = accepted(
+      decide(
+        running(),
+        turnEnded({
+          result: turnResult({ status: "failed", error: "runtime crashed" }),
+          hooks: {
+            evidence: {
+              records: [{ effort: { level: "high" } }, { effort: "high" }],
+              malformedLines: 0,
+              readError: null,
+            },
+            retention: RETAINED,
+          },
+        }),
+      ),
+    );
+    expect(labels(records)).toEqual([
+      "register_artifact",
+      "link_artifact",
+      "update_execution",
+      "update_task",
+      "task_finished",
+      "error",
+    ]);
+    expect(records[0]).toMatchObject({
+      input: { id: "art_hooks", kind: "effort_evidence", logicalName: "turn-2.hooks.jsonl" },
+    });
+    expect(records[1]).toMatchObject({ input: { id: "link_hooks", relation: "task_output" } });
+    expect(records[2]).toMatchObject({
+      fields: {
+        status: "failed",
+        reportedEffort: "high",
+        effortEvidence: { values: ["high"], samples: 2, note: null },
+      },
+    });
+    expect(records[4]).toMatchObject({
+      input: { payload: { status: "failed", error: "runtime crashed" } },
+    });
+    expect(records[5]).toMatchObject({
+      input: { id: "evt_error", payload: { code: "runtime_failure", message: "runtime crashed" } },
+    });
+    expect(effectLabels(effects)).toEqual(["deliver task_finished", "deliver error"]);
+  });
+
+  it("refuses the end of a task that is not the conversation's", () => {
+    expect(decide(running(), turnEnded({ taskId: "task_old" }))).toEqual({
+      kind: "rejected",
+      rejection: { kind: "no_task" },
+    });
+    expect(decide(idle(), turnEnded())).toEqual({
+      kind: "rejected",
+      rejection: { kind: "no_task" },
+    });
+  });
+});
+
+describe("the next turn's note", () => {
+  it("lists an interrupted turn's calls, names the prompts the runtime abandoned, and is null for a clean turn", () => {
+    const interrupted = awaiting([1], { interrupted: true }).task;
+    const abandoned = running([{ ...held(2), status: "invalidated" }], {
+      abandoned: ["call_2"],
+    }).task;
+    const clean = running([{ ...held(3), status: "completed" }]).task;
+    if (!interrupted || !abandoned || !clean) throw new Error("each state has a task");
+    expect(turnNote(interrupted)).toContain("mcp__d1__change: blocked_gate");
+    expect(turnNote(abandoned)).toContain('mcp__d1__change {"path":"file_2"}');
+    expect(turnNote(clean)).toBeNull();
+  });
+});
+
+const REPORT: ClientDiagnostics = {
+  build: { name: "mia-text-client", version: "0.1.0", commit: null, dirty: null },
+  connection_state: "connected",
+  recent_interaction_ids: [],
+  recent_errors: [],
+  voice: "not_applicable",
+  display: "not_applicable",
+  captured_at: AT_RUNTIME,
+};
+
+const diagnostics = (): DiagnosticsReportedEvent => ({
+  kind: "client_diagnostics",
+  origin: ORIGIN,
+  from: { clientId: "client_other", connectionId: "conn_2" },
+  diagnostics: REPORT,
+  ids: { event: "evt_diagnostics", diagnostics: "diag_1" },
+});
+
+describe("client diagnostics", () => {
+  it("records the report and the row that names it, under the task, from the client that sent it", () => {
+    const state = running();
+    const { next, records, effects } = accepted(decide(state, diagnostics()));
+    expect(records).toEqual([
+      {
+        kind: "append_event",
+        input: {
+          id: "evt_diagnostics",
+          receivedAt: AT,
+          conversationId: "conv_1",
+          type: "client_diagnostics",
+          payload: {
+            client_id: "client_other",
+            captured_at: AT_RUNTIME,
+            connection_state: "connected",
+          },
+          taskId: "task_1",
+          executionId: null,
+          clientId: "client_owner",
+          clientConnectionId: "conn_1",
+          causedByEventId: null,
+        },
+      },
+      {
+        kind: "record_diagnostics",
+        input: {
+          id: "diag_1",
+          receivedAt: AT,
+          conversationId: "conv_1",
+          clientId: "client_other",
+          clientConnectionId: "conn_2",
+          taskId: "task_1",
+          eventId: "evt_diagnostics",
+          capturedAt: AT_RUNTIME,
+          state: REPORT,
+        },
+      },
+    ]);
+    expect(effects).toEqual([]);
+    expect(next).toBe(state);
+    const between = accepted(decide(idle(), diagnostics()));
+    expect(between.records).toMatchObject([
+      { input: { taskId: null } },
+      { input: { taskId: null } },
+    ]);
+  });
+});
+
+const disconnect = (): ClientDisconnectedEvent => ({
+  kind: "client_disconnected",
+  origin: ORIGIN,
+  connectionId: "conn_1",
+  ids: { event: "evt_disconnected" },
+});
+
+describe("disconnect", () => {
+  it("records the disconnect with the approvals still pending in request order, and changes nothing else", () => {
+    const state = awaiting([2, 1]);
+    const { next, records, effects } = accepted(decide(state, disconnect()));
+    expect(records).toMatchObject([
+      {
+        kind: "append_event",
+        input: {
+          id: "evt_disconnected",
+          type: "client_disconnected",
+          payload: { connection_id: "conn_1", pending_approvals: ["appr_2", "appr_1"] },
+          taskId: "task_1",
+        },
+      },
+    ]);
+    expect(effects).toEqual([]);
+    expect(next).toBe(state);
+    expect(accepted(decide(idle(), disconnect())).records).toMatchObject([
+      { input: { payload: { pending_approvals: [] }, taskId: null } },
+    ]);
   });
 });

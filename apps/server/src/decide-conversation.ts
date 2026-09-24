@@ -1,14 +1,21 @@
 import { match } from "ts-pattern";
-import type { PermissionDecision, RuntimeEvent } from "@mia/agent-adapter";
+import type {
+  HookEvidence,
+  PermissionDecision,
+  RuntimeEvent,
+  TurnResult,
+} from "@mia/agent-adapter";
 import type { Decide, Decision as MachineDecision } from "@mia/kernel";
 import {
   canonicalDigest,
   redactValue,
+  type ClientDiagnostics,
   type Decision,
+  type Effort,
   type TaskStatus,
   type ToolCallPolicy,
 } from "@mia/protocol";
-import { mcpPayload } from "@mia/records";
+import { mcpPayload, type ArtifactKind, type LinkRelation } from "@mia/records";
 import { captureFields, type DeclaredArtifact, type Retention } from "./artifact-capture.ts";
 import {
   callById,
@@ -16,6 +23,7 @@ import {
   otherPending,
   pendingCall,
   withCall,
+  withCallStatuses,
   withPending,
   withRevision,
   withTask,
@@ -32,10 +40,14 @@ import {
   bindPermissionRequest,
   bindStreamProposal,
   bindToolResult,
+  classifyActions,
+  classifyTask,
   decideAbandonment,
   decideApproval,
   decideInterruption,
   evaluatePermission,
+  executionStatusFor,
+  noteAfterTurn,
   statusAfterResult,
   supersedeBinding,
   type CallChange,
@@ -47,8 +59,10 @@ import {
  * state (see `ConversationState`). Each transition composes the rules of ./transitions.ts into the records to commit,
  * the effects to perform once they have, and the next state, and every id it may record comes in with its event,
  * drawn at the boundary. It reads nothing else and changes nothing, so the engine commits what it returns and a
- * test checks it directly. So far it covers how approvals end (a user's decision, an interruption, and the runtime
- * abandoning a held prompt), the runtime's permission requests, and the events the runtime reports.
+ * test checks it directly. It covers every transition of a started conversation: task submission, how approvals end
+ * (a user's decision, an interruption, and the runtime abandoning a held prompt), the runtime's permission requests,
+ * the events the runtime reports, the turn's end, and the client's diagnostics and disconnect. Only the conversation
+ * start, which has no conversation to decide from yet, is still built by the engine.
  */
 
 /** A user's decision on a pending approval, from `deciderClientId`. */
@@ -186,7 +200,96 @@ export interface RuntimeEventReceived {
   ids: RuntimeEventIds;
 }
 
+/** The ids a task submission records: its task and execution, and its task_submitted and task_started events. */
+export interface SubmissionIds {
+  task: string;
+  execution: string;
+  submitted: string;
+  started: string;
+}
+
+/** The client submits text as the conversation's next task, answering command `commandId`. */
+export interface TaskSubmittedEvent {
+  kind: "submit_task";
+  origin: Origin;
+  text: string;
+  clientId: string;
+  commandId: string;
+  /** The model and effort the profile requests for the task's execution, read at the boundary. */
+  requested: { model: string; effort: Effort };
+  ids: SubmissionIds;
+}
+
+/** The ids of the rows that register one artifact and link it to its task. */
+export interface ArtifactIds {
+  artifact: string;
+  link: string;
+}
+
+/**
+ * The ids a turn's end may record: the transcript's and the hook evidence's artifact and link, and the
+ * interruption_outcome, task_finished and error events.
+ */
+export interface TurnEndIds {
+  transcript: ArtifactIds;
+  hooks: ArtifactIds;
+  outcome: string;
+  finished: string;
+  error: string;
+}
+
+/** The MCP messages turn end records for a released call whose tool result never arrived. */
+export interface UnresultedBodies {
+  call: Pick<CallState, "id" | "runtimeCallId">;
+  bodies: readonly McpBodyRecord[];
+}
+
+/**
+ * The runtime running the task's turn has ended with `result`, and the boundary has read and stored what the turn
+ * left, because reads and stores can take long: the transcript's retention (null when there was none), the hook
+ * evidence and its retention (null when it held no records), and in debug mode the MCP bodies of each released call
+ * whose result never arrived.
+ */
+export interface TurnEndedEvent {
+  kind: "turn_ended";
+  origin: Origin;
+  taskId: string;
+  result: TurnResult;
+  transcript: Retention | null;
+  hooks: { evidence: HookEvidence; retention: Retention | null };
+  unresultedBodies: readonly UnresultedBodies[];
+  /**
+   * Every approval of the task the records still hold pending, read at the boundary just before the decision: not only
+   * the ones in memory, because an abandonment whose commit failed left memory without its approval and the catalog
+   * with a pending row (#165).
+   */
+  stillPending: readonly string[];
+  ids: TurnEndIds;
+}
+
+/** A client reports its diagnostics about the conversation, over connection `from.connectionId`. */
+export interface DiagnosticsReportedEvent {
+  kind: "client_diagnostics";
+  origin: Origin;
+  from: { clientId: string; connectionId: string };
+  diagnostics: ClientDiagnostics;
+  /** The client_diagnostics event, and the diagnostics row that names it. */
+  ids: { event: string; diagnostics: string };
+}
+
+/** The conversation's active connection `connectionId` closed. */
+export interface ClientDisconnectedEvent {
+  kind: "client_disconnected";
+  origin: Origin;
+  connectionId: string;
+  ids: { event: string };
+}
+
 export type ConversationEvent =
+  | TaskSubmittedEvent
+  | TurnEndedEvent
+  | DiagnosticsReportedEvent
+  | ClientDisconnectedEvent
   | ApprovalDecisionEvent
   | InterruptTaskEvent
   | PromptAbandonedEvent
@@ -227,7 +330,17 @@ export type PermissionRejection =
  */
 export type RuntimeEventRejection = NoTask | { kind: "runtime_ended" };
 
+/** `busy`: the conversation already runs a task, with the approvals it holds pending, in request order. */
+export type SubmissionRejection = {
+  kind: "busy";
+  taskId: string;
+  status: TaskStatus;
+  pendingApprovals: readonly string[];
+};
+
 export type ConversationRejection =
+  | SubmissionRejection
+  | NoTask
   | ApprovalDecisionRejection
   | InterruptionRejection
   | AbandonmentRejection
@@ -989,6 +1102,379 @@ export const runtimeEventTransition: ConversationTransition<
   return draft.accepted();
 };
 
+/** The runtime every execution runs in. */
+const RUNTIME_IDENTITY = "claude-code";
+
+/**
+ * The client submits text as the conversation's next task, which only a conversation with no task accepts. The task
+ * and its execution are recorded under the next epoch, and its runtime prompt carries the note the last turn left,
+ * which the task takes over. The turn starts once that has committed (`start_turn`, queued last).
+ */
+export const taskSubmissionTransition: ConversationTransition<
+  TaskSubmittedEvent,
+  SubmissionRejection
+> = ({ state, event, now }) => {
+  const { task } = state;
+  if (task)
+    return rejected({
+      kind: "busy",
+      taskId: task.id,
+      status: task.status,
+      pendingApprovals: [...task.pendingApprovals.keys()],
+    });
+  const { text, ids } = event;
+  const epoch = state.epoch + 1;
+  const note = state.pendingNote;
+  const prompt = note ? `${note}\n\n${text}` : text;
+  const draft = new TransitionDraft({ state, now, origin: event.origin });
+  draft.write(
+    {
+      kind: "create_task",
+      input: {
+        id: ids.task,
+        createdAt: draft.at,
+        conversationId: state.id,
+        text,
+        clientId: event.clientId,
+      },
+    },
+    {
+      kind: "create_execution",
+      input: {
+        id: ids.execution,
+        startedAt: draft.at,
+        taskId: ids.task,
+        conversationId: state.id,
+        runtimeIdentity: RUNTIME_IDENTITY,
+        runtimeConversationId: state.runtimeConversationId,
+        requestedModel: event.requested.model,
+        requestedEffort: event.requested.effort,
+        provenanceSetId: state.provenanceSetId,
+        executionEpoch: epoch,
+      },
+    },
+  );
+  const links = { taskId: ids.task, executionId: ids.execution };
+  draft.record(
+    "task_submitted",
+    { text, runtime_prompt: prompt, mia_note: note, command_id: event.commandId },
+    { ...links, id: ids.submitted },
+  );
+  draft.emit(
+    {
+      type: "task_started",
+      payload: {
+        conversation_id: state.id,
+        task_id: ids.task,
+        execution_id: ids.execution,
+        execution_epoch: epoch,
+        text,
+      },
+    },
+    { ...links, id: ids.started },
+  );
+  draft.advance({
+    ...state,
+    epoch,
+    turnCount: state.turnCount + 1,
+    pendingNote: null,
+    task: {
+      id: ids.task,
+      executionId: ids.execution,
+      epoch,
+      status: "running",
+      gateOpen: true,
+      interrupted: false,
+      runtimeEnded: false,
+      calls: new Map(),
+      pendingApprovals: new Map(),
+      abandoned: [],
+      clientId: event.clientId,
+      reportedModel: null,
+    },
+  });
+  draft.effect({ kind: "start_turn", turn: { taskId: ids.task, prompt } });
+  return draft.accepted();
+};
+
+/** Effective effort reported by one PreToolUse hook record: `effort.level`, a bare `effort`, else CLAUDE_EFFORT. */
+const effortLevelOf = (hook: Record<string, unknown>): unknown => {
+  const effort = hook.effort;
+  if (typeof effort === "object" && effort !== null)
+    return ("level" in effort ? effort.level : undefined) ?? hook.env_claude_effort;
+  return effort ?? hook.env_claude_effort;
+};
+
+/** Why the effort evidence holds no effort level, or null when the hook reported samples. */
+const effortNote = ({ records, malformedLines, readError }: HookEvidence): string | null => {
+  if (records.length > 0) return null;
+  if (readError !== null)
+    return `hook evidence unreadable (${readError}); effective effort unreported`;
+  if (malformedLines > 0)
+    return `hook evidence unreadable (${malformedLines} malformed lines); effective effort unreported`;
+  return "no tool use in this turn; effective effort unreported";
+};
+
+/** Distinct effective-effort values reported by the PreToolUse hook. */
+const effortLevels = (hooks: readonly Record<string, unknown>[]): string[] => {
+  const levels = hooks.map(effortLevelOf);
+  return [...new Set(levels.filter((level): level is string => typeof level === "string"))];
+};
+
+/** An artifact a finished turn retains for its task, with the object its bytes were stored as or why they were not. */
+interface TurnEvidence {
+  ids: ArtifactIds;
+  kind: ArtifactKind;
+  name: string;
+  relation: Extract<LinkRelation, "runtime_transcript" | "task_output">;
+  originalPath: string | null;
+  retention: Retention;
+}
+
+/**
+ * Register one piece of a finished turn's evidence, linked to its task. Retention was decided before the turn's end
+ * was (the boundary stored the bytes), so these rows only record that outcome and commit or fail with the turn's end.
+ */
+const registerEvidence = (
+  draft: TransitionDraft,
+  input: { task: TaskState; evidence: TurnEvidence },
+): void => {
+  const { task, evidence } = input;
+  const artifactId = evidence.ids.artifact;
+  draft.write(
+    {
+      kind: "register_artifact",
+      input: {
+        id: artifactId,
+        createdAt: draft.at,
+        kind: evidence.kind,
+        logicalName: evidence.name,
+        mimeType: "application/x-ndjson",
+        producerExecutionId: task.executionId,
+        originalPath: evidence.originalPath,
+        ...captureFields(evidence.retention),
+      },
+    },
+    {
+      kind: "link_artifact",
+      input: {
+        id: evidence.ids.link,
+        conversationId: draft.draft.id,
+        artifactId,
+        relation: evidence.relation,
+        taskId: task.id,
+      },
+    },
+  );
+};
+
+/**
+ * The note a task's turn leaves for the next one, from the task as its end finds it (see `noteAfterTurn`). The
+ * boundary sets it whether or not the turn's end commits, because it is how the next turn learns what may have
+ * happened; it is memory only until that turn records it with its task_submitted.
+ */
+export const turnNote = (task: TaskState): string | null =>
+  noteAfterTurn({
+    interrupted: task.interrupted,
+    actions: classifyActions(callsOf(task), task.interrupted),
+    abandoned: task.abandoned.flatMap((callId) => callById(task, callId) ?? []),
+  });
+
+/**
+ * The runtime's turn has ended: every call takes its final status (a released call whose result never arrived is
+ * unknown, a held one can never run), the approvals the records still hold pending expire, the evidence the boundary
+ * stored is registered, and the execution and task end, with the outcome of an interruption and the error of a
+ * failure. The task leaves the state only once the boundary has answered its held prompts (`TURN_ENDED`).
+ */
+export const turnEndTransition: ConversationTransition<TurnEndedEvent, NoTask> = ({
+  state,
+  event,
+  now,
+}) => {
+  const { task } = state;
+  if (task?.id !== event.taskId) return rejected({ kind: "no_task" });
+  const { result, hooks, ids } = event;
+  const draft = new TransitionDraft({ state, now, origin: event.origin });
+  const opts = taskLinks(task);
+  const actions = classifyActions(callsOf(task), task.interrupted);
+  const unknown = actions.some((action) => action.status === "unknown");
+  const { status, error } = classifyTask({ interrupted: task.interrupted, result, unknown });
+  const efforts = effortLevels(hooks.evidence.records);
+  for (const action of actions)
+    draft.write({
+      kind: "update_tool_call",
+      id: action.tool_call_id,
+      fields: { updatedAt: draft.at, status: action.status, detail: action.detail },
+    });
+  for (const { call, bodies } of event.unresultedBodies)
+    for (const body of bodies)
+      draft.record(
+        MCP_BODY_EVENT[body.direction],
+        mcpPayload({ toolCallId: call.id, runtimeCallId: call.runtimeCallId }, body),
+        { ...opts, id: body.eventId },
+      );
+  for (const approvalId of event.stillPending)
+    draft.write({
+      kind: "update_approval",
+      id: approvalId,
+      fields: { status: "expired", consumedAt: draft.at, reason: "task ended" },
+    });
+  if (event.transcript)
+    registerEvidence(draft, {
+      task,
+      evidence: {
+        ids: ids.transcript,
+        kind: "runtime_transcript",
+        name: `turn-${state.turnCount}.stream.jsonl`,
+        relation: "runtime_transcript",
+        originalPath: result.streamLogPath,
+        retention: event.transcript,
+      },
+    });
+  if (hooks.retention)
+    registerEvidence(draft, {
+      task,
+      evidence: {
+        ids: ids.hooks,
+        kind: "effort_evidence",
+        name: `turn-${state.turnCount}.hooks.jsonl`,
+        relation: "task_output",
+        originalPath: null,
+        retention: hooks.retention,
+      },
+    });
+  draft.write({
+    kind: "update_execution",
+    id: task.executionId,
+    fields: {
+      status: executionStatusFor(task.interrupted, result),
+      endedAt: draft.at,
+      reportedModel: task.reportedModel,
+      reportedEffort: efforts.length === 1 ? (efforts[0] ?? null) : null,
+      effortEvidence: {
+        source: "PreToolUse hook",
+        values: efforts,
+        samples: hooks.evidence.records.length,
+        malformed_lines: hooks.evidence.malformedLines,
+        read_error: hooks.evidence.readError,
+        note: effortNote(hooks.evidence),
+      },
+    },
+  });
+  if (task.interrupted)
+    draft.emit(
+      {
+        type: "interruption_outcome",
+        payload: {
+          conversation_id: state.id,
+          task_id: task.id,
+          task_status: status,
+          actions,
+          runtime_cancellation: result.runtimeCancellation,
+        },
+      },
+      { ...opts, id: ids.outcome },
+    );
+  draft.write({
+    kind: "update_task",
+    id: task.id,
+    fields: { status, finishedAt: draft.at },
+  });
+  draft.emit(
+    {
+      type: "task_finished",
+      payload: {
+        conversation_id: state.id,
+        task_id: task.id,
+        status,
+        ...(error ? { error } : {}),
+        usage: result.summary?.usage ?? undefined,
+      },
+    },
+    { ...opts, id: ids.finished },
+  );
+  if (error)
+    draft.emit(
+      {
+        type: "error",
+        payload: {
+          code: "runtime_failure",
+          message: error,
+          conversation_id: state.id,
+          task_id: task.id,
+        },
+      },
+      { ...opts, id: ids.error },
+    );
+  const finalStatus = new Map(actions.map((action) => [action.tool_call_id, action.status]));
+  draft.advanceTask(task.id, (next) => ({
+    ...withCallStatuses(next, finalStatus),
+    pendingApprovals: new Map(),
+    status,
+  }));
+  return draft.accepted();
+};
+
+/**
+ * A client's diagnostics about the conversation: the client_diagnostics event, under the task if there is one, and the
+ * diagnostics row that names it, committed together. A report about no conversation, or another one, is not this
+ * machine's to decide; the boundary records its row alone.
+ */
+export const diagnosticsTransition: ConversationTransition<DiagnosticsReportedEvent, never> = ({
+  state,
+  event,
+  now,
+}) => {
+  const { from, diagnostics, ids } = event;
+  const taskId = state.task?.id ?? null;
+  const draft = new TransitionDraft({ state, now, origin: event.origin });
+  draft.record(
+    "client_diagnostics",
+    {
+      client_id: from.clientId,
+      captured_at: diagnostics.captured_at,
+      connection_state: diagnostics.connection_state,
+    },
+    { id: ids.event, taskId },
+  );
+  draft.write({
+    kind: "record_diagnostics",
+    input: {
+      id: ids.diagnostics,
+      receivedAt: draft.at,
+      conversationId: state.id,
+      clientId: from.clientId,
+      clientConnectionId: from.connectionId,
+      taskId,
+      eventId: ids.event,
+      capturedAt: diagnostics.captured_at,
+      state: diagnostics,
+    },
+  });
+  return draft.accepted();
+};
+
+/**
+ * The active connection closed. Disconnection is not consent: pending approvals stay pending, and the event lists
+ * them, in request order, under the task if there is one.
+ */
+export const disconnectTransition: ConversationTransition<ClientDisconnectedEvent, never> = ({
+  state,
+  event,
+  now,
+}) => {
+  const draft = new TransitionDraft({ state, now, origin: event.origin });
+  draft.record(
+    "client_disconnected",
+    {
+      connection_id: event.connectionId,
+      pending_approvals: [...(state.task?.pendingApprovals.keys() ?? [])],
+    },
+    { id: event.ids.event, taskId: state.task?.id ?? null },
+  );
+  return draft.accepted();
+};
+
 /** Every transition of the conversation, as one kernel machine's `decide`. */
 export const decideConversation: Decide<
   ConversationState,
@@ -998,6 +1484,18 @@ export const decideConversation: Decide<
   EngineEffect
 > = ({ state, event, now }) =>
   match(event)
+    .with({ kind: "submit_task" }, (submitted): ConversationDecision =>
+      taskSubmissionTransition({ state, event: submitted, now }),
+    )
+    .with({ kind: "turn_ended" }, (ended): ConversationDecision =>
+      turnEndTransition({ state, event: ended, now }),
+    )
+    .with({ kind: "client_diagnostics" }, (reported): ConversationDecision =>
+      diagnosticsTransition({ state, event: reported, now }),
+    )
+    .with({ kind: "client_disconnected" }, (disconnected): ConversationDecision =>
+      disconnectTransition({ state, event: disconnected, now }),
+    )
     .with({ kind: "approval_decision" }, (decision): ConversationDecision =>
       approvalDecisionTransition({ state, event: decision, now }),
     )
