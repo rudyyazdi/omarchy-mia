@@ -1392,11 +1392,15 @@ describe("record times", () => {
     expect((await client.sendDiagnostics()).disposition).toBe("accepted");
     expect((await client.heartbeat()).disposition).toBe("accepted");
     // The session's own report came before the stepping clock, so only these two rows are stamped after `start`.
-    const [reported, heartbeat] = rows<{ received_at: string; event_id: string | null }>(
+    const stamped = rows<{ received_at: string; event_id: string | null }>(
       "SELECT received_at, event_id FROM diagnostics WHERE received_at > ? ORDER BY received_at",
       start,
     );
-    const snapshot = must(reported, "diagnostic_snapshot row");
+    expect(stamped).toHaveLength(2);
+    const [snapshot, heartbeat] = [
+      must(stamped[0], "diagnostic_snapshot row"),
+      must(stamped[1], "heartbeat row"),
+    ];
     const event = must(
       rows<{ received_at: string }>(
         "SELECT received_at FROM events WHERE id = ? AND type = 'client_diagnostics'",
@@ -1405,8 +1409,8 @@ describe("record times", () => {
       "client_diagnostics event",
     );
     expect(event.received_at).toBe(snapshot.received_at);
-    expect(must(heartbeat, "heartbeat row")).toMatchObject({ event_id: null });
-    expect(must(heartbeat, "heartbeat row").received_at > snapshot.received_at).toBe(true);
+    expect(heartbeat.event_id).toBeNull();
+    expect(heartbeat.received_at > snapshot.received_at).toBe(true);
   });
 });
 

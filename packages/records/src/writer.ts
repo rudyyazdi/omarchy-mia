@@ -165,8 +165,9 @@ export interface ExecutionUsage {
  * diagnostics recorded with them) take their id from the caller, so a transition can name a record before it is
  * written: an approval_requested event carries its approval's id, the approval row its requesting event's, a
  * conversation its provenance set's, and a diagnostics row its client_diagnostics event's. Callers generate them
- * with `newId`; a reused id fails the insert, and with it the transaction. The row a client's command creates
- * (commands) is still named here: it is recorded before the command runs, outside any transition.
+ * with `newId`; a reused id fails the insert, and with it the transaction. A diagnostics row takes both from its
+ * caller even outside a transition (a heartbeat's). The row a client's command creates (commands) is still named
+ * here: it is recorded before the command runs, outside any transition.
  *
  * The same rows take their timestamps from the caller too (`startedAt`, `createdAt`, `receivedAt`, `updatedAt`,
  * `requestedAt`, `consumedAt`), as ISO strings: a pure transition decides with the time it is handed, so the
