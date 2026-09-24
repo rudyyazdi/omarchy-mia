@@ -72,7 +72,10 @@ import {
  * drawn at the boundary. It reads nothing else and changes nothing, so the engine commits what it returns and a
  * test checks it directly. It covers every transition of a conversation: its start, task submission, how approvals
  * end (a user's decision, an interruption, and the runtime abandoning a held prompt), the runtime's permission
- * requests, the events the runtime reports, the turn's end, and the client's diagnostics and disconnect.
+ * requests, the events the runtime reports, the turn's end, and the client's diagnostics and disconnect. The few
+ * changes the records never hold (the runtime's exit, the note of a turn whose end was not recorded, a finished task
+ * leaving) and the #165 expiry are transitions too, which record nothing (`memoryOnly`), so the state changes only
+ * through this machine.
  *
  * Its state is `ConversationState | null`: one machine per conversation, null until that conversation's start
  * commits. The start is the one transition decided from null, and every other needs a started conversation. The
@@ -111,6 +114,14 @@ export interface PromptAbandonedEvent {
   callId: string;
   /** The approval_resolved event of the expiry, if its approval is still pending. */
   ids: { resolved: string };
+}
+
+/**
+ * The expiry a `PromptAbandonedEvent` decided could not be committed. It carries that event's origin, task, call and
+ * ids, and is decided from the state that one was decided from, since nothing runs between the failed commit and it.
+ */
+export interface AbandonmentUnrecordedEvent extends Omit<PromptAbandonedEvent, "kind"> {
+  kind: "abandonment_unrecorded";
 }
 
 /**
@@ -281,6 +292,27 @@ export interface TurnEndedEvent {
   ids: TurnEndIds;
 }
 
+/**
+ * The runtime running task `taskId`'s turn has exited, and the boundary is about to read what the turn left before
+ * recording its end (`TurnEndedEvent`). Nothing records the exit until then.
+ */
+export interface RuntimeExitedEvent {
+  kind: "runtime_exited";
+  taskId: string;
+}
+
+/** The end of task `taskId`'s turn could not be recorded: its commit failed, or its records could not be built. */
+export interface TurnUnrecordedEvent {
+  kind: "turn_unrecorded";
+  taskId: string;
+}
+
+/** The boundary has answered every prompt task `taskId`'s ended turn still held, so the task leaves the conversation. */
+export interface TaskClearedEvent {
+  kind: "task_cleared";
+  taskId: string;
+}
+
 /** A client reports its diagnostics about the conversation, over connection `from.connectionId`. */
 export interface DiagnosticsReportedEvent {
   kind: "client_diagnostics";
@@ -343,12 +375,16 @@ export interface ConversationStartEvent {
 export type ConversationEvent =
   | ConversationStartEvent
   | TaskSubmittedEvent
+  | RuntimeExitedEvent
   | TurnEndedEvent
+  | TurnUnrecordedEvent
+  | TaskClearedEvent
   | DiagnosticsReportedEvent
   | ClientDisconnectedEvent
   | ApprovalDecisionEvent
   | InterruptTaskEvent
   | PromptAbandonedEvent
+  | AbandonmentUnrecordedEvent
   | PermissionRequestEvent
   | PermissionRefusedEvent
   | RuntimeEventReceived;
@@ -429,6 +465,18 @@ export type ConversationTransition<Event, Rejection> = (input: {
 const rejected = <Rejection>(rejection: Rejection): { kind: "rejected"; rejection: Rejection } => ({
   kind: "rejected",
   rejection,
+});
+
+/**
+ * A memory-only transition: it moves the state to `next` and records and performs nothing, for a change the records
+ * never hold (the runtime's exit, the next turn's note, a finished task leaving) or, for #165, cannot. Committing no
+ * records opens no transaction (`commitRecords`), so a catalog that cannot commit cannot refuse it.
+ */
+const memoryOnly = (next: ConversationState): BuiltTransition => ({
+  kind: "accepted",
+  next,
+  records: [],
+  effects: [],
 });
 
 /** A user's decision is recorded before any release; the held call changes and is answered only after the commit. */
@@ -609,6 +657,25 @@ export const abandonmentTransition: ConversationTransition<
     }),
   );
   return draft.accepted();
+};
+
+/**
+ * An abandonment whose expiry could not be committed: memory takes the expiry anyway, recording and delivering
+ * nothing. The runtime was denied whatever the records say, so a later decision must find nothing pending and cannot
+ * release the call. The catalog keeps the approval pending until the turn's end expires every approval it still holds
+ * pending (`TurnEndedEvent.stillPending`). Unlike the other memory-only transitions, this one departs from what the
+ * records say (#165).
+ */
+export const abandonmentUnrecordedTransition: ConversationTransition<
+  AbandonmentUnrecordedEvent,
+  AbandonmentRejection
+> = ({ state, event, now }) => {
+  const expired = abandonmentTransition({
+    state,
+    event: { ...event, kind: "prompt_abandoned" },
+    now,
+  });
+  return expired.kind === "rejected" ? expired : memoryOnly(expired.next);
 };
 
 /** A new binding revision to propose, with the ids drawn for it. */
@@ -1333,9 +1400,9 @@ const registerEvidence = (
 };
 
 /**
- * The note a task's turn leaves for the next one, from the task as its end finds it (see `noteAfterTurn`). The
- * boundary sets it whether or not the turn's end commits, because it is how the next turn learns what may have
- * happened; it is memory only until that turn records it with its task_submitted.
+ * The note a task's turn leaves for the next one, from the task as its end finds it (see `noteAfterTurn`). It is set
+ * whether or not the turn's end commits, by the turn's end or by `turnUnrecordedTransition`, because it is how the
+ * next turn learns what may have happened; it is memory only until that turn records it with its task_submitted.
  */
 export const turnNote = (task: TaskState): string | null =>
   noteAfterTurn({
@@ -1344,11 +1411,56 @@ export const turnNote = (task: TaskState): string | null =>
     abandoned: task.abandoned.flatMap((callId) => callById(task, callId) ?? []),
   });
 
+/** The conversation carrying the note `task`'s turn leaves, if it leaves one (see `turnNote`). */
+const withTurnNote = (state: ConversationState, task: TaskState): ConversationState => {
+  const note = turnNote(task);
+  return note === null ? state : { ...state, pendingNote: note };
+};
+
+/**
+ * The runtime has exited: its gate closes and the task remembers the runtime ended, before the boundary awaits the
+ * reads its turn's end records, so a decision or interruption handled meanwhile releases no call to, and records no
+ * interruption of, a runtime that is gone; an approval decided then ends blocked. Memory only: the task stays running
+ * in the records until its turn's end commits.
+ */
+export const runtimeExitTransition: ConversationTransition<RuntimeExitedEvent, NoTask> = ({
+  state,
+  event,
+}) =>
+  state.task?.id === event.taskId
+    ? memoryOnly(
+        withTask(state, event.taskId, (task) => ({ ...task, runtimeEnded: true, gateOpen: false })),
+      )
+    : rejected({ kind: "no_task" });
+
+/** The turn's end could not be recorded: memory still takes the note it leaves (see `turnNote`), and nothing else. */
+export const turnUnrecordedTransition: ConversationTransition<TurnUnrecordedEvent, NoTask> = ({
+  state,
+  event,
+}) =>
+  state.task?.id === event.taskId
+    ? memoryOnly(withTurnNote(state, state.task))
+    : rejected({ kind: "no_task" });
+
+/**
+ * The task leaves the conversation once its turn has ended, whether or not that end was recorded, and the boundary has
+ * answered the prompts it still held (`TURN_ENDED`), so the next submission can start. Memory only: the records
+ * already say how the task ended, or keep it running when they could not.
+ */
+export const taskClearedTransition: ConversationTransition<TaskClearedEvent, NoTask> = ({
+  state,
+  event,
+}) =>
+  state.task?.id === event.taskId
+    ? memoryOnly({ ...state, task: null })
+    : rejected({ kind: "no_task" });
+
 /**
  * The runtime's turn has ended: every call takes its final status (a released call whose result never arrived is
  * unknown, a held one can never run), the approvals the records still hold pending expire, the evidence the boundary
  * stored is registered, and the execution and task end, with the outcome of an interruption and the error of a
- * failure. The task leaves the state only once the boundary has answered its held prompts (`TURN_ENDED`).
+ * failure, and the conversation carries the note the turn leaves (`turnNote`). The task leaves the state only once the
+ * boundary has answered its held prompts (`taskClearedTransition`).
  */
 export const turnEndTransition: ConversationTransition<TurnEndedEvent, NoTask> = ({
   state,
@@ -1476,6 +1588,8 @@ export const turnEndTransition: ConversationTransition<TurnEndedEvent, NoTask> =
     pendingApprovals: new Map(),
     status,
   }));
+  // From the task as the end found it, before its calls took their final status.
+  draft.advance(withTurnNote(draft.draft, task));
   return draft.accepted();
 };
 
@@ -1631,8 +1745,23 @@ export const decideConversation: Decide<
         taskSubmissionTransition({ state: started, event: submitted, now }),
       ),
     )
+    .with({ kind: "runtime_exited" }, (exited) =>
+      whenStarted(state, (started) =>
+        runtimeExitTransition({ state: started, event: exited, now }),
+      ),
+    )
     .with({ kind: "turn_ended" }, (ended) =>
       whenStarted(state, (started) => turnEndTransition({ state: started, event: ended, now })),
+    )
+    .with({ kind: "turn_unrecorded" }, (unrecorded) =>
+      whenStarted(state, (started) =>
+        turnUnrecordedTransition({ state: started, event: unrecorded, now }),
+      ),
+    )
+    .with({ kind: "task_cleared" }, (cleared) =>
+      whenStarted(state, (started) =>
+        taskClearedTransition({ state: started, event: cleared, now }),
+      ),
     )
     .with({ kind: "client_diagnostics" }, (reported) =>
       whenStarted(state, (started) =>
@@ -1657,6 +1786,11 @@ export const decideConversation: Decide<
     .with({ kind: "prompt_abandoned" }, (abandoned) =>
       whenStarted(state, (started) =>
         abandonmentTransition({ state: started, event: abandoned, now }),
+      ),
+    )
+    .with({ kind: "abandonment_unrecorded" }, (unrecorded) =>
+      whenStarted(state, (started) =>
+        abandonmentUnrecordedTransition({ state: started, event: unrecorded, now }),
       ),
     )
     .with({ kind: "permission_request" }, (request) =>

@@ -138,13 +138,16 @@ const writeRecord = (writer: RecordWriter, record: EngineRecord): CommittedChang
 /**
  * Writes `records` in order in one catalog transaction and returns what each committed, aligned by index with
  * `records`. A record that fails rolls the whole transaction back and throws, so either every record commits or
- * none does.
+ * none does. No records open no transaction: a memory-only transition commits nothing, so a catalog that cannot
+ * commit does not refuse it.
  */
 export const commitRecords = (
   writer: RecordWriter,
   records: readonly EngineRecord[],
 ): CommittedChange[] =>
-  writer.catalog.transaction(() => records.map((record) => writeRecord(writer, record)));
+  records.length === 0
+    ? []
+    : writer.catalog.transaction(() => records.map((record) => writeRecord(writer, record)));
 
 /** The sequence the catalog gave the committed event `eventId`; it throws when `changes` holds no such event. */
 export const eventSequence = (changes: readonly CommittedChange[], eventId: string): number => {

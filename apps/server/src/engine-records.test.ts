@@ -63,4 +63,17 @@ describe("commitRecords", () => {
       { kind: "event", id: "evt-1", sequence: 1 },
     ]);
   });
+
+  it("opens no transaction for no records, so a catalog that cannot commit does not refuse them", () => {
+    const root = mkdtempSync(join(tmpdir(), "mia-engine-records-closed-"));
+    try {
+      const closed = Catalog.openSync(root);
+      closed.close();
+      const writer = new RecordWriter(closed);
+      expect(commitRecords(writer, [])).toEqual([]);
+      expect(() => commitRecords(writer, conversation)).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
