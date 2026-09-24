@@ -1,4 +1,6 @@
 import { resolve } from "node:path";
+import { match } from "ts-pattern";
+import { errorMessage } from "@mia/protocol";
 import {
   Catalog,
   diagnosticsViews,
@@ -20,6 +22,8 @@ import {
   formatTask,
   formatUnresolved,
 } from "./format.ts";
+import { openInBrowser } from "./browser.ts";
+import { startWatch, WATCH_TIMERS } from "./watch-server.ts";
 
 /**
  * The global options every `mia debug` subcommand receives: commander's, with `state` already
@@ -111,3 +115,45 @@ export const verifyExportDirectory = (exportDirectory: string): boolean => {
 
 export const reconcile = (options: GlobalOptions): void =>
   withCatalog(options, (catalog) => out(reconcileObjectsSync(catalog)));
+
+/**
+ * `mia debug watch`: serves the live view of one conversation until `signal` aborts (Ctrl-C) or the page closes,
+ * and returns the exit code. It opens the page in a browser unless `open` is false (`--no-open`).
+ */
+export const watch = async (
+  options: GlobalOptions,
+  conversationId: string,
+  run: { open: boolean; signal: AbortSignal },
+): Promise<number> => {
+  const catalog = Catalog.openSync(resolve(options.state), { readonly: true });
+  try {
+    const started = await startWatch({
+      catalog,
+      conversationId,
+      signal: run.signal,
+      timers: WATCH_TIMERS,
+    });
+    if (started.kind === "unknown_conversation") {
+      console.error(`mia debug watch: conversation ${conversationId} not found`);
+      return 1;
+    }
+    out(`watching ${conversationId} at ${started.watch.url} (Ctrl-C to stop)`);
+    if (run.open) openInBrowser(started.watch.url);
+    return match(await started.watch.ended)
+      .with({ kind: "interrupted" }, () => {
+        out(`stopped watching ${conversationId}`);
+        return 0;
+      })
+      .with({ kind: "page_closed" }, () => {
+        out(`the page closed; stopped watching ${conversationId}`);
+        return 0;
+      })
+      .with({ kind: "failed" }, ({ error }) => {
+        console.error(`mia debug watch: ${errorMessage(error)}`);
+        return 1;
+      })
+      .exhaustive();
+  } finally {
+    catalog.close();
+  }
+};

@@ -1,19 +1,31 @@
 export { emptySnapshotTables } from "./schema.ts";
 export type {
+  ApprovalRow,
   ArtifactKind,
   CommandReply,
   CaptureStatus,
+  ConversationRow,
+  EventRow,
+  ExecutionRow,
   ExecutionStatus,
   JournalEventType,
   LinkRelation,
   ProvenanceEntryRow,
   ProvenanceRole,
+  TaskRow,
+  ToolCallRow,
 } from "./schema.ts";
 export { Catalog, defaultStateDir, newId, nowIso } from "./catalog.ts";
 export { ObjectStore, type StoredObject } from "./objects.ts";
 export { RecordWriter } from "./writer.ts";
 export type { RecordedCommand } from "./writer.ts";
-export { diagnosticsViews, listConversations, snapshotConversation, taskViews } from "./queries.ts";
+export {
+  diagnosticsViews,
+  findConversation,
+  listConversations,
+  snapshotConversation,
+  taskViews,
+} from "./queries.ts";
 export type {
   ConversationSnapshot,
   ConversationSummary,

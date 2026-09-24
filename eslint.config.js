@@ -297,6 +297,11 @@ export default tseslint.config(
     },
   },
   {
+    // The `mia debug watch` page runs in a browser.
+    files: ["apps/debug-cli/src/page/**/*.js"],
+    languageOptions: { globals: globals.browser },
+  },
+  {
     // Enforces AGENTS.md, Node: every promise is handled, and an async function is never passed
     // where the caller ignores its result. Both need type information, so only TypeScript files.
     files: ["**/*.ts"],

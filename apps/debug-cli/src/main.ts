@@ -4,20 +4,9 @@
  */
 import { Command } from "commander";
 import { defaultStateDir } from "@mia/records";
-import {
-  exportToDirectory,
-  reconcile,
-  showArtifacts,
-  showConversation,
-  showConversations,
-  verifyExportDirectory,
-  type GlobalOptions,
-} from "./commands.ts";
+import * as commands from "./commands.ts";
 
-/**
- * Bad arguments exit 2 with commander's own help for `mia debug` on stderr, which lists the
- * subcommands commander already defines plus the global options, so no synopsis is written twice.
- */
+// Bad arguments exit 2 with commander's own help for `mia debug` (its subcommands and the global options).
 const usage: () => never = () => {
   console.error(debug.helpInformation());
   process.exit(2);
@@ -34,27 +23,38 @@ const program = new Command()
   })
   .configureOutput({ writeErr: () => undefined })
   .configureHelp({ showGlobalOptions: true });
-const options = (): GlobalOptions => {
-  const { state, ...rest } = program.opts<Omit<GlobalOptions, "state"> & { state?: string }>();
+const options = (): commands.GlobalOptions => {
+  const { state, ...rest } = program.opts<
+    Omit<commands.GlobalOptions, "state"> & { state?: string }
+  >();
   return { ...rest, state: state ?? defaultStateDir(process.env) };
 };
 
 const debug = program.command("debug").allowExcessArguments();
 const subcommand = (spec: string) => debug.command(spec).allowExcessArguments();
 
-subcommand("conversations").action(() => showConversations(options()));
+subcommand("conversations").action(() => commands.showConversations(options()));
 subcommand("conversation <conversation-id>").action((id: string) =>
-  showConversation(options(), id),
+  commands.showConversation(options(), id),
 );
-subcommand("artifacts <conversation-id>").action((id: string) => showArtifacts(options(), id));
+subcommand("artifacts <conversation-id>").action((id: string) =>
+  commands.showArtifacts(options(), id),
+);
 subcommand("export <conversation-id>").action((id: string) => {
   const { output, ...rest } = options();
   if (!output) usage();
-  exportToDirectory({ ...rest, output }, id);
+  commands.exportToDirectory({ ...rest, output }, id);
 });
 subcommand("verify <export-directory>").action((directory: string) =>
-  process.exit(verifyExportDirectory(directory) ? 0 : 1),
+  process.exit(commands.verifyExportDirectory(directory) ? 0 : 1),
 );
-subcommand("reconcile").action(() => reconcile(options()));
+subcommand("reconcile").action(() => commands.reconcile(options()));
+subcommand("watch <conversation-id>")
+  .option("--no-open", "print the page's address without opening a browser")
+  .action(async (id: string, { open }: { open: boolean }) => {
+    const interrupt = new AbortController();
+    process.once("SIGINT", () => interrupt.abort());
+    process.exitCode = await commands.watch(options(), id, { open, signal: interrupt.signal });
+  });
 
-program.parse();
+await program.parseAsync();

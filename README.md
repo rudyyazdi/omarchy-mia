@@ -47,6 +47,7 @@ npm run server -- --config path/to/profile.json      # loopback WebSocket, print
 npm run client -- --config path/to/profile.json      # terminal client: text in, streamed text out, /approve /reject /interrupt
 npm run mia -- debug conversations --state <stateDirectory>
 npm run mia -- debug conversation <id> --state <stateDirectory>
+npm run mia -- debug watch <id> --state <stateDirectory>        # live web view on 127.0.0.1; --no-open prints the address only
 npm run mia -- debug export <id> --output ./exports/<id> --state <stateDirectory>
 npm run mia -- debug verify ./exports/<id>
 ```

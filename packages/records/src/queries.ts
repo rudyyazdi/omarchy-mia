@@ -44,6 +44,13 @@ export const listConversations = (catalog: Catalog): ConversationSummary[] =>
       (SELECT COALESCE(MAX(sequence), 0) FROM events e WHERE e.conversation_id = c.id) AS last_sequence
     FROM conversations c ORDER BY c.started_at DESC, c.id DESC`);
 
+/** The conversation's row, or undefined when the catalog holds no conversation with that id. */
+export const findConversation = (
+  catalog: Catalog,
+  conversationId: string,
+): ConversationRow | undefined =>
+  catalog.get<ConversationRow>("SELECT * FROM conversations WHERE id = ?", conversationId);
+
 export const UnresolvedReferenceSchema = z.object({
   table: z.string(),
   id: z.string(),
@@ -81,10 +88,7 @@ export const snapshotConversation = (
   const db = catalog.db;
   db.exec("BEGIN");
   try {
-    const conversation = catalog.get<ConversationRow>(
-      "SELECT * FROM conversations WHERE id = ?",
-      conversationId,
-    );
+    const conversation = findConversation(catalog, conversationId);
     if (!conversation) throw new Error(`conversation ${conversationId} not found`);
     const cutoff =
       catalog.get<{ cutoff: number }>(
