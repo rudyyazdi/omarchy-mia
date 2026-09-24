@@ -174,6 +174,26 @@ describe("approval decisions", () => {
     expect(releasedBy(next, "appr_1")).toBe(false);
   });
 
+  it("records an approval that comes after the gate closed, or from an older epoch, as blocked and unreleased", () => {
+    for (const state of [awaiting([1], { gateOpen: false }), awaiting([1], { epoch: 1 })]) {
+      const { next, records, effects } = accepted(decide(state, decision()));
+      expect(labels(records)).toEqual([
+        "approval_resolved",
+        "update_approval",
+        "update_tool_call",
+        "update_task",
+      ]);
+      expect(records[1]).toMatchObject({ fields: { status: "approved" } });
+      expect(records[2]).toMatchObject({ fields: { status: "blocked_gate" } });
+      expect(effectLabels(effects)).toEqual([
+        "deliver approval_resolved",
+        "notify call_1 blocked_gate",
+        "answer appr_1 deny",
+      ]);
+      expect(releasedBy(next, "appr_1")).toBe(false);
+    }
+  });
+
   it("refuses a decision from another client, on an approval not pending, or for another task", () => {
     const state = awaiting([1]);
     const refusal = (event: ApprovalDecisionEvent) => {
@@ -219,6 +239,9 @@ describe("interruptions", () => {
       { id: "appr_2", fields: { status: "invalidated", decisionEventId: "evt_requested" } },
       { id: "appr_1", fields: { status: "invalidated", decisionEventId: "evt_requested" } },
     ]);
+    expect(records[0]).toMatchObject({
+      input: { id: "evt_requested", clientId: "client_owner", clientConnectionId: "conn_1" },
+    });
     expect(records[2]).toMatchObject({
       input: { id: "evt_resolved_2", causedByEventId: "evt_requested" },
     });
@@ -289,6 +312,16 @@ describe("prompt abandonment", () => {
       id: "appr_1",
       fields: { status: "expired", reason: "runtime abandoned the prompt" },
     });
+    // No decision caused the expiry: the event names no cause and the approval no deciding event.
+    expect(records[0]).not.toHaveProperty("fields.decisionEventId");
+    expect(records[1]).toMatchObject({
+      input: {
+        id: "evt_expired",
+        causedByEventId: null,
+        clientId: "client_owner",
+        clientConnectionId: "conn_1",
+      },
+    });
     expect(records[3]).toMatchObject({ fields: { status: "running" } });
     // The runtime already has its denial, and the client learns of the call through approval_resolved alone.
     expect(effectLabels(effects)).toEqual(["deliver approval_resolved"]);
@@ -298,6 +331,9 @@ describe("prompt abandonment", () => {
       abandoned: ["call_1"],
     });
     expect(next.task && callById(next.task, "call_1")?.status).toBe("invalidated");
+    expect(state.task).toMatchObject({ status: "awaiting_approval", abandoned: [] });
+    expect(state.task?.pendingApprovals.has("appr_1")).toBe(true);
+    expect(state.task && callById(state.task, "call_1")?.status).toBe("awaiting_approval");
   });
 
   it("changes nothing for an approval no longer pending, or a call or task it does not hold", () => {

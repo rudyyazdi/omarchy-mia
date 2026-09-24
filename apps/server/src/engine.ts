@@ -549,7 +549,7 @@ export class Engine {
   }
 
   /**
-   * Perform one effect of a committed transition, once its next state has replaced the engine's (see `tx`). It
+   * Perform one effect of a committed transition, once its next state has replaced the engine's (see `commit`). It
    * reads the connection, the held prompts and the active turn as they are now, not as they were when the effect
    * was queued.
    */
@@ -1608,17 +1608,6 @@ export class Engine {
     this.transition.recordCallChange(call);
     this.transition.commitCallChange(task, call);
     this.transition.recordTaskStatus(task, taskStatus);
-  }
-
-  /**
-   * Record the task's status and move the draft to it (inside tx). It writes even an unchanged status, as every
-   * step that may change it does, so the records need no comparison against what an earlier step of the same
-   * transaction set. The write and the draft both keep transaction order, so the last one wins in the records and in
-   * memory alike (a superseded approval resumes the task, then the new revision's ask holds it).
-   */
-  private recordTaskStatus(task: TaskState, status: TaskStatus): void {
-    this.transition.write({ kind: "update_task", id: task.id, fields: { status } });
-    this.transition.advanceTask(task.id, (next) => ({ ...next, status }));
   }
 
   // ---------------------------------------------------------------- approval controller

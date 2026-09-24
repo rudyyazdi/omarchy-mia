@@ -1,3 +1,4 @@
+import type { Decision } from "@mia/kernel";
 import type { EventPayload, TaskStatus } from "@mia/protocol";
 import type { JournalEventType } from "@mia/records";
 import {
@@ -70,7 +71,7 @@ export class TransitionDraft {
 
   /** The conversation as the transition leaves it so far: what its records name, and what it moves to. */
   get draft(): ConversationState {
-    if (!this.next) throw new Error("engine has no active conversation");
+    if (!this.next) throw new Error("the transition has no conversation to change");
     return this.next;
   }
 
@@ -100,12 +101,10 @@ export class TransitionDraft {
   }
 
   /** What the transition built as a kernel machine's accepted decision, which always has a next state. */
-  accepted(): {
-    kind: "accepted";
-    next: ConversationState;
-    records: readonly EngineRecord[];
-    effects: readonly EngineEffect[];
-  } {
+  accepted(): Extract<
+    Decision<ConversationState, never, EngineRecord, EngineEffect>,
+    { kind: "accepted" }
+  > {
     return { kind: "accepted", next: this.draft, records: this.records, effects: this.effects };
   }
 
