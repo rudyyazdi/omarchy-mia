@@ -288,20 +288,45 @@ export const storeProvenance = async (
   return { ...plan, items };
 };
 
-/** How the rows of one commit are named and stamped: fresh ids, and the commit's one reading of the clock. */
-export interface RowNaming {
-  newId: NewId;
-  createdAt: string;
+/** A stored plan item with the ids of the rows it records: its entry, and for a retained one its artifact and link. */
+export type NamedProvenanceItem =
+  | (Extract<ProvenanceItem<StoredObject>, { availability: "unavailable" }> & { entryId: string })
+  | (Extract<ProvenanceItem<StoredObject>, { availability: "retained" }> & {
+      entryId: string;
+      artifactId: string;
+      linkId: string;
+    });
+
+/** A stored plan with the ids of every row it records, drawn before the start's transaction opens. */
+export interface NamedProvenancePlan extends Omit<ProvenancePlan<StoredObject>, "items"> {
+  setId: string;
+  items: NamedProvenanceItem[];
 }
 
-/** Records a stored provenance plan (inside the start's transaction); it does no file I/O. */
+/**
+ * Draws the ids a stored plan's rows take, before the transaction that records them, so recording it only writes
+ * rows named up front, as a pure `decide` will.
+ */
+export const nameProvenance = (
+  plan: ProvenancePlan<StoredObject>,
+  newId: NewId,
+): NamedProvenancePlan => ({
+  ...plan,
+  setId: newId("prov"),
+  items: plan.items.map((item): NamedProvenanceItem =>
+    item.availability === "unavailable"
+      ? { ...item, entryId: newId("pe") }
+      : { ...item, entryId: newId("pe"), artifactId: newId("art"), linkId: newId("link") },
+  ),
+});
+
+/** Records a stored, named provenance plan (inside the start's transaction), stamped `createdAt`; it does no file I/O. */
 export const recordConversationProvenance = (
   writer: RecordWriter,
-  plan: ProvenancePlan<StoredObject>,
-  naming: RowNaming,
+  plan: NamedProvenancePlan,
+  createdAt: string,
 ): ProvenanceSummary => {
-  const { newId, createdAt } = naming;
-  const setId = newId("prov");
+  const { setId } = plan;
   writer.createProvenanceSet({ id: setId, createdAt, description: plan.description });
   const entries: ProvenanceSummary["entries"] = [];
   const artifacts = new Map<ProvenanceRole, string>();
@@ -309,7 +334,7 @@ export const recordConversationProvenance = (
   for (const item of plan.items) {
     if (item.availability === "unavailable") {
       writer.addProvenanceEntry({
-        id: newId("pe"),
+        id: item.entryId,
         provenanceSetId: setId,
         role: item.role,
         availability: "unavailable",
@@ -323,7 +348,7 @@ export const recordConversationProvenance = (
       });
       continue;
     }
-    const artifactId = newId("art");
+    const { artifactId } = item;
     writer.registerArtifact({
       id: artifactId,
       createdAt,
@@ -334,7 +359,7 @@ export const recordConversationProvenance = (
       stored: item.content,
     });
     writer.addProvenanceEntry({
-      id: newId("pe"),
+      id: item.entryId,
       provenanceSetId: setId,
       role: item.role,
       version: item.version,
@@ -363,20 +388,19 @@ export const recordConversationProvenance = (
   };
 };
 
-/** Links every artifact a recorded provenance set retained into its conversation (inside the start's transaction). */
+/** Links every artifact a recorded provenance plan retained into its conversation (inside the start's transaction). */
 export const linkConversationProvenance = (
   writer: RecordWriter,
-  input: { conversationId: string; provenance: ProvenanceSummary },
-  newId: NewId,
+  input: { conversationId: string; plan: NamedProvenancePlan },
 ): void => {
-  const { conversationId, provenance } = input;
-  for (const entry of provenance.entries)
-    if (entry.artifact_id !== null)
+  const { conversationId, plan } = input;
+  for (const item of plan.items)
+    if (item.availability === "retained")
       writer.linkArtifact({
-        id: newId("link"),
+        id: item.linkId,
         conversationId,
-        artifactId: entry.artifact_id,
+        artifactId: item.artifactId,
         relation: "provenance",
-        provenanceSetId: provenance.provenance_set_id,
+        provenanceSetId: plan.setId,
       });
 };

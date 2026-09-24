@@ -36,6 +36,7 @@ import {
 import {
   type ArtifactKind,
   type Catalog,
+  type IdPrefix,
   type NewId,
   type JournalEventType,
   type LinkRelation,
@@ -52,6 +53,7 @@ import {
 import type { ArtifactCollector } from "./artifact-collector.ts";
 import {
   linkConversationProvenance,
+  nameProvenance,
   planConversationProvenance,
   readConversationFiles,
   recordConversationProvenance,
@@ -220,7 +222,9 @@ export interface EngineDeps {
   /**
    * Names the conversations, tasks, executions, tool calls, approvals, events, provenance sets and entries, artifacts,
    * artifact links and diagnostics the engine records (see RecordWriter), and every event it sends: `newId`. Injected
-   * randomness, so a transition's ids are chosen before its records are written and can refer to each other.
+   * randomness, so a transition's ids are chosen before its records are written and can refer to each other. A
+   * transition draws every id it may record before its transaction opens, as a kernel dispatch will hand a pure
+   * `decide` its ids with the event; one whose outcome records fewer leaves the rest unused.
    */
   newId: NewId;
   /**
@@ -238,10 +242,15 @@ export interface EngineDeps {
 }
 
 /** Linkage recorded with an event: the task and execution it belongs to and the event that caused it. */
-interface EventOpts {
+interface EventLinks {
   taskId?: string | null;
   executionId?: string | null;
   causedBy?: string | null;
+}
+
+/** An event's id, drawn before its transaction opens, and its linkage. */
+interface EventOpts extends EventLinks {
+  id: string;
 }
 
 /** A client-facing event as a correlated type/payload pair, so the envelope needs no assertion. */
@@ -250,6 +259,8 @@ type OutgoingEvent = {
 }[ServerEventType];
 
 interface NewCallInput {
+  /** The revision's id, drawn before the transaction. */
+  id: string;
   runtimeCallId: string;
   toolIdentity: string;
   digest: string;
@@ -260,8 +271,53 @@ interface NewCallInput {
 
 const RUNTIME_IDENTITY = "claude-code";
 
+/** The ids of the rows that register one artifact and link it to its task. */
+interface ArtifactIds {
+  artifact: string;
+  link: string;
+}
+
+/**
+ * The ids of the rows a declared tool output records: its artifact, its links to the call and (retained) to the
+ * task, and (retained) its artifact_registered event.
+ */
+interface OutputIds {
+  artifact: string;
+  resultLink: string;
+  outputLink: string;
+  registered: string;
+}
+
+/**
+ * The ids a runtime event's transaction may record, drawn before it opens. Every event records `event`; a complete
+ * proposal may also resolve the approval of the binding it supersedes (`resolved`) and propose a revision (`call`); a
+ * result that binds no call records `unmatched`. A declared output's rows take the ids drawn with its capture.
+ */
+interface RuntimeEventIds {
+  event: string;
+  resolved: string;
+  call: string;
+  unmatched: string;
+}
+
+/**
+ * The ids a permission request's transaction may record, drawn before it opens: the approval the binding it
+ * supersedes resolves, the proposal and revision of a new binding, the policy evaluation, the event recording what the
+ * rule decided (the configuration error of an unlisted tool, the dispatch, or the approval request), and the
+ * approval a request that asks creates.
+ */
+interface PermissionIds {
+  resolved: string;
+  proposal: string;
+  call: string;
+  evaluation: string;
+  outcome: string;
+  approval: string;
+}
+
 /** An artifact a finished turn retains for its task, with the object its bytes were stored as or why they were not. */
 interface TurnEvidence {
+  ids: ArtifactIds;
   kind: ArtifactKind;
   name: string;
   relation: Extract<LinkRelation, "runtime_transcript" | "task_output">;
@@ -269,8 +325,9 @@ interface TurnEvidence {
   retention: Retention;
 }
 
-/** A tool output a tool result declared, and what reading and storing it produced. */
+/** A tool output a tool result declared, what reading and storing it produced, and the ids of the rows recording it. */
 interface CapturedOutput {
+  ids: OutputIds;
   declared: DeclaredArtifact;
   retention: Retention;
 }
@@ -287,6 +344,7 @@ const evidenceCapture = (content: Exclude<RuntimeFileRead, { status: "absent" }>
 
 /** A tool output a completed call declared, the tool_result event that declared it, and what storing it produced. */
 interface DeclaredOutput {
+  ids: OutputIds;
   task: TaskState;
   call: ToolCallState;
   declared: DeclaredArtifact;
@@ -402,6 +460,17 @@ export class Engine {
     return this.transactionTime;
   }
 
+  /**
+   * Draws a fresh id (see `EngineDeps.newId`). Only outside a transaction: a transition draws every id it records
+   * before its transaction opens and hands them in, as a kernel dispatch will hand a pure `decide` its ids with the
+   * event, so a draw inside one is a bug and throws, which fails that commit.
+   */
+  private newId(prefix: IdPrefix): string {
+    if (this.transactionTime !== null)
+      throw new Error("ids are drawn before a transaction opens, never inside one");
+    return this.deps.newId(prefix);
+  }
+
   /** The conversation every guarded command and runtime callback operates on; callers check for one first. */
   private get activeConversation(): ConversationState {
     if (!this.conversation) throw new Error("engine has no active conversation");
@@ -467,7 +536,7 @@ export class Engine {
   }
 
   /** Persist an event (inside tx) and queue its delivery with the persisted id and sequence. */
-  private emit(event: OutgoingEvent, opts: EventOpts = {}): { id: string; sequence: number } {
+  private emit(event: OutgoingEvent, opts: EventOpts): { id: string; sequence: number } {
     const ev = this.record(event.type, event.payload, opts);
     this.afterCommit(() => this.deliver(event, { id: ev.id, sequence: ev.sequence }));
     return ev;
@@ -477,10 +546,10 @@ export class Engine {
   private record(
     type: JournalEventType,
     payload: unknown,
-    opts: EventOpts = {},
+    opts: EventOpts,
   ): { id: string; sequence: number } {
     const appended = this.deps.writer.appendEvent({
-      id: this.deps.newId("evt"),
+      id: opts.id,
       receivedAt: this.recordedAt,
       conversationId: this.activeConversation.id,
       type,
@@ -510,7 +579,7 @@ export class Engine {
           redacted_arguments: call.redactedArguments,
         },
       },
-      { id: this.deps.newId("evt"), sequence: null },
+      { id: this.newId("evt"), sequence: null },
     );
   }
 
@@ -628,6 +697,14 @@ export class Engine {
   }): CommandResult {
     const { ctx, plan, connected } = input;
     const { writer } = this.deps;
+    const ids = {
+      provenance: nameProvenance(plan, (prefix) => this.newId(prefix)),
+      conversation: this.newId("conv"),
+      runtimeConversation: randomUUID(),
+      provenanceRecorded: this.newId("evt"),
+      started: this.newId("evt"),
+      debugMode: this.newId("evt"),
+    };
     const previous = {
       conversation: this.conversation,
       connection: this.activeConnectionId,
@@ -638,19 +715,16 @@ export class Engine {
       // conversation; the catch below restores it.
       return this.tx(() => {
         const startedAt = this.recordedAt;
-        const provenance = recordConversationProvenance(writer, plan, {
-          newId: this.deps.newId,
-          createdAt: startedAt,
-        });
-        const runtimeConversationId = randomUUID();
-        const conversationId = this.deps.newId("conv");
+        const provenance = recordConversationProvenance(writer, ids.provenance, startedAt);
+        const runtimeConversationId = ids.runtimeConversation;
+        const conversationId = ids.conversation;
         const conv = writer.createConversation({
           id: conversationId,
           startedAt,
           provenanceSetId: provenance.provenance_set_id,
           runtimeConversationId,
         });
-        linkConversationProvenance(writer, { conversationId, provenance }, this.deps.newId);
+        linkConversationProvenance(writer, { conversationId, plan: ids.provenance });
         if (previous.conversation)
           writer.updateConversation(previous.conversation.id, { status: "closed" });
         // Every turn of this conversation appends the prompt bytes recorded in provenance: the runtime reads the
@@ -673,17 +747,20 @@ export class Engine {
         // Disconnected, the active connection is none or one of this client's (refuseStart), so it stays.
         if (connected) this.activeConnectionId = ctx.connectionId;
         this.activeClientId = ctx.clientId;
-        this.record("provenance_recorded", provenance);
-        this.emit({
-          type: "conversation_started",
-          payload: {
-            conversation_id: conversationId,
-            started_at: startedAt,
-            provenance_set_id: provenance.provenance_set_id,
+        this.record("provenance_recorded", provenance, { id: ids.provenanceRecorded });
+        this.emit(
+          {
+            type: "conversation_started",
+            payload: {
+              conversation_id: conversationId,
+              started_at: startedAt,
+              provenance_set_id: provenance.provenance_set_id,
+            },
           },
-        });
+          { id: ids.started },
+        );
         // After conversation_started, so that event keeps the sequence it has with debug mode off.
-        if (this.deps.debugMode) this.record("captured_in_debug_mode", {});
+        if (this.deps.debugMode) this.record("captured_in_debug_mode", {}, { id: ids.debugMode });
         return {
           ok: true,
           result: {
@@ -720,8 +797,9 @@ export class Engine {
     const turnIndex = conversation.turnCount + 1;
     const note = conversation.pendingNote;
     const runtimePrompt = note ? `${note}\n\n${payload.text}` : payload.text;
-    const taskId = this.deps.newId("task");
-    const executionId = this.deps.newId("exec");
+    const taskId = this.newId("task");
+    const executionId = this.newId("exec");
+    const ids = { submitted: this.newId("evt"), started: this.newId("evt") };
     try {
       this.tx(() => {
         writer.createTask({
@@ -752,7 +830,7 @@ export class Engine {
             mia_note: note,
             command_id: ctx.commandId,
           },
-          opts,
+          { ...opts, id: ids.submitted },
         );
         this.emit(
           {
@@ -765,7 +843,7 @@ export class Engine {
               text: payload.text,
             },
           },
-          opts,
+          { ...opts, id: ids.started },
         );
       });
     } catch (error) {
@@ -846,6 +924,7 @@ export class Engine {
     }
     const { task } = addressed;
     const call = task.pendingApprovals.get(payload.approval_id);
+    const ids = { resolved: this.newId("evt"), dispatched: this.newId("evt") };
     const outcome = decideApproval({
       decision: payload.decision,
       ownerClientId: task.clientId,
@@ -883,7 +962,9 @@ export class Engine {
           );
         return fail("not_found", `approval ${payload.approval_id} does not exist for this task`);
       })
-      .with({ kind: "decided" }, (decided) => this.commitDecision({ ctx, task, payload, decided }))
+      .with({ kind: "decided" }, (decided) =>
+        this.commitDecision({ ctx, task, payload, decided, ids }),
+      )
       .exhaustive();
   }
 
@@ -893,8 +974,10 @@ export class Engine {
     task: TaskState;
     payload: { approval_id: string; decision: Decision };
     decided: Extract<ApprovalOutcome<ToolCallState>, { kind: "decided" }>;
+    /** The approval_resolved event, and the tool_dispatched event of a release. */
+    ids: { resolved: string; dispatched: string };
   }): CommandResult {
-    const { ctx, task, payload, decided } = input;
+    const { ctx, task, payload, decided, ids } = input;
     const approvalId = payload.approval_id;
     const { call, change } = decided;
     try {
@@ -902,7 +985,7 @@ export class Engine {
         const { writer } = this.deps;
         const resolved = this.emit(
           this.approvalResolved(task, { approvalId, callId: call.id, status: decided.approval }),
-          this.taskOpts(task),
+          { ...this.taskOpts(task), id: ids.resolved },
         );
         writer.updateApproval(approvalId, {
           status: decided.approval,
@@ -911,7 +994,11 @@ export class Engine {
           decisionClientId: ctx.clientId,
         });
         if (decided.release)
-          this.recordDispatch(task, call, { via: "approval", causedBy: resolved.id });
+          this.recordDispatch(task, call, {
+            id: ids.dispatched,
+            via: "approval",
+            causedBy: resolved.id,
+          });
         else this.recordCallChange(change);
         this.recordTaskStatus(task, decided.taskStatus);
         this.onCommit(() => task.pendingApprovals.delete(approvalId));
@@ -942,11 +1029,16 @@ export class Engine {
 
   /** Interrupt the active task through the recorded path, whoever asked: a client or shutdown. */
   private interrupt(task: TaskState): CommandResult {
+    const requestedEventId = this.newId("evt");
     const outcome = decideInterruption({
       taskStatus: task.status,
       runtimeEnded: task.runtimeEnded,
       conversationEpoch: this.activeConversation.epoch,
-      pending: [...task.pendingApprovals].map(([approvalId, call]) => ({ approvalId, call })),
+      pending: [...task.pendingApprovals].map(([approvalId, call]) => ({
+        approvalId,
+        call,
+        resolvedEventId: this.newId("evt"),
+      })),
     });
     return match(outcome)
       .with({ kind: "already_interrupting" }, (): CommandResult => ({
@@ -958,14 +1050,20 @@ export class Engine {
         result: { runtime_ended: true },
       }))
       .with({ kind: "invalid" }, ({ taskStatus }) => fail("invalid_state", `task is ${taskStatus}`))
-      .with({ kind: "interrupt" }, (interruption) => this.commitInterruption(task, interruption))
+      .with({ kind: "interrupt" }, (interruption) =>
+        this.commitInterruption(task, interruption, requestedEventId),
+      )
       .exhaustive();
   }
 
-  /** Atomically: close the gate, advance the epoch, invalidate pending approvals, record the order. */
+  /**
+   * Atomically: close the gate, advance the epoch, invalidate pending approvals, record the order in the
+   * interruption_requested event `requestedEventId` names.
+   */
   private commitInterruption(
     task: TaskState,
     interruption: Extract<InterruptionOutcome<ToolCallState>, { kind: "interrupt" }>,
+    requestedEventId: string,
   ): CommandResult {
     const conversation = this.activeConversation;
     const opts = this.taskOpts(task);
@@ -980,7 +1078,7 @@ export class Engine {
               execution_epoch: interruption.epoch,
             },
           },
-          opts,
+          { ...opts, id: requestedEventId },
         );
         for (const change of interruption.approvals)
           this.recordApprovalChange(task, change, { decisionEventId: requested.id });
@@ -1018,6 +1116,7 @@ export class Engine {
       payload.conversation_id && this.conversation?.id === payload.conversation_id
         ? payload.conversation_id
         : null;
+    const ids = { event: this.newId("evt"), diagnostics: this.newId("diag") };
     try {
       this.tx(() => {
         const ev = conversationId
@@ -1028,11 +1127,11 @@ export class Engine {
                 captured_at: payload.diagnostics.captured_at,
                 connection_state: payload.diagnostics.connection_state,
               },
-              { taskId: this.task?.id ?? null },
+              { id: ids.event, taskId: this.task?.id ?? null },
             )
           : null;
         this.deps.writer.recordDiagnostics({
-          id: this.deps.newId("diag"),
+          id: ids.diagnostics,
           receivedAt: this.recordedAt,
           conversationId,
           clientId: ctx.clientId,
@@ -1060,7 +1159,7 @@ export class Engine {
           ? payload.conversation_id
           : null;
       this.deps.writer.recordDiagnostics({
-        id: this.deps.newId("diag"),
+        id: this.newId("diag"),
         receivedAt: this.deps.now().toISOString(),
         conversationId,
         clientId: ctx.clientId,
@@ -1080,6 +1179,7 @@ export class Engine {
     if (this.starting?.connectionId === connectionId) this.starting.disconnected = true;
     if (this.activeConnectionId !== connectionId) return;
     if (this.conversation) {
+      const id = this.newId("evt");
       try {
         this.tx(() =>
           this.record(
@@ -1088,7 +1188,7 @@ export class Engine {
               connection_id: connectionId,
               pending_approvals: [...(this.task?.pendingApprovals.keys() ?? [])],
             },
-            { taskId: this.task?.id ?? null },
+            { id, taskId: this.task?.id ?? null },
           ),
         );
       } catch (error) {
@@ -1148,7 +1248,7 @@ export class Engine {
     if (call.approvalId !== null) this.prompts.reply(call.approvalId, decision);
   }
 
-  private taskOpts(task: TaskState): EventOpts {
+  private taskOpts(task: TaskState): EventLinks {
     return { taskId: task.id, executionId: task.executionId };
   }
 
@@ -1188,6 +1288,7 @@ export class Engine {
     });
     this.emit(this.approvalResolved(task, change), {
       ...this.taskOpts(task),
+      id: change.eventId,
       causedBy: cause.decisionEventId,
     });
   }
@@ -1204,7 +1305,7 @@ export class Engine {
   private recordDispatch(
     task: TaskState,
     call: ToolCallState,
-    cause: { via: "approval" | "policy"; causedBy: string },
+    cause: { id: string; via: "approval" | "policy"; causedBy: string },
   ): void {
     const dispatched = this.record(
       "tool_dispatched",
@@ -1215,7 +1316,7 @@ export class Engine {
         policy: call.policy,
         via: cause.via,
       },
-      { ...this.taskOpts(task), causedBy: cause.causedBy },
+      { ...this.taskOpts(task), id: cause.id, causedBy: cause.causedBy },
     );
     this.deps.writer.updateToolCall(call.id, {
       updatedAt: this.recordedAt,
@@ -1261,7 +1362,13 @@ export class Engine {
         reason: `declared file unreadable: ${errorMessage(error)}`,
       }));
     const retention = await this.store(capture, this.stopping.signal);
-    this.recordRuntimeEvent(task, event, { declared, retention });
+    const ids: OutputIds = {
+      artifact: this.newId("art"),
+      resultLink: this.newId("link"),
+      outputLink: this.newId("link"),
+      registered: this.newId("evt"),
+    };
+    this.recordRuntimeEvent(task, event, { ids, declared, retention });
   }
 
   /**
@@ -1300,7 +1407,14 @@ export class Engine {
     }
     const conversation = this.conversation;
     if (!conversation) return;
-    const opts = this.taskOpts(task);
+    const links = this.taskOpts(task);
+    const ids: RuntimeEventIds = {
+      event: this.newId("evt"),
+      resolved: this.newId("evt"),
+      call: this.newId("call"),
+      unmatched: this.newId("evt"),
+    };
+    const opts = { ...links, id: ids.event };
     try {
       this.tx(() =>
         match(event)
@@ -1362,9 +1476,15 @@ export class Engine {
               return;
             }
             const last = revisions.at(-1);
-            if (last) this.supersede(task, last, { toolIdentity: proposed.toolIdentity, digest });
+            if (last)
+              this.supersede(task, {
+                last,
+                next: { toolIdentity: proposed.toolIdentity, digest },
+                resolvedEventId: ids.resolved,
+              });
             const policy = policyFor(this.deps.profile.runtime, proposed.toolIdentity);
             const state = this.proposeCall(task, {
+              id: ids.call,
               runtimeCallId: proposed.runtimeCallId,
               toolIdentity: proposed.toolIdentity,
               digest,
@@ -1393,7 +1513,7 @@ export class Engine {
               this.record(
                 "tool_result_unmatched",
                 { runtime_call_id: toolResult.runtimeCallId },
-                opts,
+                { ...links, id: ids.unmatched },
               );
               return;
             }
@@ -1452,10 +1572,9 @@ export class Engine {
 
   /** Record a new binding revision; the task tracks it only once the records commit (inside tx). */
   private proposeCall(task: TaskState, input: NewCallInput): ToolCallState {
-    const { runtimeCallId, toolIdentity, digest, policy, proposalEventId } = input;
+    const { id, runtimeCallId, toolIdentity, digest, policy, proposalEventId } = input;
     const revision = (task.calls.get(runtimeCallId)?.at(-1)?.revision ?? 0) + 1;
     const redactedArguments = redactValue(input.args);
-    const id = this.deps.newId("call");
     this.deps.writer.createToolCall({
       id,
       createdAt: this.recordedAt,
@@ -1490,15 +1609,24 @@ export class Engine {
     return state;
   }
 
-  /** Invalidate a held earlier binding and any pending approval it carries (inside tx). */
+  /**
+   * Invalidate a held earlier binding and any pending approval it carries, recorded by the approval_resolved event
+   * `resolvedEventId` names (inside tx).
+   */
   private supersede(
     task: TaskState,
-    last: ToolCallState,
-    next: { toolIdentity: string; digest: string },
+    input: {
+      last: ToolCallState;
+      next: { toolIdentity: string; digest: string };
+      resolvedEventId: string;
+    },
   ): void {
-    const superseded = supersedeBinding(last, next, {
-      status: task.status,
-      otherPending: otherPending(task, last.approvalId),
+    const { last, next, resolvedEventId } = input;
+    const superseded = supersedeBinding({
+      call: last,
+      next,
+      task: { status: task.status, otherPending: otherPending(task, last.approvalId) },
+      resolvedEventId,
     });
     if (!superseded) return;
     const { approval, call, taskStatus } = superseded;
@@ -1553,6 +1681,14 @@ export class Engine {
     // Policy is exactly what the profile says. After an interruption the next turn's Mia note tells the model which
     // effects are unknown; deciding whether a repeat is safe is the model's job, not a reason to re-prompt an allowed tool.
     const policy = policyFor(this.deps.profile.runtime, req.toolName);
+    const ids: PermissionIds = {
+      resolved: this.newId("evt"),
+      proposal: this.newId("evt"),
+      call: this.newId("call"),
+      evaluation: this.newId("evt"),
+      outcome: this.newId("evt"),
+      approval: this.newId("appr"),
+    };
     const rule = evaluatePermission({
       policy,
       gateOpen: task.gateOpen,
@@ -1566,7 +1702,12 @@ export class Engine {
         if (binding.kind === "reuse") {
           bound = binding.call;
         } else {
-          if (last) this.supersede(task, last, { toolIdentity: req.toolName, digest });
+          if (last)
+            this.supersede(task, {
+              last,
+              next: { toolIdentity: req.toolName, digest },
+              resolvedEventId: ids.resolved,
+            });
           const proposal = this.record(
             "tool_proposed",
             {
@@ -1576,9 +1717,10 @@ export class Engine {
               argument_digest: digest,
               source: "permission_request",
             },
-            opts,
+            { ...opts, id: ids.proposal },
           );
           bound = this.proposeCall(task, {
+            id: ids.call,
             runtimeCallId,
             toolIdentity: req.toolName,
             digest,
@@ -1597,13 +1739,14 @@ export class Engine {
             execution_epoch: task.epoch,
             binding_revision: bound.revision,
           },
-          opts,
+          { ...opts, id: ids.evaluation },
         );
         const answer = this.recordPermission({
           task,
           call: bound,
           rule,
           evaluationId: evaluation.id,
+          ids,
         });
         this.afterCommit(() => this.notifyToolCall(task, bound));
         return { call: bound, answer };
@@ -1657,6 +1800,7 @@ export class Engine {
     task: TaskState,
     refusal: { detail: string; settle: PermissionDecision },
   ): PermissionDecision {
+    const id = this.newId("evt");
     try {
       this.tx(() =>
         this.emit(
@@ -1669,7 +1813,7 @@ export class Engine {
               task_id: task.id,
             },
           },
-          this.taskOpts(task),
+          { ...this.taskOpts(task), id },
         ),
       );
     } catch (error) {
@@ -1684,10 +1828,11 @@ export class Engine {
     call: ToolCallState;
     rule: PermissionRule;
     evaluationId: string;
+    ids: Pick<PermissionIds, "outcome" | "approval">;
   }): PermissionAnswer {
-    const { task, call, rule, evaluationId } = input;
+    const { task, call, rule, evaluationId, ids } = input;
     const conversation = this.activeConversation;
-    const opts = this.taskOpts(task);
+    const opts = { ...this.taskOpts(task), id: ids.outcome };
     return match(rule)
       .with({ kind: "deny" }, (denial): PermissionAnswer => {
         if (denial.unlisted)
@@ -1720,14 +1865,14 @@ export class Engine {
         };
       })
       .with({ kind: "dispatch" }, (): PermissionAnswer => {
-        this.recordDispatch(task, call, { via: "policy", causedBy: evaluationId });
+        this.recordDispatch(task, call, { id: ids.outcome, via: "policy", causedBy: evaluationId });
         this.onCommit(() => {
           call.status = "dispatched";
         });
         return { kind: "answer", decision: { behavior: "allow" } };
       })
       .with({ kind: "ask" }, (): PermissionAnswer => {
-        const approvalId = this.deps.newId("appr");
+        const approvalId = ids.approval;
         const requested = this.emit(
           {
             type: "approval_requested",
@@ -1783,6 +1928,7 @@ export class Engine {
       approvalId,
       pending: approvalId !== null && task.pendingApprovals.has(approvalId),
       task: { status: task.status, otherPending: otherPending(task, approvalId) },
+      resolvedEventId: this.newId("evt"),
     });
     if (expire) {
       const applyExpiry = (): void => {
@@ -1848,6 +1994,13 @@ export class Engine {
     const unknown = actions.some((action) => action.status === "unknown");
     const { status, error } = classifyTask({ interrupted: task.interrupted, result, unknown });
     const efforts = effortLevels(hooks);
+    const ids = {
+      transcript: { artifact: this.newId("art"), link: this.newId("link") },
+      hooks: { artifact: this.newId("art"), link: this.newId("link") },
+      outcome: this.newId("evt"),
+      finished: this.newId("evt"),
+      error: this.newId("evt"),
+    };
     try {
       this.tx(() => {
         const { writer } = this.deps;
@@ -1871,6 +2024,7 @@ export class Engine {
           });
         if (transcriptRetention)
           this.registerEvidence(task, {
+            ids: ids.transcript,
             kind: "runtime_transcript",
             name: `turn-${conversation.turnCount}.stream.jsonl`,
             relation: "runtime_transcript",
@@ -1879,6 +2033,7 @@ export class Engine {
           });
         if (hookRetention)
           this.registerEvidence(task, {
+            ids: ids.hooks,
             kind: "effort_evidence",
             name: `turn-${conversation.turnCount}.hooks.jsonl`,
             relation: "task_output",
@@ -1911,7 +2066,7 @@ export class Engine {
                 runtime_cancellation: result.runtimeCancellation,
               },
             },
-            opts,
+            { ...opts, id: ids.outcome },
           );
         writer.updateTask(task.id, { status, finishedAt: this.recordedAt });
         this.emit(
@@ -1925,7 +2080,7 @@ export class Engine {
               usage: result.summary?.usage ?? undefined,
             },
           },
-          opts,
+          { ...opts, id: ids.finished },
         );
         if (error)
           this.emit(
@@ -1938,7 +2093,7 @@ export class Engine {
                 task_id: task.id,
               },
             },
-            opts,
+            { ...opts, id: ids.error },
           );
         const finalStatus = new Map(actions.map((action) => [action.tool_call_id, action.status]));
         this.onCommit(() => {
@@ -1964,8 +2119,8 @@ export class Engine {
    * the transaction opened (`store`), so these rows only record that outcome and commit or fail with the turn's end.
    */
   private registerEvidence(task: TaskState, evidence: TurnEvidence): void {
-    const { writer, newId } = this.deps;
-    const artifactId = newId("art");
+    const { writer } = this.deps;
+    const artifactId = evidence.ids.artifact;
     writer.registerArtifact({
       id: artifactId,
       createdAt: this.recordedAt,
@@ -1977,7 +2132,7 @@ export class Engine {
       ...captureFields(evidence.retention),
     });
     writer.linkArtifact({
-      id: newId("link"),
+      id: evidence.ids.link,
       conversationId: this.activeConversation.id,
       artifactId,
       relation: evidence.relation,
@@ -1991,10 +2146,10 @@ export class Engine {
    * retained tool output becomes a task output and gets an artifact_registered event.
    */
   private registerToolOutput(output: DeclaredOutput): void {
-    const { task, call, declared, eventId, retention } = output;
-    const { writer, newId } = this.deps;
+    const { ids, task, call, declared, eventId, retention } = output;
+    const { writer } = this.deps;
     const conversationId = this.activeConversation.id;
-    const artifactId = newId("art");
+    const artifactId = ids.artifact;
     const art = writer.registerArtifact({
       id: artifactId,
       createdAt: this.recordedAt,
@@ -2008,7 +2163,7 @@ export class Engine {
       ...captureFields(retention),
     });
     writer.linkArtifact({
-      id: newId("link"),
+      id: ids.resultLink,
       conversationId,
       artifactId,
       relation: "tool_result",
@@ -2017,7 +2172,7 @@ export class Engine {
     });
     if (retention.status === "retained") {
       writer.linkArtifact({
-        id: newId("link"),
+        id: ids.outputLink,
         conversationId,
         artifactId,
         relation: "task_output",
@@ -2032,7 +2187,7 @@ export class Engine {
           size: art.byteSize,
           original_path: declared.path,
         },
-        { taskId: task.id, executionId: task.executionId, causedBy: eventId },
+        { id: ids.registered, taskId: task.id, executionId: task.executionId, causedBy: eventId },
       );
     }
   }
