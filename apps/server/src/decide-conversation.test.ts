@@ -479,11 +479,11 @@ describe("permission requests", () => {
     expect(records[4]).toMatchObject({
       input: { id: "appr_new", toolCallId: "call_new", requestingEventId: "evt_outcome" },
     });
-    // The hold is the last effect: the boundary places it once the commit has returned.
+    // The hold is the first effect: the prompt is held before the client is told of its approval.
     expect(effectLabels(effects)).toEqual([
+      "hold request appr_new",
       "deliver approval_requested",
       "notify call_new awaiting_approval",
-      "hold request appr_new",
     ]);
     expect(answerOf(effects)).toEqual({ kind: "hold", approvalId: "appr_new", callId: "call_new" });
     expect(next.task).toMatchObject({
@@ -523,7 +523,7 @@ describe("permission requests", () => {
     expect(records[1]).toMatchObject({
       input: { id: "evt_outcome", causedByEventId: "evt_evaluation" },
     });
-    expect(effectLabels(effects)).toEqual(["notify call_1 dispatched", "answer request allow"]);
+    expect(effectLabels(effects)).toEqual(["answer request allow", "notify call_1 dispatched"]);
     expect(answerOf(effects)).toEqual({ kind: "answer", decision: { behavior: "allow" } });
     expect(next.task && callById(next.task, "call_1")?.status).toBe("dispatched");
   });
@@ -541,9 +541,9 @@ describe("permission requests", () => {
       input: { id: "evt_outcome", payload: { code: "configuration_error" } },
     });
     expect(effectLabels(unlisted.effects)).toEqual([
+      "answer request deny",
       "deliver error",
       "notify call_new denied",
-      "answer request deny",
     ]);
     const gated = accepted(decide(running([], { gateOpen: false }), request()));
     expect(gated.records.at(-1)).toMatchObject({ fields: { status: "blocked_gate" } });
@@ -582,11 +582,11 @@ describe("permission requests", () => {
     expect(records[1]).toMatchObject({ input: { id: "evt_superseded" } });
     expect(records[5]).toMatchObject({ input: { id: "call_new", bindingRevision: 2 } });
     expect(effectLabels(effects)).toEqual([
+      "hold request appr_new",
       "deliver approval_resolved",
       "answer appr_1 deny",
       "deliver approval_requested",
       "notify call_new awaiting_approval",
-      "hold request appr_new",
     ]);
     expect(next.task?.pendingApprovals).toEqual(new Map([["appr_new", "call_new"]]));
     expect(next.task && callById(next.task, "call_1")?.status).toBe("invalidated");

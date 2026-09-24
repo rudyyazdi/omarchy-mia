@@ -32,9 +32,11 @@ export interface TurnStart {
  * - `answer_prompt`: answer the runtime's prompt held under an approval, if it is still held; one already answered
  *   (abandoned, or denied at turn end) drops this answer.
  * - `answer_permission`: answer the runtime's permission request that the transition decided. Only a permission
- *   request's transition queues one, and exactly one, so it names no request: the boundary that is committing that
- *   request takes the answer. It holds a prompt only once the commit has returned, so a request whose records did
- *   not commit is never held, and is denied instead.
+ *   request's transition queues one, exactly one, as its first effect. It names no request, because the boundary
+ *   dispatching that request takes the answer. Performed, it holds a prompt that asks, so a request whose records did
+ *   not commit is never held, and is denied instead. Being first puts the hold between the commit and the rest of its
+ *   effects, before approval_requested is delivered. A decider still has to answer from a later event: one answering
+ *   from inside a delivery would dispatch nested, which the kernel refuses.
  * - `interrupt_runtime`: interrupt the runtime running a task's turn, if that task is still the active one.
  * - `start_turn`: start the runtime on a submitted task's turn, with the prompt the submission composed. Only a task
  *   submission's transition queues one, and exactly one, last: the boundary that is committing that submission takes
