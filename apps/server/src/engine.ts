@@ -374,8 +374,8 @@ export class Engine {
 
   /**
    * Decide and commit a memory-only transition (see `memoryOnly` in ./decide-conversation.ts): it records nothing, so a
-   * catalog that cannot commit does not refuse it. A rejection means the task it names has already left the
-   * conversation, and changes nothing.
+   * catalog that cannot commit does not refuse it. A rejection (the task or call it names is gone, or nothing is
+   * pending) changes nothing. It reads the clock once, as every decision does, though no memory-only transition uses it.
    */
   private commitMemoryOnly<Event, Rejection>(
     transition: ConversationTransition<Event, Rejection>,
@@ -678,10 +678,16 @@ export class Engine {
         // However finishTurn ended, even by throwing: the runtime has ended, so a prompt it never abandoned is
         // answered with a denial rather than left holding a place under MAX_HELD_PROMPTS. One already answered is
         // skipped.
-        const ended = this.taskOf(taskId);
-        for (const call of ended ? callsOf(ended) : []) this.answerPrompt(call, TURN_ENDED);
-        // The task's end was recorded (or failed to be) by finishTurn.
-        if (ended) this.commitMemoryOnly(taskClearedTransition, { kind: "task_cleared", taskId });
+        try {
+          const ended = this.taskOf(taskId);
+          for (const call of ended ? callsOf(ended) : []) this.answerPrompt(call, TURN_ENDED);
+          // The task's end was recorded (or failed to be) by finishTurn.
+          if (ended) this.commitMemoryOnly(taskClearedTransition, { kind: "task_cleared", taskId });
+        } catch (error) {
+          // Not expected, as nothing here touches the catalog; caught so the turn still settles below, and so this
+          // chain, which nothing awaits, cannot reject.
+          this.deps.log(`could not clear task ${taskId}: ${errorMessage(error)}`);
+        }
         if (this.running?.taskId === taskId) this.running = null;
         finished.resolve();
       });

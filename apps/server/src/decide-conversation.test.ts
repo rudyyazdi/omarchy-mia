@@ -403,6 +403,10 @@ describe("prompt abandonment", () => {
       kind: "rejected",
       rejection: { kind: "not_pending" },
     });
+    expect(decide(state, unrecorded({ ...abandonment("call_1"), taskId: "task_old" }))).toEqual({
+      kind: "rejected",
+      rejection: { kind: "no_task" },
+    });
   });
 });
 
@@ -1181,6 +1185,20 @@ describe("memory-only transitions", () => {
     expect(next).toEqual({ ...state, task: null });
     expect(decide(state, { kind: "task_cleared", taskId: "task_old" })).toEqual(otherTask);
     expect(decide(next, { kind: "task_cleared", taskId: "task_1" })).toEqual(otherTask);
+  });
+
+  it("decides none of them before the conversation has started", () => {
+    const events: ConversationEvent[] = [
+      { kind: "runtime_exited", taskId: "task_1" },
+      { kind: "turn_unrecorded", taskId: "task_1" },
+      { kind: "task_cleared", taskId: "task_1" },
+      { ...abandonment("call_1"), kind: "abandonment_unrecorded" },
+    ];
+    for (const event of events)
+      expect(decide(null, event)).toEqual({
+        kind: "rejected",
+        rejection: { kind: "not_started" },
+      });
   });
 });
 
