@@ -54,6 +54,25 @@ describe("loadProfileSync", () => {
     });
   });
 
+  it("resolves an MCP server's body log against the profile directory", () => {
+    const input = profileInput();
+    input.runtime.mcpServers = {
+      fixture: { type: "http", url: "http://127.0.0.1:1/mcp", bodyLog: "fixture/bodies.jsonl" },
+      plain: { type: "http", url: "http://127.0.0.1:2/mcp" },
+    };
+    withProfileFile(JSON.stringify(input), (path) => {
+      const profile = loadProfileSync(path, { MODEL: "m" });
+      expect(profile.runtime.mcpServers).toEqual({
+        fixture: {
+          type: "http",
+          url: "http://127.0.0.1:1/mcp",
+          bodyLog: join(path, "..", "fixture/bodies.jsonl"),
+        },
+        plain: { type: "http", url: "http://127.0.0.1:2/mcp" },
+      });
+    });
+  });
+
   // Each value would break or rewrite the profile if it were pasted into the raw JSON text.
   it.each([
     { name: "a quote", value: 'x","executable":"injected' },

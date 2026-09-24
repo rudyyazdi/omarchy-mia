@@ -430,7 +430,7 @@ export const decideAbandonment = (input: {
 // ---------------------------------------------------------------- results and completion
 
 /** Released to the runtime: the only kind of call that can have run. */
-const isReleased = (status: ToolCallStatus): boolean =>
+export const isReleased = (status: ToolCallStatus): boolean =>
   status === "permitted" || status === "dispatched";
 
 /** Refused before release: Mia answered its prompt, if any, without letting it run. */

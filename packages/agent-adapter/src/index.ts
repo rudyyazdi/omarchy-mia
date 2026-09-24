@@ -1,4 +1,5 @@
 export {
+  bodyLogFor,
   ConfigurationError,
   policyFor,
   RuntimeConfigSchema,

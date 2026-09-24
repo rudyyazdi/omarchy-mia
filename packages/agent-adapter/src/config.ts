@@ -1,3 +1,4 @@
+import { match } from "ts-pattern";
 import { z } from "zod";
 import {
   EffortSchema,
@@ -14,6 +15,11 @@ const remoteMcpServerSchema = <Transport extends "http" | "sse">(transport: Tran
       type: z.literal(transport),
       url: z.string().url(),
       headers: z.record(z.string(), z.string()).optional(),
+      /**
+       * Mia's own field, never handed to the runtime: the body log this server writes, keyed by tool-use id. Only
+       * the controlled MCP fixture writes one (issue #6); a server in debug mode records each of its calls' lines.
+       */
+      bodyLog: z.string().min(1).optional(),
     })
     .strict();
 
@@ -30,6 +36,13 @@ export const McpServerConfigSchema = z.discriminatedUnion("type", [
     .strict(),
 ]);
 export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
+
+/** A server's entry as the runtime's MCP configuration gets it: without the fields only Mia reads. */
+export const runtimeMcpServer = (server: McpServerConfig): Record<string, unknown> =>
+  match(server)
+    .with({ type: "stdio" }, (stdio) => stdio)
+    .with({ type: "http" }, { type: "sse" }, ({ bodyLog: _, ...remote }) => remote)
+    .exhaustive();
 
 /**
  * Everything the adapter needs to launch the runtime. Nothing here has a default: a profile
@@ -70,6 +83,21 @@ export const RuntimeConfigSchema = z
   .strict();
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
 
+/** The MCP server a fully qualified tool identity (mcp__<server>__<tool>) names, or null when it names none. */
+const serverOf = (identity: string): string | null =>
+  /^mcp__([A-Za-z0-9_-]+)__/.exec(identity)?.[1] ?? null;
+
+/**
+ * The body log of the server a tool identity names, or null when that server writes none. Own keys only, like
+ * `policyFor`: the identity comes unchecked from the runtime.
+ */
+export const bodyLogFor = (config: RuntimeConfig, identity: string): string | null => {
+  const server = serverOf(identity);
+  if (server === null || !Object.hasOwn(config.mcpServers, server)) return null;
+  const entry = config.mcpServers[server];
+  return entry && entry.type !== "stdio" ? (entry.bodyLog ?? null) : null;
+};
+
 /**
  * The policy for a tool identity, or "unlisted" when the profile names none. Own keys only: the identity comes
  * unchecked from the runtime, and indexing would resolve `constructor` or `__proto__` through Object.prototype.
@@ -92,8 +120,7 @@ export class ConfigurationError extends Error {
  */
 export const validateRuntimeConfig = (config: RuntimeConfig): void => {
   for (const identity of Object.keys(config.toolPolicy)) {
-    const match = /^mcp__([A-Za-z0-9_-]+)__/.exec(identity);
-    const server = match?.[1];
+    const server = serverOf(identity);
     if (!server || !Object.hasOwn(config.mcpServers, server)) {
       throw new ConfigurationError(
         `toolPolicy names ${identity} but no MCP server "${server}" is configured`,

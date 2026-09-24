@@ -6,6 +6,8 @@ import { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
+import { TOOL_USE_ID_META } from "./body-log.ts";
 import { readLogEntries } from "./log-fixture.ts";
 import {
   McpServer,
@@ -357,5 +359,85 @@ describe("MCP HTTP server", () => {
 
     await refused;
     await aborted;
+  });
+});
+
+describe("MCP HTTP server body log", () => {
+  /** Serves one tool, `echo`, that answers with the text it was given. */
+  const startEchoServer = async (options: {
+    bodyLogFile: string;
+    reportLogFailure?: (error: unknown) => void;
+  }) => {
+    handle = await startMcpHttpServer({
+      ...options,
+      createServer: () => {
+        const server = new McpServer({ name: "mcp-http-test", version: "0" });
+        server.registerTool(
+          "echo",
+          { description: "Answers with its text.", inputSchema: { text: z.string() } },
+          async ({ text }) => ({ content: [{ type: "text", text }] }),
+        );
+        return server;
+      },
+    });
+    return handle;
+  };
+
+  const echoCall = (id: number, meta: Record<string, unknown> | undefined) => ({
+    jsonrpc: "2.0",
+    id,
+    method: "tools/call",
+    params: { name: "echo", arguments: { text: `call ${id}` }, ...(meta ? { _meta: meta } : {}) },
+  });
+
+  it("has a call's request and response lines on disk once its response arrives", async () => {
+    const bodyLogFile = join(dir, "bodies.jsonl");
+    const server = await startEchoServer({ bodyLogFile });
+    const request = echoCall(7, { [TOOL_USE_ID_META]: "toolu_echo" });
+
+    const response = await post(server.url, request);
+    expect(await response.text()).toContain("call 7");
+
+    // Read before closing the server: the lines are written before the response goes out, not only by close.
+    expect(await readLogEntries(bodyLogFile)).toEqual([
+      { tool_use_id: "toolu_echo", direction: "request", body: request },
+      {
+        tool_use_id: "toolu_echo",
+        direction: "response",
+        body: { jsonrpc: "2.0", id: 7, result: { content: [{ type: "text", text: "call 7" }] } },
+      },
+    ]);
+  });
+
+  it("logs only tool calls that carry a tool-use id", async () => {
+    const bodyLogFile = join(dir, "bodies.jsonl");
+    const server = await startEchoServer({ bodyLogFile });
+
+    for (const body of [initializeRequest(), echoCall(8, undefined), echoCall(9, { other: "x" })]) {
+      const response = await post(server.url, body);
+      expect(response.status).toBe(200);
+      await response.text();
+    }
+    await server.close();
+    handle = undefined;
+
+    await expect(readLogEntries(bodyLogFile)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps answering tool calls when its body log cannot be written", async () => {
+    const failures: unknown[] = [];
+    // A directory cannot be opened for appending, so the log fails with EISDIR.
+    const server = await startEchoServer({
+      bodyLogFile: dir,
+      reportLogFailure: (error) => failures.push(error),
+    });
+
+    for (const id of [1, 2]) {
+      const response = await post(server.url, echoCall(id, { [TOOL_USE_ID_META]: `toolu_${id}` }));
+      expect(await response.text()).toContain(`call ${id}`);
+    }
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ code: "EISDIR" });
   });
 });

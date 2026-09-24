@@ -310,6 +310,8 @@ export type JournalEventType =
   | "tool_proposed"
   | "tool_result"
   | "tool_result_unmatched"
+  | "mcp_request"
+  | "mcp_response"
   | "policy_evaluated"
   | "assistant_message"
   | "runtime_started"

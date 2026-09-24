@@ -2,7 +2,9 @@ import { once } from "node:events";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { errorMessage, isRecord } from "@mia/protocol";
+import { createBodyLog, responseId, toolCallsIn, type BodyLog } from "./body-log.ts";
 import { createRequestLog } from "./request-log.ts";
 
 /** Per-HTTP-request context handed to the MCP server factory. */
@@ -21,7 +23,15 @@ export interface McpHttpServerOptions {
    * is reported once on stderr and turns logging off; it never fails a request.
    */
   logFile?: string;
-  /** Receives the request log's first failed write; defaults to a line on stderr. */
+  /**
+   * JSON-lines file that receives the body of each `tools/call` request and of its response, keyed by the call's
+   * tool-use id (`TOOL_USE_ID_META`); unset or empty logs none, and a call without a tool-use id is not logged. A
+   * request's line is written before it is handled and a response's before it is sent, so a client that has seen
+   * a response finds both lines. A write failure is reported once and turns the body log off; it never fails a
+   * request.
+   */
+  bodyLogFile?: string;
+  /** Receives the first failed write of either log; defaults to a line on stderr. */
   reportLogFailure?: (error: unknown) => void;
   /** Build a fresh McpServer per request (stateless Streamable HTTP mode). */
   createServer: (ctx: McpRequestContext) => McpServer;
@@ -65,6 +75,42 @@ class BodyTooLargeError extends Error {
 
 const MAX_MCP_BODY_BYTES = 4 * 1024 * 1024;
 
+type SendOptions = Parameters<StreamableHTTPServerTransport["send"]>[1];
+
+/** A stateless transport that awaits `beforeSend` with each message it sends, before sending it. */
+class ObservedTransport extends StreamableHTTPServerTransport {
+  readonly #beforeSend: (message: JSONRPCMessage) => Promise<void>;
+  constructor(beforeSend: (message: JSONRPCMessage) => Promise<void>) {
+    super({ sessionIdGenerator: undefined });
+    this.#beforeSend = beforeSend;
+  }
+  override async send(message: JSONRPCMessage, options?: SendOptions): Promise<void> {
+    await this.#beforeSend(message);
+    return super.send(message, options);
+  }
+}
+
+/**
+ * The transport for one HTTP request: with a body log and a `tools/call` in `body`, it logs the request now and
+ * each response to it before sending that response; otherwise it is a plain stateless transport.
+ */
+const transportFor = async (
+  body: unknown,
+  bodyLog: BodyLog | undefined,
+): Promise<StreamableHTTPServerTransport> => {
+  const calls = bodyLog ? toolCallsIn(body) : new Map();
+  if (!bodyLog || calls.size === 0)
+    return new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  for (const call of calls.values())
+    await bodyLog.append({ tool_use_id: call.toolUseId, direction: "request", body: call.body });
+  return new ObservedTransport(async (message) => {
+    const id = responseId(message);
+    const call = id === null ? undefined : calls.get(id);
+    if (call)
+      await bodyLog.append({ tool_use_id: call.toolUseId, direction: "response", body: message });
+  });
+};
+
 const readBody = async (req: IncomingMessage, limitBytes: number): Promise<string> => {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -89,22 +135,32 @@ export const startMcpHttpServer = async (
   const host = options.host ?? "127.0.0.1";
   const path = "/mcp";
   let requestCounter = 0;
-  const { logFile } = options;
+  const { logFile, bodyLogFile } = options;
   let boundPort: number | null = null;
-  const reportLogFailure =
-    options.reportLogFailure ??
-    ((error: unknown) =>
-      process.stderr.write(
-        `[mia-mcp-http] request log ${logFile} disabled: ${errorMessage(error)}\n`,
-      ));
+  const reportFailureOf =
+    (log: string) =>
+    (error: unknown): void => {
+      if (options.reportLogFailure) options.reportLogFailure(error);
+      else process.stderr.write(`[mia-mcp-http] ${log} disabled: ${errorMessage(error)}\n`);
+    };
   const requestLog =
     logFile === undefined || logFile === ""
       ? undefined
       : createRequestLog({
           file: logFile,
-          reportFailure: reportLogFailure,
+          reportFailure: reportFailureOf(`request log ${logFile}`),
           stamp: () => ({ at: new Date().toISOString(), port: boundPort }),
         });
+  const bodyLog =
+    bodyLogFile === undefined || bodyLogFile === ""
+      ? undefined
+      : createBodyLog({
+          file: bodyLogFile,
+          reportFailure: reportFailureOf(`body log ${bodyLogFile}`),
+        });
+  const closeLogs = async (): Promise<void> => {
+    await Promise.all([requestLog?.close(), bodyLog?.close()]);
+  };
   const log = (entry: Record<string, unknown>) => requestLog?.write(entry);
   // Logged responses whose close line is not written yet, so close() can wait for them before
   // closing the log. One entry per response in progress: bounded by what the server is serving.
@@ -207,8 +263,10 @@ export const startMcpHttpServer = async (
       if (!completed) closeController.abort(new Error("connection closed before response"));
     });
     const ctx: McpRequestContext = { connectionClosed: closeController.signal, requestId: reqNo };
+    const transport = await transportFor(parsedBody, bodyLog);
+    // The client may have gone while the body log was written; its close has fired, so nothing would close these.
+    if (res.destroyed) return;
     const server = options.createServer(ctx);
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => {
       void transport.close().catch(() => undefined);
       void server.close().catch(() => undefined);
@@ -234,13 +292,13 @@ export const startMcpHttpServer = async (
   try {
     await listening.promise;
   } catch (error) {
-    await requestLog?.close();
+    await closeLogs();
     throw error;
   }
   const address = httpServer.address();
   if (address === null || typeof address === "string") {
     httpServer.close();
-    await requestLog?.close();
+    await closeLogs();
     throw new Error("MCP HTTP server did not bind a TCP address");
   }
   boundPort = address.port;
@@ -255,7 +313,7 @@ export const startMcpHttpServer = async (
       // The server closes before the destroyed sockets do, so wait for the responses they carried:
       // a request cut off by shutdown still gets its close line.
       await Promise.all([closed, ...[...openResponses].map((res) => once(res, "close"))]);
-      await requestLog?.close();
+      await closeLogs();
     },
   };
 };
