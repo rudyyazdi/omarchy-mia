@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { TOOL_USE_ID_META } from "@mia/mcp-http";
 
 /** The launch flags the fake acts on, as commander parsed them. */
 export interface FakeClaudeFlags {
@@ -103,7 +104,12 @@ class FakeTurn {
     }
     const client = await this.#mcpClient(server);
     try {
-      const result = await client.callTool({ name: tool, arguments: input });
+      // Like the real runtime, the call names its tool-use id, which the fixture's body log is keyed by.
+      const result = await client.callTool({
+        name: tool,
+        arguments: input,
+        _meta: { [TOOL_USE_ID_META]: toolUseId },
+      });
       this.#toolResult(toolUseId, firstText(result) ?? "", result.isError === true);
     } finally {
       await client.close();

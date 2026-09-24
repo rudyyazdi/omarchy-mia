@@ -13,7 +13,13 @@
     "effort": "medium",
     "workingDirectory": "../../.mia-work/fixture-test-interrupt",
     "builtinTools": [],
-    "mcpServers": { "d1": { "type": "http", "url": "${MIA_FIXTURE_MCP_URL}" } },
+    "mcpServers": {
+      "d1": {
+        "type": "http",
+        "url": "${MIA_FIXTURE_MCP_URL}",
+        "bodyLog": "${MIA_FIXTURE_DIR}/mcp-bodies.jsonl"
+      }
+    },
     "toolPolicy": {
       "mcp__d1__read": "allow",
       "mcp__d1__change": "allow",

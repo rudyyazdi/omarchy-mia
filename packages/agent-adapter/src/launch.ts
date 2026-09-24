@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { BRIDGE_SERVER_NAME, BRIDGE_TOOL_IDENTITY } from "./bridge.ts";
 import type { Effort } from "@mia/protocol";
-import type { RuntimeConfig } from "./config.ts";
+import { runtimeMcpServer, type RuntimeConfig } from "./config.ts";
 
 export interface LaunchPlan {
   command: string;
@@ -86,7 +86,9 @@ export const prepareLaunch = (input: LaunchInput): LaunchPlan => {
 
   const mcpConfig = {
     mcpServers: {
-      ...config.mcpServers,
+      ...Object.fromEntries(
+        Object.entries(config.mcpServers).map(([name, server]) => [name, runtimeMcpServer(server)]),
+      ),
       [BRIDGE_SERVER_NAME]: { type: "http", url: bridgeUrl },
     },
   };

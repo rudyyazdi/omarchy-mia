@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { match } from "ts-pattern";
 import {
+  bodyLogFor,
   policyFor,
   hookEvidenceFrom,
   type HookEvidence,
@@ -16,6 +17,7 @@ import {
   type TurnResult,
 } from "@mia/agent-adapter";
 import { Holds } from "@mia/kernel";
+import type { BodyDirection } from "@mia/mcp-http";
 import {
   PROTOCOL_VERSION,
   canonicalDigest,
@@ -51,6 +53,7 @@ import {
   type Retention,
 } from "./artifact-capture.ts";
 import type { ArtifactCollector } from "./artifact-collector.ts";
+import { MAX_BODY_LOG_BYTES, mcpBodiesFrom, type McpBody } from "./mcp-bodies.ts";
 import {
   linkConversationProvenance,
   nameProvenance,
@@ -72,6 +75,7 @@ import {
   decideInterruption,
   evaluatePermission,
   executionStatusFor,
+  isReleased,
   noteAfterTurn,
   statusAfterResult,
   supersedeBinding,
@@ -213,8 +217,8 @@ export interface EngineDeps {
    */
   evidenceReadDeadline: () => AbortSignal;
   /**
-   * Reads the transcript and the hook evidence at turn end, and the agent prompt and architecture document at
-   * conversation start: `readRuntimeFile`, or a test's own.
+   * Reads the transcript and the hook evidence at turn end, the agent prompt and architecture document at
+   * conversation start, and in debug mode a body log at a tool result: `readRuntimeFile`, or a test's own.
    */
   readEvidence: RuntimeFileReader;
   /** Captures a tool output a completed call declared: `collectArtifact`, or a test's own. */
@@ -234,8 +238,9 @@ export interface EngineDeps {
   now: () => Date;
   /**
    * Debug mode, chosen once per server start: each conversation started while it is on records a
-   * `captured_in_debug_mode` event, so a viewer can tell detail that was never captured from detail that is absent.
-   * Off records exactly what the engine records without it.
+   * `captured_in_debug_mode` event, so a viewer can tell detail that was never captured from detail that is absent,
+   * and records the MCP request and response bodies of each call to a server that writes a body log. Off records
+   * exactly what the engine records without it.
    */
   debugMode: boolean;
   log: (message: string) => void;
@@ -331,6 +336,35 @@ interface CapturedOutput {
   declared: DeclaredArtifact;
   retention: Retention;
 }
+
+/** One MCP message debug mode records for a call, with the id of the event recording it. */
+type McpBodyRecord = McpBody & { eventId: string };
+
+/** What a runtime event read before its transaction: only a tool result reads anything. */
+interface ResultReads {
+  output: CapturedOutput | null;
+  bodies: McpBodyRecord[] | null;
+}
+
+const NOTHING_READ: ResultReads = { output: null, bodies: null };
+
+const MCP_BODY_EVENT: Record<BodyDirection, JournalEventType> = {
+  request: "mcp_request",
+  response: "mcp_response",
+};
+
+/** An `mcp_request` or `mcp_response` payload: the call it belongs to, and its redacted body or why there is none. */
+const mcpBodyPayload = (
+  call: { id: string; runtimeCallId: string },
+  body: McpBody,
+): Record<string, unknown> => ({
+  tool_call_id: call.id,
+  runtime_call_id: call.runtimeCallId,
+  ...match(body)
+    .with({ status: "recorded" }, ({ body: recorded }) => ({ body: recorded }))
+    .with({ status: "unrecorded" }, ({ reason }) => ({ unrecorded: reason }))
+    .exhaustive(),
+});
 
 /** What a turn-end read gives to retain: the bytes read, or why they could not be. */
 const evidenceCapture = (content: Exclude<RuntimeFileRead, { status: "absent" }>): Capture =>
@@ -1338,23 +1372,35 @@ export class Engine {
 
   /**
    * Handles one runtime event; it never rejects. A tool result that declares an output file is captured and
-   * stored first, outside the transaction, because the read and write can take long; every other event is
-   * recorded before this returns.
+   * stored first, and in debug mode a released call's result first reads its server's body log (see
+   * `readMcpBodies`); both happen outside the transaction, because the reads and the write can take long. Every
+   * other event is recorded before this returns.
    * A failed result never completes its call, so the file it declares is not read.
    * The adapter hands over the next stdout event only once this settles, so events still commit in the order the
-   * runtime wrote them. The turn ends before the capture and store only when the adapter stops reading a runtime whose
-   * interruption did not end it; the result is then dropped with a log line, because the turn has already been
-   * recorded without it.
+   * runtime wrote them. The turn ends before the reads and the store only when the adapter stops reading a runtime
+   * whose interruption did not end it; the result is then dropped with a log line, because the turn has already
+   * been recorded without it.
    */
   private async onRuntimeEvent(task: TaskState, event: RuntimeEvent): Promise<void> {
-    const declared =
-      event.type === "tool_result" && !event.isError
-        ? extractDeclaredArtifact(event.content)
-        : null;
-    if (!declared) {
-      this.recordRuntimeEvent(task, event, null);
+    if (event.type !== "tool_result") {
+      this.recordRuntimeEvent(task, event, NOTHING_READ);
       return;
     }
+    const declared = event.isError ? null : extractDeclaredArtifact(event.content);
+    const bodyLog = this.bodyLogOf(task, event.runtimeCallId);
+    if (!declared && bodyLog === null) {
+      this.recordRuntimeEvent(task, event, NOTHING_READ);
+      return;
+    }
+    const [output, bodies] = await Promise.all([
+      declared ? this.captureOutput(declared) : null,
+      bodyLog === null ? null : this.readMcpBodies(bodyLog, event.runtimeCallId),
+    ]);
+    this.recordRuntimeEvent(task, event, { output, bodies });
+  }
+
+  /** Captures and stores a tool output a result declared, with the ids of the rows that will record it. */
+  private async captureOutput(declared: DeclaredArtifact): Promise<CapturedOutput> {
     const capture = await this.deps
       .collectArtifact(declared, this.deps.profile.runtime.outputDirectories)
       .catch((error: unknown): Capture => ({
@@ -1368,7 +1414,34 @@ export class Engine {
       outputLink: this.newId("link"),
       registered: this.newId("evt"),
     };
-    this.recordRuntimeEvent(task, event, { ids, declared, retention });
+    return { ids, declared, retention };
+  }
+
+  /**
+   * The body log a tool result reads, or null when it reads none: only in debug mode, only for a call Mia
+   * released (a refused call's error result never reached a server), and only when that call's server writes a
+   * body log, which only the controlled MCP fixture does (issue #6). Debug mode off never reads one, so it records
+   * exactly what it records without body logs.
+   */
+  private bodyLogOf(task: TaskState, runtimeCallId: string): string | null {
+    if (!this.deps.debugMode) return null;
+    const binding = bindToolResult(task.calls.get(runtimeCallId) ?? []);
+    if (binding.kind === "unmatched" || !isReleased(binding.call.status)) return null;
+    return bodyLogFor(this.deps.profile.runtime, binding.call.toolIdentity);
+  }
+
+  /**
+   * Reads what a call's body log holds for it, before the transaction that records it. The read is bounded like a
+   * turn-end evidence read (`readEvidence`, capped at `MAX_BODY_LOG_BYTES`, abandoned at its deadline or shutdown),
+   * and never fails the result: a log that cannot be read is recorded as the reason its bodies are missing.
+   */
+  private async readMcpBodies(path: string, runtimeCallId: string): Promise<McpBodyRecord[]> {
+    const signal = AbortSignal.any([this.stopping.signal, this.deps.evidenceReadDeadline()]);
+    const read = await this.deps.readEvidence(path, { signal, maxBytes: MAX_BODY_LOG_BYTES });
+    return mcpBodiesFrom(read, runtimeCallId).map((body) => ({
+      ...body,
+      eventId: this.newId("evt"),
+    }));
   }
 
   /**
@@ -1393,11 +1466,8 @@ export class Engine {
    * the task's runtime ended is dropped: the runtime hands over its exit before the turn ends, so only an event
    * left pending when a stuck runtime was abandoned gets here, and the turn was recorded without it.
    */
-  private recordRuntimeEvent(
-    task: TaskState,
-    event: RuntimeEvent,
-    output: CapturedOutput | null,
-  ): void {
+  private recordRuntimeEvent(task: TaskState, event: RuntimeEvent, read: ResultReads): void {
+    const { output } = read;
     if (task.runtimeEnded || this.task !== task) {
       const captured = output ? ` (output ${output.declared.path} captured)` : "";
       this.deps.log(
@@ -1526,6 +1596,12 @@ export class Engine {
             });
             if (status === "completed" && output)
               this.registerToolOutput({ task, call, ...output, eventId: result.id });
+            for (const body of read.bodies ?? [])
+              this.record(MCP_BODY_EVENT[body.direction], mcpBodyPayload(call, body), {
+                ...links,
+                id: body.eventId,
+                causedBy: result.id,
+              });
             this.onCommit(() => {
               call.status = status;
             });

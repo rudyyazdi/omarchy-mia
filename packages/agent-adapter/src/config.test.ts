@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { REDACTED, redactValue } from "@mia/protocol";
 import {
+  bodyLogFor,
   ConfigurationError,
   policyFor,
+  runtimeMcpServer,
   validateRuntimeConfig,
   type RuntimeConfig,
 } from "./config.ts";
@@ -33,6 +35,41 @@ describe("policyFor", () => {
       expect(policyFor(validRuntime(), identity)).toBe("unlisted");
     },
   );
+});
+
+describe("bodyLogFor", () => {
+  const withBodyLog = (): RuntimeConfig => ({
+    ...validRuntime(),
+    mcpServers: {
+      fixture: { type: "http", url: "http://127.0.0.1:1/mcp", bodyLog: "/fixture/bodies.jsonl" },
+      plain: { type: "http", url: "http://127.0.0.1:2/mcp" },
+      local: { type: "stdio", command: "local", args: [] },
+    },
+  });
+
+  it("names the body log of the server a tool identity names", () => {
+    expect(bodyLogFor(withBodyLog(), "mcp__fixture__read")).toBe("/fixture/bodies.jsonl");
+  });
+
+  it.each([
+    "mcp__plain__read",
+    "mcp__local__read",
+    "mcp__missing__read",
+    "mcp__constructor__read",
+    "fixture",
+  ])("is null for %s, whose server writes no body log", (identity) => {
+    expect(bodyLogFor(withBodyLog(), identity)).toBe(null);
+  });
+});
+
+describe("runtimeMcpServer", () => {
+  it("leaves out the body log, which only Mia reads", () => {
+    expect(
+      runtimeMcpServer({ type: "http", url: "http://127.0.0.1:1/mcp", bodyLog: "/bodies.jsonl" }),
+    ).toEqual({ type: "http", url: "http://127.0.0.1:1/mcp" });
+    const stdio = { type: "stdio" as const, command: "local", args: ["-v"] };
+    expect(runtimeMcpServer(stdio)).toEqual(stdio);
+  });
 });
 
 describe("validateRuntimeConfig", () => {

@@ -1,16 +1,32 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { isRecord } from "@mia/protocol";
+import { startFixture } from "@mia/controlled-mcp";
+import { TOOL_USE_ID_META } from "@mia/mcp-http";
+import { isRecord, REDACTED } from "@mia/protocol";
 import {
   snapshotConversation,
   type JournalEventType,
   type ConversationSnapshot,
 } from "@mia/records";
-import { ackResult, must, mustString, startTestServer, type TestServer } from "./harness.ts";
+import {
+  ackResult,
+  FAKE_RUNTIME,
+  FAKE_RUNTIME_ENV,
+  must,
+  mustString,
+  startTestServer,
+  type TestServer,
+} from "./harness.ts";
 import { ScriptedRuntime } from "./scripted-runtime.ts";
 
 const servers: TestServer[] = [];
+const directories: string[] = [];
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
+  for (const directory of directories.splice(0))
+    rmSync(directory, { recursive: true, force: true });
 });
 
 type SnapshotTables = ConversationSnapshot["tables"];
@@ -22,13 +38,38 @@ interface Recorded {
   executionId: string;
 }
 
+/** The body log lines the fixture would write for the allowed read call: its request, and its response. */
+const READ_REQUEST = {
+  jsonrpc: "2.0",
+  id: 3,
+  method: "tools/call",
+  params: { name: "read", arguments: {}, _meta: { [TOOL_USE_ID_META]: "toolu_read" } },
+};
+const READ_RESPONSE = {
+  jsonrpc: "2.0",
+  id: 3,
+  result: { content: [{ type: "text", text: JSON.stringify({ unread: 3 }) }], api_key: "sk-live" },
+};
+
 /**
  * One conversation on a fresh server with debug mode on or off: a user command whose turn streams text and a
- * message, runs an allowed call, and has a forbidden call and an unlisted call rejected by policy.
+ * message, runs an allowed call, and has a forbidden call and an unlisted call rejected by policy. The d1 server
+ * names a body log, as the controlled fixture's profile does; the allowed call's lines are written to it before
+ * its result arrives, unless `bodyLog` is "missing".
  */
-const recordConversation = async (debugMode: boolean): Promise<Recorded> => {
+const recordConversation = async (
+  debugMode: boolean,
+  bodyLog: "written" | "missing" = "written",
+): Promise<Recorded> => {
+  const logDirectory = mkdtempSync(join(tmpdir(), "mia-body-log-"));
+  directories.push(logDirectory);
+  const bodyLogFile = join(logDirectory, "mcp-bodies.jsonl");
   const runtime = new ScriptedRuntime();
-  const server = await startTestServer(runtime, {}, { debugMode });
+  const server = await startTestServer(
+    runtime,
+    { mcpServers: { d1: { type: "http", url: "http://127.0.0.1:1/mcp", bodyLog: bodyLogFile } } },
+    { debugMode },
+  );
   servers.push(server);
   const client = await server.connect("client-A");
   await client.startConversation();
@@ -44,6 +85,17 @@ const recordConversation = async (debugMode: boolean): Promise<Recorded> => {
   });
   turn.propose("toolu_read", "mcp__d1__read", {});
   expect((await turn.request("mcp__d1__read", {}, "toolu_read")).behavior).toBe("allow");
+  if (bodyLog === "written")
+    writeFileSync(
+      bodyLogFile,
+      [
+        { tool_use_id: "toolu_read", direction: "request", body: READ_REQUEST },
+        { tool_use_id: "toolu_other", direction: "request", body: {} },
+        { tool_use_id: "toolu_read", direction: "response", body: READ_RESPONSE },
+      ]
+        .map((line) => JSON.stringify(line) + "\n")
+        .join(""),
+    );
   await turn.toolResult("toolu_read", JSON.stringify({ unread: 3 }));
   expect((await turn.request("mcp__d1__forbidden", {}, "toolu_forbidden")).behavior).toBe("deny");
   const mystery = await turn.request("mcp__d1__mystery", { query: "is:unread" }, "toolu_mystery");
@@ -188,6 +240,105 @@ describe("debug mode on", () => {
   });
 });
 
+/** The MCP body events a conversation recorded, in order. */
+const mcpBodiesOf = (tables: SnapshotTables) =>
+  tables.events.filter((event) => event.type === "mcp_request" || event.type === "mcp_response");
+
+describe("debug mode on: MCP bodies", () => {
+  it("records the request and response bodies of a call to a body-logged server, redacted, under the call", async () => {
+    const { tables } = await recordConversation(true);
+    const call = callOf(tables, "toolu_read");
+    const result = must(eventsOf(tables, "tool_result")[0], "tool_result");
+    const bodies = mcpBodiesOf(tables);
+    expect(bodies.map((event) => [event.type, payloadOf(event)])).toEqual([
+      ["mcp_request", { tool_call_id: call.id, runtime_call_id: "toolu_read", body: READ_REQUEST }],
+      [
+        "mcp_response",
+        {
+          tool_call_id: call.id,
+          runtime_call_id: "toolu_read",
+          body: { ...READ_RESPONSE, result: { ...READ_RESPONSE.result, api_key: REDACTED } },
+        },
+      ],
+    ]);
+    // Recorded with the result that caused them, right after it, in its task and execution.
+    bodies.forEach((event, index) =>
+      expect(event).toMatchObject({
+        caused_by_event_id: result.id,
+        task_id: result.task_id,
+        execution_id: result.execution_id,
+        sequence: result.sequence + 1 + index,
+      }),
+    );
+  });
+
+  it("records why a call's bodies are missing when its server's body log does not exist", async () => {
+    const { tables } = await recordConversation(true, "missing");
+    const call = callOf(tables, "toolu_read");
+    expect(mcpBodiesOf(tables).map((event) => [event.type, payloadOf(event)])).toEqual(
+      (["mcp_request", "mcp_response"] as const).map((type) => [
+        type,
+        {
+          tool_call_id: call.id,
+          runtime_call_id: "toolu_read",
+          unrecorded: "the body log does not exist",
+        },
+      ]),
+    );
+  });
+});
+
+describe("debug mode on: MCP bodies from the controlled fixture", () => {
+  it("records the bodies the fixture logged for a call the runtime made to it", async () => {
+    const fixtureDirectory = mkdtempSync(join(tmpdir(), "mia-fixture-"));
+    directories.push(fixtureDirectory);
+    const fixture = await startFixture({ dir: fixtureDirectory });
+    try {
+      const server = await startTestServer(
+        undefined,
+        {
+          executable: FAKE_RUNTIME,
+          mcpServers: {
+            d1: { type: "http", url: fixture.mcpUrl, bodyLog: fixture.bodyLogFile },
+          },
+        },
+        { env: FAKE_RUNTIME_ENV, debugMode: true },
+      );
+      servers.push(server);
+      const client = await server.connect("client-A");
+      await client.startConversation();
+      await client.submitText("READ");
+      await client.waitFor("task_finished");
+      const catalog = server.catalog();
+      let tables: SnapshotTables;
+      try {
+        tables = snapshotConversation(catalog, must(client.conversationId, "conversation")).tables;
+      } finally {
+        catalog.close();
+      }
+      const call = callOf(tables, "toolu_fake_read_1");
+      expect(mcpBodiesOf(tables).map((event) => [event.type, payloadOf(event)])).toMatchObject([
+        [
+          "mcp_request",
+          {
+            tool_call_id: call.id,
+            body: {
+              method: "tools/call",
+              params: { name: "read", _meta: { [TOOL_USE_ID_META]: "toolu_fake_read_1" } },
+            },
+          },
+        ],
+        [
+          "mcp_response",
+          { tool_call_id: call.id, body: { result: { content: [{ type: "text" }] } } },
+        ],
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  });
+});
+
 describe("debug mode off", () => {
   /**
    * What a conversation records with debug mode off, pinned: which rows each table holds and which events, with
@@ -254,7 +405,7 @@ describe("debug mode off", () => {
     }),
   });
 
-  it("records exactly what a conversation recorded before debug mode existed", async () => {
+  it("records exactly what a conversation recorded before debug mode existed, even with a body log to read", async () => {
     const { tables } = await recordConversation(false);
     expect(eventsOf(tables, "captured_in_debug_mode")).toEqual([]);
     expect(recordedShape(tables)).toEqual(OFF_MODE_RECORDS);

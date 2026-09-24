@@ -24,7 +24,9 @@ const planIn = (
       effort: "medium",
       workingDirectory: join(dir, "work"),
       builtinTools: [],
-      mcpServers: { d1: { type: "http", url: "http://127.0.0.1:1/mcp" } },
+      mcpServers: {
+        d1: { type: "http", url: "http://127.0.0.1:1/mcp", bodyLog: join(dir, "bodies.jsonl") },
+      },
       toolPolicy: { mcp__d1__slow: "ask" },
       agentPromptFile: promptFile,
       outputDirectories: [],
@@ -82,6 +84,16 @@ describe("launch plan", () => {
     const planned = new Map(plan.setup.files.map((file) => [file.path, JSON.parse(file.content)]));
     expect(planned.get(argAfter("--mcp-config"))).toEqual(plan.description.mcp_config);
     expect(planned.get(argAfter("--settings"))).toEqual(plan.description.settings);
+  });
+
+  it("hands the runtime each MCP server without the body log only Mia reads", () => {
+    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-launch-"));
+    const plan = planIn(directory.path, {});
+    const [written] = plan.setup.files;
+    expect(JSON.parse(written?.content ?? "{}")).toMatchObject({
+      mcpServers: { d1: { type: "http", url: "http://127.0.0.1:1/mcp" } },
+    });
+    expect(written?.content).not.toContain("bodyLog");
   });
 
   it("appends the prompt file it is given, and no prompt when given none", () => {

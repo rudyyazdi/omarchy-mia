@@ -7,8 +7,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { sendJson } from "@mia/mcp-http";
-import { FixtureHarness, startFixture, type FixtureHandle } from "./fixture.ts";
+import { bodyLogLinesFor, sendJson, TOOL_USE_ID_META } from "@mia/mcp-http";
+import { readFile } from "node:fs/promises";
+import { BODY_LOG_FILE, FixtureHarness, startFixture, type FixtureHandle } from "./fixture.ts";
 
 let fixture: FixtureHandle;
 let harness: FixtureHarness;
@@ -254,5 +255,31 @@ describe("controlled fixture", () => {
     expect(parsed.artifact.path.startsWith(join(dir, "artifacts"))).toBe(true);
     expect(parsed.artifact.sha256).toHaveLength(64);
     await mcpClient.close();
+  });
+
+  it("logs a tool call's request and response bodies under its tool-use id", async () => {
+    await harness.reset();
+    const mcpClient = await client();
+    try {
+      await mcpClient.callTool({
+        name: "change",
+        arguments: { delta: 2 },
+        _meta: { [TOOL_USE_ID_META]: "toolu_fixture_change" },
+      });
+    } finally {
+      await mcpClient.close();
+    }
+    expect(fixture.bodyLogFile).toBe(join(dir, BODY_LOG_FILE));
+    const { lines } = bodyLogLinesFor(
+      await readFile(fixture.bodyLogFile, "utf8"),
+      "toolu_fixture_change",
+    );
+    expect(lines).toMatchObject([
+      {
+        direction: "request",
+        body: { method: "tools/call", params: { name: "change", arguments: { delta: 2 } } },
+      },
+      { direction: "response", body: { result: { content: [{ type: "text" }] } } },
+    ]);
   });
 });

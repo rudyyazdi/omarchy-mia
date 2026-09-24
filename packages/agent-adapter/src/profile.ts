@@ -103,6 +103,14 @@ export const loadProfileSync = (path: string, env: NodeJS.ProcessEnv): Profile =
     server: { ...parsed.data.server, secretFile: abs(parsed.data.server.secretFile) },
     runtime: {
       ...parsed.data.runtime,
+      mcpServers: Object.fromEntries(
+        Object.entries(parsed.data.runtime.mcpServers).map(([name, server]) => [
+          name,
+          server.type !== "stdio" && server.bodyLog !== undefined
+            ? { ...server, bodyLog: abs(server.bodyLog) }
+            : server,
+        ]),
+      ),
       workingDirectory: abs(parsed.data.runtime.workingDirectory),
       agentPromptFile: abs(parsed.data.runtime.agentPromptFile),
       outputDirectories: parsed.data.runtime.outputDirectories.map(abs),
