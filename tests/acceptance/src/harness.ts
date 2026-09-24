@@ -153,14 +153,15 @@ export const testProfile = (
 };
 
 /**
- * Start a server over a fresh directory. Without an adapter it runs the real one, which launches
- * `overrides.executable` with `env`.
+ * Start a server over a fresh directory, with debug mode off unless `options.debugMode`. Without an adapter it
+ * runs the real one, which launches `overrides.executable` with `options.env`.
  */
 export const startTestServer = async (
   adapter: TurnRunner | undefined,
   overrides: Partial<Profile["runtime"]> = {},
-  env: NodeJS.ProcessEnv = {},
+  options: { env?: NodeJS.ProcessEnv; debugMode?: boolean } = {},
 ): Promise<TestServer> => {
+  const { env = {}, debugMode = false } = options;
   const dir = mkdtempSync(join(tmpdir(), "mia-acceptance-"));
   const profile = testProfile(dir, overrides);
   const logs: string[] = [];
@@ -196,6 +197,7 @@ export const startTestServer = async (
     readEvidence,
     collectArtifact: captureArtifact,
     now: () => clock(),
+    debugMode,
     env,
   });
   const clients: MiaClient[] = [];
