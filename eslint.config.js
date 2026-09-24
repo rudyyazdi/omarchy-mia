@@ -10,7 +10,11 @@ const BYPASS_NOTE = "Bypass with an eslint-disable-next-line comment that carrie
 // never one below it and never a sibling in its own layer. Why the direction matters, and when to
 // split a module or a package instead of reaching across it: docs/DEPENDENCIES.md.
 const LAYERS = [
-  { files: ["packages/protocol/**"], workspaces: ["@mia/protocol"], mayImportAnything: false },
+  {
+    files: ["packages/protocol/**", "packages/kernel/**"],
+    workspaces: ["@mia/protocol", "@mia/kernel"],
+    mayImportAnything: false,
+  },
   {
     files: ["packages/records/**", "packages/mcp-http/**"],
     workspaces: ["@mia/records", "@mia/mcp-http"],
@@ -69,6 +73,29 @@ const layerOverrides = LAYERS.flatMap((layer, index) =>
         },
       ],
 );
+
+// @mia/kernel has no dependencies at all (#132): its source imports only node: modules and its own files, so the
+// order it enforces cannot come to depend on Mia's domain or on a library. Its tests keep only the layer rule (no
+// workspace imports), so they may import vitest. A dynamic `import()` is left to review.
+const KERNEL_NO_DEPENDENCIES = {
+  files: ["packages/kernel/**"],
+  ignores: ["**/*.test.ts"],
+  rules: {
+    "no-restricted-imports": [
+      "error",
+      {
+        patterns: [
+          {
+            regex: "^(?!node:|\\./|\\.\\./)",
+            message:
+              "@mia/kernel has no dependencies; import only node: modules and its own files. See docs/DEPENDENCIES.md.",
+          },
+          FORBID_CROSS_WORKSPACE_RELATIVE,
+        ],
+      },
+    ],
+  },
+};
 
 // Enforces AGENTS.md, Design: a domain vocabulary is a union declared once and imported, never retyped as
 // `string`. Lint sees only names, so a field that is meant to stay open (a value the runtime reports) takes a
@@ -325,4 +352,6 @@ export default tseslint.config(
   },
   { files: PROCESS_ENTRY_FILES, rules: { "no-restricted-properties": "off" } },
   ...layerOverrides,
+  // After the layer overrides, which it replaces for the kernel's source.
+  KERNEL_NO_DEPENDENCIES,
 );
