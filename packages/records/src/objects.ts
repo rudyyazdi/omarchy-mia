@@ -1,16 +1,5 @@
 import { randomUUID } from "node:crypto";
-import {
-  chmodSync,
-  closeSync,
-  existsSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeSync,
-} from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { access, chmod, mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 import { sha256Hex } from "@mia/protocol";
@@ -41,7 +30,6 @@ const writeDurably = async (
  */
 export interface DirectoryFsync {
   flush: (directory: string) => Promise<void>;
-  flushSync: (directory: string) => void;
 }
 
 const fsyncDirectory = async (directory: string): Promise<void> => {
@@ -55,16 +43,7 @@ const fsyncDirectory = async (directory: string): Promise<void> => {
   }
 };
 
-const fsyncDirectorySync = (directory: string): void => {
-  const fd = openSync(directory, "r");
-  try {
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-};
-
-const diskDirectories: DirectoryFsync = { flush: fsyncDirectory, flushSync: fsyncDirectorySync };
+const diskDirectories: DirectoryFsync = { flush: fsyncDirectory };
 
 /**
  * The directories whose entries a recursive mkdir of `leaf` changed, top down, given the first directory it
@@ -154,41 +133,6 @@ export class ObjectStore {
       /* best effort */
     });
     await this.directories.flush(dirname(target));
-    return stored;
-  }
-
-  /** `put`, blocking: only for a caller that cannot await yet (conversation start, until #53 makes engine commands async). */
-  putSync(bytes: Uint8Array): StoredObject {
-    const stored = this.describe(bytes);
-    const target = this.pathFor(stored.digest);
-    if (existsSync(target)) return stored;
-    mkdirSync(this.paths.staging, { recursive: true, mode: 0o700 });
-    const staged = join(this.paths.staging, `${randomUUID()}.tmp`);
-    const fd = openSync(staged, "w", 0o600);
-    try {
-      let offset = 0;
-      while (offset < bytes.byteLength)
-        offset += writeSync(fd, bytes, offset, bytes.byteLength - offset);
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-    const directory = dirname(target);
-    try {
-      const firstCreated = mkdirSync(directory, { recursive: true, mode: 0o700 });
-      for (const parent of parentsOfCreated(firstCreated, directory))
-        this.directories.flushSync(parent);
-      renameSync(staged, target);
-    } catch (error) {
-      rmSync(staged, { force: true });
-      throw error;
-    }
-    try {
-      chmodSync(target, 0o400);
-    } catch {
-      /* best effort */
-    }
-    this.directories.flushSync(directory);
     return stored;
   }
 

@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  truncateSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +24,7 @@ import {
   type ToolCallStatus,
 } from "@mia/protocol";
 import { ObjectStore, type CaptureStatus, type LinkRelation } from "@mia/records";
+import { MAX_CONVERSATION_FILE_BYTES } from "@mia/server";
 import type { AckPayload, MiaClient } from "@mia/text-client";
 import { ScriptedRuntime, type ScriptedTurn } from "./scripted-runtime.ts";
 import {
@@ -144,6 +146,12 @@ const watchObjectWrites = (): (() => boolean) => {
   };
   return () => writtenInside;
 };
+
+/** How many conversations and provenance sets are recorded: what a refused start must leave unchanged. */
+const conversationRecords = () => ({
+  conversations: rows("SELECT id FROM conversations").length,
+  sets: rows("SELECT id FROM provenance_sets").length,
+});
 
 /** Whether the object store holds bytes for `digest`. */
 const objectStored = (digest: string | null): boolean =>
@@ -1301,6 +1309,175 @@ describe("runtime session", () => {
   });
 });
 
+describe("conversation start", () => {
+  const conversationCount = () => rows("SELECT id FROM conversations").length;
+  const startRow = (messageId: string) =>
+    rows(
+      "SELECT disposition, error_code, error_message FROM commands WHERE client_command_id = ?",
+      messageId,
+    );
+
+  /** Sends start_conversation as `messageId` with its prompt read held; resolves once the engine is reading. */
+  const startHoldingPrompt = async (messageId: string, sender: MiaClient = client) => {
+    const held = ts.holdEvidenceRead(ts.profile.runtime.agentPromptFile);
+    const ack = sender.send("start_conversation", {}, { messageId });
+    await held.started;
+    return { held, ack };
+  };
+
+  it("answers another connection while a start's read is held open, then records the conversation", async () => {
+    const before = conversationCount();
+    const { held, ack } = await startHoldingPrompt("cmd-start");
+    const other = await ts.connect("client-B");
+    expect((await other.sendDiagnostics()).disposition).toBe("accepted");
+    expect(conversationCount()).toBe(before);
+    held.release();
+    const started = mustString(ackResult(await ack).conversation_id, "conversation id");
+    expect(conversationCount()).toBe(before + 1);
+    expect(rows("SELECT status FROM conversations WHERE id = ?", started)).toEqual([
+      { status: "active" },
+    ]);
+  });
+
+  it("answers a resend of a start still in flight with the original's reply, running it once", async () => {
+    const before = conversationCount();
+    const { held, ack } = await startHoldingPrompt("cmd-start");
+    const again = await ts.connect("client-A");
+    let answered = false;
+    const resent = again.send("start_conversation", {}, { messageId: "cmd-start" }).finally(() => {
+      answered = true;
+    });
+    // Commands on one connection are handled in order, so once this is answered the resend has been handled too.
+    await again.sendDiagnostics();
+    expect(answered).toBe(false);
+    // Only one resend waits; a further one is refused at once, unrecorded.
+    const third = await ts.connect("client-A");
+    expect(
+      ackError(await third.send("start_conversation", {}, { messageId: "cmd-start" })),
+    ).toEqual({
+      code: "busy",
+      message: "this command is still running; resend it once its reply arrives",
+    });
+    held.release();
+    const original = await ack;
+    expect(await resent).toEqual({ ...original, duplicate: true });
+    expect(conversationCount()).toBe(before + 1);
+    expect(startRow("cmd-start")).toEqual([
+      { disposition: "accepted", error_code: null, error_message: null },
+    ]);
+  });
+
+  it("refuses a second start while one is in flight", async () => {
+    const { held, ack } = await startHoldingPrompt("cmd-start");
+    const second = await client.send("start_conversation", {}, { messageId: "cmd-start-2" });
+    expect(ackError(second)).toEqual({ code: "busy", message: "another conversation is starting" });
+    held.release();
+    expect((await ack).disposition).toBe("accepted");
+  });
+
+  it("refuses a start whose guard fails once its reads settle, and keeps the current conversation", async () => {
+    const current = must(client.conversationId, "conversation id");
+    const before = conversationCount();
+    const { held, ack } = await startHoldingPrompt("cmd-start");
+    const { turn, taskId } = await submit("arrives while the start reads");
+    held.release();
+    expect(ackError(await ack).code).toBe("busy");
+    expect(conversationCount()).toBe(before);
+    expect(client.conversationId).toBe(current);
+    turn.end();
+    await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
+  });
+
+  it("commits a start whose client disconnects during its reads, for its resend to adopt", async () => {
+    const before = conversationCount();
+    const { held, ack } = await startHoldingPrompt("cmd-start");
+    const unanswered = ack.catch(() => undefined);
+    const disconnected = ts.waitForLog((line) => line.endsWith(" closed"));
+    client.close();
+    await Promise.all([unanswered, disconnected]);
+    const again = await ts.connect("client-A");
+    const resent = again.send("start_conversation", {}, { messageId: "cmd-start" });
+    await again.sendDiagnostics();
+    held.release();
+    const started = await resent;
+    expect(started).toMatchObject({ disposition: "accepted", duplicate: true });
+    expect(conversationCount()).toBe(before + 1);
+    again.conversationId = mustString(ackResult(started).conversation_id, "conversation id");
+    const next = runtime.nextTurn();
+    const submitted = await again.submitText("on the adopted conversation");
+    expect(submitted.disposition).toBe("accepted");
+    (await next).end();
+    await again.waitFor("task_finished");
+  });
+
+  it("stores the reply of a start that shutdown abandons before the catalog closes", async () => {
+    const before = conversationCount();
+    const { ack } = await startHoldingPrompt("cmd-start");
+    const settled = ack.catch(() => undefined);
+    await ts.server.close(new AbortController().signal);
+    await settled;
+    expect(startRow("cmd-start")).toEqual([
+      {
+        disposition: "rejected",
+        error_code: "invalid_state",
+        error_message: "conversation start abandoned: the server is shutting down",
+      },
+    ]);
+    expect(conversationCount()).toBe(before);
+    expect(ts.logs).not.toContainEqual(expect.stringContaining("command handling failed"));
+  });
+
+  it("refuses a start whose read outlives its deadline, and keeps the current conversation", async () => {
+    const current = must(client.conversationId, "conversation id");
+    const before = conversationCount();
+    const { ack } = await startHoldingPrompt("cmd-start");
+    ts.expireEvidenceReads();
+    const refused = ackError(await ack);
+    expect(refused.code).toBe("record_failure");
+    expect(refused.message).toContain("timed out");
+    expect(conversationCount()).toBe(before);
+    expect(client.conversationId).toBe(current);
+  });
+
+  it("stores a start's snapshots before its transaction, and keeps the current conversation when it fails", async () => {
+    const promptFile = ts.profile.runtime.agentPromptFile;
+    const current = must(client.conversationId, "conversation id");
+    const before = conversationRecords();
+    const writtenInside = watchObjectWrites();
+    const failedPrompt = "# a prompt whose start fails\n";
+    writeFileSync(promptFile, failedPrompt);
+    failNextCommit();
+    expect(ackError(await client.send("start_conversation", {})).code).toBe("record_failure");
+    expect(conversationRecords()).toEqual(before);
+    expect(client.conversationId).toBe(current);
+    expect(rows("SELECT status FROM conversations WHERE id = ?", current)).toEqual([
+      { status: "active" },
+    ]);
+    // Stored before the transaction, then left unreferenced by its rollback.
+    const digest = ObjectStore.digestOf(Buffer.from(failedPrompt));
+    expect(objectStored(digest)).toBe(true);
+    expect(rows("SELECT id FROM artifacts WHERE object_digest = ?", digest)).toEqual([]);
+    writeFileSync(promptFile, "# a prompt whose start commits\n");
+    await client.startConversation();
+    expect(conversationRecords().conversations).toBe(before.conversations + 1);
+    expect(writtenInside()).toBe(false);
+  });
+
+  it("refuses a start whose prompt is a FIFO or too large, without waiting on it", async () => {
+    const promptFile = ts.profile.runtime.agentPromptFile;
+    rmSync(promptFile);
+    execFileSync("mkfifo", [promptFile]);
+    const fifo = ackError(await client.send("start_conversation", {}));
+    expect(fifo.code).toBe("record_failure");
+    expect(fifo.message).toContain("not a regular file");
+    rmSync(promptFile);
+    writeFileSync(promptFile, "");
+    truncateSync(promptFile, MAX_CONVERSATION_FILE_BYTES + 1);
+    const large = ackError(await client.send("start_conversation", {}));
+    expect(large.message).toContain(`larger than ${MAX_CONVERSATION_FILE_BYTES} bytes`);
+  });
+});
+
 describe("configuration and provenance", () => {
   it("records the runtime identity probed at startup, not at each conversation start", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mia-identity-"));
@@ -1389,15 +1566,12 @@ describe("configuration and provenance", () => {
     writeFileSync(promptFile, "prompt");
     await restartSession({ agentPromptFile: promptFile });
     const current = must(client.conversationId, "conversation id");
-    const count = (table: string) => rows(`SELECT id FROM ${table}`).length;
-    const before = { conversations: count("conversations"), sets: count("provenance_sets") };
+    const before = conversationRecords();
     // A directory where the prompt was: it exists, so it is not "missing", and reading it fails (EISDIR).
     rmSync(promptFile);
     mkdirSync(promptFile);
     await expect(client.startConversation()).rejects.toThrow("record_failure");
-    expect({ conversations: count("conversations"), sets: count("provenance_sets") }).toEqual(
-      before,
-    );
+    expect(conversationRecords()).toEqual(before);
     expect(client.conversationId).toBe(current);
     const { turn, taskId } = await submit("still here");
     turn.end();

@@ -172,6 +172,24 @@ export class Catalog {
     this.db.prepare(sql).run(...columns.map(([, value]) => value), id);
   }
 
+  /**
+   * `update`, applied only while the row still holds every value in `expected`: how a row moves out of one state
+   * exactly once. Returns whether it changed.
+   */
+  updateIf(table: string, row: Row, where: { id: string; expected: Row }): boolean {
+    const columns = definedColumns(row);
+    const conditions = definedColumns(where.expected);
+    if (columns.length === 0) return false;
+    const assignments = columns.map(([name]) => `${name} = ?`).join(", ");
+    // IS, not =, so an expected null matches a null column.
+    const guards = conditions.map(([name]) => ` AND ${name} IS ?`).join("");
+    const sql = `UPDATE ${table} SET ${assignments} WHERE id = ?${guards}`;
+    const { changes } = this.db
+      .prepare(sql)
+      .run(...columns.map(([, value]) => value), where.id, ...conditions.map(([, value]) => value));
+    return Number(changes) > 0;
+  }
+
   get<T = Record<string, unknown>>(sql: string, ...params: SQLInputValue[]): T | undefined {
     // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- node:sqlite returns untyped rows; callers name the row type
     return this.db.prepare(sql).get(...params) as T | undefined;

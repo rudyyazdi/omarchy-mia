@@ -33,7 +33,11 @@ export interface GatewayHandle {
   port: number;
   /** Deliver an event to one connection; attached to the engine while the gateway is open. */
   send: Delivery;
-  close(): Promise<void>;
+  /**
+   * Close every connection and the listener, then wait until each command still being handled stores its reply, or
+   * until `commandWait` aborts; a reply stored after that fails against the closed catalog and is logged.
+   */
+  close(commandWait: AbortSignal): Promise<void>;
 }
 
 /** Load or create the local client secret (0600, outside Git). Never logged. */
@@ -63,8 +67,8 @@ interface Connection {
 
 /**
  * The reply to a command that was recorded but did not finish: handling threw after the record committed, or a
- * duplicate found it still `received` (dispatch is synchronous, so that means the original never finished).
- * The engine may have acted on it, so it is never run again.
+ * duplicate found it still `received` and not in flight in this process, so the original never finished. The
+ * engine may have acted on it, so it is never run again.
  */
 const FAILED_AFTER_RECORD: CommandReply = {
   disposition: "failed",
@@ -119,6 +123,19 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
     maxPayload: LIMITS.maxEnvelopeBytes,
   });
   const connections = new Map<string, Connection>();
+  /**
+   * Each recorded command still being handled, by its recorded id: its reply once stored, and whether a duplicate
+   * already waits for it. The first duplicate that finds its original still `received` waits for that reply instead
+   * of settling it failed; a further one is refused as busy at once, unrecorded, so a resend after the reply gets
+   * it. An entry leaves once its reply is stored. Only a start_conversation stays across an await, and the engine
+   * runs one at a time, so this holds at most one entry for longer than the messages of one socket read.
+   */
+  const inFlight = new Map<string, { reply: Promise<CommandReply>; awaited: boolean }>();
+  /**
+   * Every message still being handled, so closing waits until each has stored its reply. Besides the messages of
+   * one socket read, it holds at most the one start in flight and the one duplicate waiting for it.
+   */
+  const handling = new Set<Promise<void>>();
 
   const authenticate = (req: IncomingMessage): boolean => {
     const header = req.headers.authorization ?? "";
@@ -185,7 +202,18 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
       .with({ kind: "duplicate" }, ({ reply }) =>
         ack(conn, { ...ackPayload(commandId, reply), duplicate: true }),
       )
-      .with({ kind: "unfinished" }, (unfinished) => {
+      .with({ kind: "unfinished" }, async (unfinished) => {
+        const original = inFlight.get(unfinished.commandId);
+        if (original?.awaited)
+          return rejectRaw(conn, commandId, {
+            code: "busy",
+            message: "this command is still running; resend it once its reply arrives",
+          });
+        if (original) {
+          original.awaited = true;
+          ack(conn, { ...ackPayload(commandId, await original.reply), duplicate: true });
+          return;
+        }
         settleFailed(unfinished.commandId);
         ack(conn, { ...ackPayload(commandId, FAILED_AFTER_RECORD), duplicate: true });
       })
@@ -194,11 +222,14 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
   /**
    * The effect half of a message: adopt the connection on its first command, record, dispatch, finish, ack.
    * The command is recorded `received` before the engine runs and finished with the reply its ack carries,
-   * so a duplicate is answered from the record and never runs twice.
+   * so a duplicate is answered from the record, or from the original's reply while it is in flight, and never
+   * runs twice. It never rejects: every failure is logged and answered.
    */
-  const handleCommand = (conn: Connection, command: ClientCommand) => {
+  const handleCommand = async (conn: Connection, command: ClientCommand): Promise<void> => {
     const commandId = command.message_id;
     let progress: Progress = { stage: "unrecorded" };
+    let reply: PromiseWithResolvers<CommandReply> | null = null;
+    let inFlightId: string | null = null;
     try {
       if (!conn.opened) {
         conn.clientId = command.client_id;
@@ -228,11 +259,15 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
       });
       if (recorded.kind !== "new") {
         progress = { stage: "answered" };
-        return answerRecorded(conn, commandId, recorded);
+        await answerRecorded(conn, commandId, recorded);
+        return;
       }
       progress = { stage: "recorded", commandId: recorded.commandId };
-      const reply = replyFor(
-        options.engine.handle(
+      reply = Promise.withResolvers<CommandReply>();
+      inFlight.set(recorded.commandId, { reply: reply.promise, awaited: false });
+      inFlightId = recorded.commandId;
+      const result = replyFor(
+        await options.engine.handle(
           {
             connectionId: conn.id,
             clientId: command.client_id,
@@ -242,9 +277,13 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
           command,
         ),
       );
-      options.writer.finishCommand(recorded.commandId, reply);
+      if (!options.writer.finishCommand(recorded.commandId, result))
+        options.log(
+          `command ${recorded.commandId} already had a stored reply; this ack may differ`,
+        );
       progress = { stage: "answered" };
-      ack(conn, ackPayload(commandId, reply));
+      reply.resolve(result);
+      ack(conn, ackPayload(commandId, result));
     } catch (error) {
       options.log(
         `command handling failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
@@ -258,11 +297,17 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
         )
         .with({ stage: "recorded" }, (recorded) => {
           settleFailed(recorded.commandId);
+          reply?.resolve(FAILED_AFTER_RECORD);
           ack(conn, ackPayload(commandId, FAILED_AFTER_RECORD));
         })
         // A second ack would contradict the first; a resend is answered from the record.
         .with({ stage: "answered" }, () => undefined)
         .exhaustive();
+    } finally {
+      // Resolved above unless the failure handling itself threw; a second resolve does nothing, so a waiting
+      // duplicate always gets a reply.
+      reply?.resolve(FAILED_AFTER_RECORD);
+      if (inFlightId !== null) inFlight.delete(inFlightId);
     }
   };
 
@@ -288,7 +333,12 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
           code: decoded.code,
           message: decoded.message,
         });
-      handleCommand(conn, decoded.command);
+      const handled: Promise<void> = handleCommand(conn, decoded.command)
+        .catch((error: unknown) => options.log(`command handling failed: ${errorMessage(error)}`))
+        .then(() => {
+          handling.delete(handled);
+        });
+      handling.add(handled);
     });
 
     socket.on("close", () => {
@@ -316,7 +366,7 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
     url: `ws://${options.host}:${address.port}`,
     port: address.port,
     send,
-    close: async () => {
+    close: async (commandWait) => {
       detachDelivery();
       for (const conn of connections.values()) conn.socket.close(1001, "server shutting down");
       const socketsClosed = once(wss, "close");
@@ -326,6 +376,15 @@ export const startGateway = async (options: GatewayOptions): Promise<GatewayHand
       httpServer.closeAllConnections();
       httpServer.close();
       await httpClosed;
+      // A command still awaiting the engine stores its reply before the catalog behind the writer closes. Shutdown
+      // abandons a start's I/O, so this is normally quick; only an fsync already under way can hold it.
+      const gaveUp = Promise.withResolvers<undefined>();
+      const onAbort = () => gaveUp.resolve(undefined);
+      if (commandWait.aborted) onAbort();
+      else commandWait.addEventListener("abort", onAbort, { once: true });
+      await Promise.race([Promise.all(handling), gaveUp.promise]).finally(() =>
+        commandWait.removeEventListener("abort", onAbort),
+      );
     },
   };
 };

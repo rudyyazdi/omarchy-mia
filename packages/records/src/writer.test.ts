@@ -193,6 +193,25 @@ describe("record writer", () => {
       });
     });
 
+    it("stores only the first reply of a command, so a late finish cannot overwrite it", () => {
+      const commandId = recordNew("cmd-1");
+      const first: CommandReply = {
+        disposition: "accepted",
+        result: { conversation_id: "conv_1" },
+      };
+      expect(writer.finishCommand(commandId, first)).toBe(true);
+      expect(
+        writer.finishCommand(commandId, {
+          disposition: "failed",
+          error: { code: "internal", message: "late" },
+        }),
+      ).toBe(false);
+      expect(writer.recordCommand(command("cmd-1", "conn-2"))).toEqual({
+        kind: "duplicate",
+        reply: first,
+      });
+    });
+
     it("treats a reused message_id with another command type as a conflict", () => {
       recordNew("cmd-1");
       expect(writer.recordCommand({ ...command("cmd-1"), type: "heartbeat" })).toEqual({

@@ -25,7 +25,8 @@ export interface MiaServer {
   bridge: ApprovalBridge;
   /**
    * Shut down: stop accepting commands, interrupt the active turn and wait for it until `turnWait` aborts,
-   * close the gateway and the bridge, then close the catalog. Every step runs even when an earlier one fails,
+   * close the gateway (waiting, until `turnWait` aborts, for commands still storing their replies) and the bridge,
+   * then close the catalog. Every step runs even when an earlier one fails,
    * and the returned promise rejects with all their errors only after the last. Memoised: a second call (a
    * SIGTERM after a SIGINT) awaits the first run and sees its outcome; its own `turnWait` is not used.
    */
@@ -39,9 +40,11 @@ export interface MiaServer {
 export const SHUTDOWN_TURN_WAIT_MS = 10_000;
 
 /**
- * The evidence read deadline an entry point should give `startServer`: how long a finished turn's evidence reads may take before the turn is recorded without that evidence. A
- * transcript on a healthy disk reads in milliseconds; only a read that never returns (a regular file on a stale
- * mount; a FIFO is refused without being read) reaches this, and every submission is refused as busy until it does.
+ * The evidence read deadline an entry point should give `startServer`: how long a finished turn's evidence reads may
+ * take before the turn is recorded without that evidence, and how long a conversation start's reads and stores may
+ * take before the start is refused. A transcript on a healthy disk reads in milliseconds; only a read that never
+ * returns (a regular file on a stale mount; a FIFO is refused without being read) reaches this. Until it does, a
+ * turn-end read refuses every submission as busy, and a start's read refuses every other start as busy.
  */
 export const EVIDENCE_READ_TIMEOUT_MS = 10_000;
 
@@ -63,11 +66,14 @@ export const startServer = async (input: {
   adapter?: TurnRunner;
   log?: (message: string) => void;
   /**
-   * A fresh deadline for each turn's evidence reads. An entry point passes
-   * `() => AbortSignal.timeout(EVIDENCE_READ_TIMEOUT_MS)`; a test passes a signal it aborts itself.
+   * A fresh deadline for each turn's evidence reads, and for each conversation start's reads and stores. An entry
+   * point passes `() => AbortSignal.timeout(EVIDENCE_READ_TIMEOUT_MS)`; a test passes a signal it aborts itself.
    */
   evidenceReadDeadline: () => AbortSignal;
-  /** Reads a finished turn's evidence; defaults to `readRuntimeFile`. A test injects one that holds a read. */
+  /**
+   * Reads a finished turn's evidence and a starting conversation's prompt and architecture document; defaults to
+   * `readRuntimeFile`. A test injects one that holds a read.
+   */
   readEvidence?: RuntimeFileReader;
   /** Captures a declared tool output; defaults to `collectArtifact`. A test injects one that holds a capture. */
   collectArtifact?: ArtifactCollector;
@@ -134,7 +140,7 @@ export const startServer = async (input: {
         // In this order: the turn must finish before the catalog that records it closes, and the gateway
         // closes after the turn so the interruption still reaches the client.
         await step(() => engine.shutdown(turnWait));
-        await step(() => gateway.close());
+        await step(() => gateway.close(turnWait));
         await step(() => bridge.close());
         await step(() => catalog.close());
         if (errors.length > 0)

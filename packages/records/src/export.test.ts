@@ -30,7 +30,9 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
-const createExport = (root: string) => {
+const live = () => ({ signal: new AbortController().signal });
+
+const createExport = async (root: string) => {
   const catalog = Catalog.openSync(join(root, "catalog"));
   try {
     const writer = new RecordWriter(catalog);
@@ -53,12 +55,12 @@ const createExport = (root: string) => {
     const artifact = writer.registerArtifact({
       kind: "tool_output",
       logicalName: "result.txt",
-      stored: writer.objects.putSync(Buffer.from("retained result")),
+      stored: await writer.objects.put(Buffer.from("retained result"), live()),
     });
     const dependency = writer.registerArtifact({
       kind: "tool_output",
       logicalName: "source.txt",
-      stored: writer.objects.putSync(Buffer.from("retained source")),
+      stored: await writer.objects.put(Buffer.from("retained source"), live()),
     });
     writer.addDependency(artifact.artifactId, dependency.artifactId, "local_changes");
     writer.linkArtifact({
@@ -95,9 +97,9 @@ describe("verifyExportSync input validation", () => {
     writeManifest(manifest);
   };
 
-  beforeEach(() => {
+  beforeEach(async () => {
     root = realpathSync(mkdtempSync(join(tmpdir(), "mia-export-validation-")));
-    ({ directory, manifest } = createExport(root));
+    ({ directory, manifest } = await createExport(root));
   });
   afterEach(() => {
     vi.mocked(readFileSync).mockReset();

@@ -239,12 +239,13 @@ export class RecordWriter {
 
   /**
    * Store the reply a recorded command's ack carries, so a duplicate of it gets the same one. Like every other
-   * write it is redacted first, so a duplicate never echoes a secret the original reply held.
+   * write it is redacted first, so a duplicate never echoes a secret the original reply held. Only a command
+   * still `received` moves: a late finish cannot overwrite a reply already stored, which duplicates may have
+   * been answered with. Returns whether this reply was stored.
    */
-  finishCommand(commandId: string, reply: CommandReply): void {
-    this.catalog.update(
+  finishCommand(commandId: string, reply: CommandReply): boolean {
+    return this.catalog.updateIf(
       "commands",
-      commandId,
       match(reply)
         .with({ disposition: "accepted" }, ({ result }) => ({
           disposition: "accepted",
@@ -256,6 +257,7 @@ export class RecordWriter {
           error_message: redactString(error.message),
         }))
         .exhaustive(),
+      { id: commandId, expected: { disposition: "received" } },
     );
   }
 

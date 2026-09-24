@@ -182,8 +182,7 @@ const SOURCE_RESTRICTED_SYNTAX = [
 // is itself named `*Sync`, so the bypass sits at each call to it, where "runs before serving" can be verified:
 // a call directly in the body of a synchronous `*Sync` function or method is exempt, but not one in a callback
 // it creates, which may run later. Lint sees a call by its name: a renamed or passed-along `*Sync` function, and
-// a caller of a function that still blocks without the suffix (the rows #53 has yet to move off the serving
-// path), are left to review.
+// a function that blocks without the suffix, are left to review.
 const SYNC_NAME = "/Sync$/";
 const SYNC_FUNCTIONS = [
   `VariableDeclarator[id.name=${SYNC_NAME}] > ArrowFunctionExpression[async=false]`,

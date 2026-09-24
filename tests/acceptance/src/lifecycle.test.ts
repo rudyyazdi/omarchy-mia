@@ -146,9 +146,9 @@ describe("server lifecycle", () => {
       const closeGateway = server.gateway.close;
       let gatewayCloses = 0;
       const gatewayFailure = new Error("simulated gateway close failure");
-      server.gateway.close = async () => {
+      server.gateway.close = async (commandWait) => {
         gatewayCloses += 1;
-        await closeGateway(); // release the port for real, so the failure is all this test adds
+        await closeGateway(commandWait); // release the port for real, so the failure is all this test adds
         throw gatewayFailure;
       };
 

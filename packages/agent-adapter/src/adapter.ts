@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, constants } from "node:fs";
-import { mkdir, open, writeFile } from "node:fs/promises";
+import { mkdir, open, writeFile, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { match } from "ts-pattern";
 import { z } from "zod";
@@ -475,18 +475,25 @@ const parseHookLine = (line: string): Record<string, unknown> | null => {
   }
 };
 
-/** A file the runtime writes during a turn, read after it ends; `absent` when the runtime never wrote it. */
+/**
+ * A file read while the server serves: one the runtime writes during a turn, read after it ends, or a file a
+ * conversation start retains. `absent` when nothing exists at the path.
+ */
 export type RuntimeFileRead =
   | { status: "absent" }
   | { status: "read"; bytes: Buffer }
   | { status: "unreadable"; reason: string };
 
-/** How a turn-end read is bounded: once `signal` aborts, the read is abandoned. */
+/**
+ * How a read is bounded: once `signal` aborts, the read is abandoned; a file longer than `maxBytes` is unreadable,
+ * and no more than one byte past the cap is ever held in memory.
+ */
 export interface RuntimeFileReadOptions {
   signal?: AbortSignal;
+  maxBytes?: number;
 }
 
-/** Reads a runtime-written file at a path; `readRuntimeFile` is the real one, and a test injects its own. */
+/** Reads a file at a path while serving; `readRuntimeFile` is the real one, and a test injects its own. */
 export type RuntimeFileReader = (
   path: string,
   options?: RuntimeFileReadOptions,
@@ -498,6 +505,19 @@ const abortReason = (reason: unknown): string =>
     ? "timed out"
     : errorMessage(reason);
 
+/** Reads at most `maxBytes` + 1 bytes from the start of `handle`: one more than the cap shows the file is longer. */
+const readCapped = async (
+  handle: FileHandle,
+  maxBytes: number,
+  signal: AbortSignal | undefined,
+): Promise<Buffer> => {
+  const chunks: Buffer[] = [];
+  const stream = handle.createReadStream({ start: 0, end: maxBytes, autoClose: false, signal });
+  for await (const chunk of stream)
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return Buffer.concat(chunks);
+};
+
 /**
  * Opens without blocking and reads only a regular file. A blocking open of a FIFO waits for a writer that may
  * never come, and a read of one waits for data, each holding one of libuv's few worker threads meanwhile; a
@@ -506,13 +526,21 @@ const abortReason = (reason: unknown): string =>
  */
 const readRegularFile = async (
   path: string,
-  signal: AbortSignal | undefined,
+  { signal, maxBytes }: RuntimeFileReadOptions,
 ): Promise<RuntimeFileRead> => {
   const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY);
   try {
-    if (!(await handle.stat()).isFile())
-      return { status: "unreadable", reason: "not a regular file" };
-    return { status: "read", bytes: await handle.readFile({ signal }) };
+    const stats = await handle.stat();
+    if (!stats.isFile()) return { status: "unreadable", reason: "not a regular file" };
+    if (maxBytes === undefined) return { status: "read", bytes: await handle.readFile({ signal }) };
+    const tooLarge: RuntimeFileRead = {
+      status: "unreadable",
+      reason: `larger than ${maxBytes} bytes`,
+    };
+    if (stats.size > maxBytes) return tooLarge;
+    // Capped as well, because the file can grow after the stat.
+    const bytes = await readCapped(handle, maxBytes, signal);
+    return bytes.byteLength > maxBytes ? tooLarge : { status: "read", bytes };
   } finally {
     // Nothing was written through this descriptor, so a failed close loses nothing the result depends on.
     await handle.close().catch(() => undefined);
@@ -521,10 +549,11 @@ const readRegularFile = async (
 
 const readOrReport = async (
   path: string,
-  signal: AbortSignal | undefined,
+  options: RuntimeFileReadOptions,
 ): Promise<RuntimeFileRead> => {
+  const { signal } = options;
   try {
-    return await readRegularFile(path, signal);
+    return await readRegularFile(path, options);
   } catch (error) {
     if (signal?.aborted) return { status: "unreadable", reason: abortReason(signal.reason) };
     if (isNotFound(error)) return { status: "absent" };
@@ -535,7 +564,7 @@ const readOrReport = async (
 /** Starts one read of a runtime-written file; it never rejects, reporting every failure as a result instead. */
 type RuntimeFileReadStart = (
   path: string,
-  signal: AbortSignal | undefined,
+  options: RuntimeFileReadOptions,
 ) => Promise<RuntimeFileRead>;
 
 /**
@@ -557,7 +586,8 @@ export const boundedRuntimeFileReader = ({
   const release = (): void => {
     stuckReads -= 1;
   };
-  return async (path, { signal } = {}) => {
+  return async (path, options = {}) => {
+    const { signal } = options;
     // A signal that has already aborted reports its own reason, which `untilAborted` gives without starting.
     if (!signal?.aborted && stuckReads >= maxStuckReads)
       return { status: "unreadable", reason: "an earlier abandoned read is still blocked" };
@@ -568,7 +598,7 @@ export const boundedRuntimeFileReader = ({
     };
     return untilAborted(
       () => {
-        started = read(path, signal);
+        started = read(path, options);
         // Neither handler can throw, so these chains never reject.
         void started.then(markSettled, markSettled);
         return started;
@@ -590,12 +620,14 @@ export const boundedRuntimeFileReader = ({
  * Abandoned reads the process lets stay blocked before it refuses to start another. The libuv worker pool (4
  * threads by default) is per process, and every async fs call and `dns.lookup` queues behind it, so this keeps
  * threads free when a turn's two concurrent evidence reads (transcript and hook evidence) are the last to stick.
+ * A conversation start's two reads (agent prompt and architecture document) share the budget, because the pool is
+ * shared: a stale mount under either path can cost later turns their evidence until those reads return.
  */
 const MAX_STUCK_READS = 2;
 
 /**
- * Reads a runtime-written file without throwing, because a throw after the turn would keep it from being
- * recorded as finished. Only a missing file is absent; anything that is not a regular file (a directory, a
+ * Reads a runtime-written file, or a file a conversation start retains, without throwing, because a throw after
+ * the turn would keep it from being recorded as finished. Only a missing file is absent; anything that is not a regular file (a directory, a
  * FIFO) and any other failure (EACCES, ENOTDIR) is reported. Asynchronous because the server reads at turn end
  * while it serves other connections.
  *

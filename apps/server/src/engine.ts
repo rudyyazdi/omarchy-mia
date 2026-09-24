@@ -40,6 +40,7 @@ import {
   type JournalEventType,
   type LinkRelation,
   type RecordWriter,
+  type StoredObject,
 } from "@mia/records";
 import {
   captureFields,
@@ -50,8 +51,11 @@ import {
 } from "./artifact-capture.ts";
 import type { ArtifactCollector } from "./artifact-collector.ts";
 import {
-  createConversationProvenance,
-  readConversationFilesSync,
+  planConversationProvenance,
+  readConversationFiles,
+  recordConversationProvenance,
+  storeProvenance,
+  type ProvenancePlan,
   type ServerIdentity,
 } from "./provenance.ts";
 import {
@@ -179,12 +183,17 @@ export interface EngineDeps {
   /** Computed once at startup; every conversation's provenance records it. */
   identity: ServerIdentity;
   /**
-   * A fresh deadline for one turn's evidence reads and stores (the transcript and the hook evidence). A read still
+   * A fresh deadline for one batch of evidence reads and stores: a finished turn's transcript and hook evidence, or
+   * a starting conversation's prompt, architecture document and provenance snapshots. A turn-end read still
    * pending when it aborts is recorded unreadable, so a read that never returns cannot keep the task from
-   * finishing; a store it interrupts is recorded not retained (an fsync already under way still completes).
+   * finishing; a store it interrupts is recorded not retained (an fsync already under way still completes). A
+   * conversation start it interrupts is refused.
    */
   evidenceReadDeadline: () => AbortSignal;
-  /** Reads the transcript and the hook evidence at turn end: `readRuntimeFile`, or a test's own. */
+  /**
+   * Reads the transcript and the hook evidence at turn end, and the agent prompt and architecture document at
+   * conversation start: `readRuntimeFile`, or a test's own.
+   */
   readEvidence: RuntimeFileReader;
   /** Captures a tool output a completed call declared: `collectArtifact`, or a test's own. */
   collectArtifact: ArtifactCollector;
@@ -247,6 +256,26 @@ interface DeclaredOutput {
   eventId: string;
 }
 
+/**
+ * The one conversation start awaiting its reads and stores. Shutdown abandons its I/O and refuses it. A disconnect
+ * of the connection that asked does not: the start still commits, with no active connection, so the client's
+ * resend of the same message_id on a new connection gets the start's reply and adopts the conversation.
+ */
+interface PendingStart {
+  connectionId: string;
+  disconnected: boolean;
+  abandon: AbortController;
+}
+
+/** The answer to a start whose I/O shutdown abandoned, or null while it was not. */
+const abandonedStart = (pending: PendingStart): CommandResult | null =>
+  pending.abandon.signal.aborted
+    ? fail(
+        "invalid_state",
+        `conversation start abandoned: ${errorMessage(pending.abandon.signal.reason)}`,
+      )
+    : null;
+
 /** State changes and effects a transaction queues; neither runs unless it commits. */
 interface CommitQueue {
   state: (() => void)[];
@@ -308,6 +337,11 @@ export class Engine {
    * recorded before the catalog closes. Not at the start of shutdown, so a turn it kills keeps its evidence.
    */
   private readonly stopping = new AbortController();
+  /**
+   * The conversation start awaiting its I/O, if any. One at a time: a second start is refused as busy meanwhile,
+   * so at most one command holds the gateway's reply across an await.
+   */
+  private starting: PendingStart | null = null;
   /** What the transaction in progress will apply and perform once it commits. */
   private queued: CommitQueue = emptyQueue();
 
@@ -434,8 +468,12 @@ export class Engine {
 
   // ---------------------------------------------------------------- commands
 
-  /** Run one validated client command; once shutdown has begun, every command is refused unrun. */
-  handle(ctx: CommandContext, command: ClientCommand): CommandResult {
+  /**
+   * Run one validated client command; once shutdown has begun, every command is refused unrun. Every command but
+   * start_conversation decides and commits before this returns; a start awaits its reads and stores first, so the
+   * gateway answers other connections meanwhile.
+   */
+  async handle(ctx: CommandContext, command: ClientCommand): Promise<CommandResult> {
     if (this.shuttingDown) return fail("invalid_state", "the server is shutting down");
     return match(command)
       .with({ type: "start_conversation" }, () => this.startConversation(ctx))
@@ -447,7 +485,13 @@ export class Engine {
       .exhaustive();
   }
 
-  startConversation(ctx: CommandContext): CommandResult {
+  /**
+   * Why a conversation cannot start for `ctx` now, or null; checked again once the start's I/O has settled. A start
+   * whose connection has closed (`disconnected`) yields only to another client: its own client may already have
+   * reconnected and adopted the conversation, to resend this very start.
+   */
+  private refuseStart(ctx: CommandContext, disconnected = false): CommandResult | null {
+    if (this.shuttingDown) return fail("invalid_state", "the server is shutting down");
     if (this.task)
       return fail(
         "busy",
@@ -456,29 +500,84 @@ export class Engine {
     if (
       this.conversation &&
       this.activeConnectionId &&
-      this.activeConnectionId !== ctx.connectionId
+      this.activeConnectionId !== ctx.connectionId &&
+      !(disconnected && this.activeClientId === ctx.clientId)
     ) {
       return fail("busy", "another client owns the active conversation");
     }
-    const { writer, profile } = this.deps;
+    return null;
+  }
+
+  /**
+   * Reads the conversation's files and stores its provenance snapshots before the transaction opens, then
+   * re-checks the guards, because a task, another client or shutdown may have arrived while it awaited.
+   */
+  async startConversation(ctx: CommandContext): Promise<CommandResult> {
+    const refused = this.refuseStart(ctx);
+    if (refused) return refused;
+    if (this.starting) return fail("busy", "another conversation is starting");
+    const pending: PendingStart = {
+      connectionId: ctx.connectionId,
+      disconnected: false,
+      abandon: new AbortController(),
+    };
+    this.starting = pending;
+    try {
+      const signal = AbortSignal.any([pending.abandon.signal, this.deps.evidenceReadDeadline()]);
+      let plan: ProvenancePlan<StoredObject>;
+      try {
+        const files = await readConversationFiles({
+          profile: this.deps.profile,
+          read: this.deps.readEvidence,
+          signal,
+        });
+        plan = await storeProvenance(
+          planConversationProvenance({
+            profile: this.deps.profile,
+            clientBuild: ctx.clientBuild,
+            identity: this.deps.identity,
+            files,
+          }),
+          { objects: this.deps.writer.objects, signal },
+        );
+      } catch (error) {
+        return (
+          abandonedStart(pending) ??
+          fail("record_failure", `could not create conversation: ${errorMessage(error)}`)
+        );
+      }
+      return (
+        abandonedStart(pending) ??
+        this.refuseStart(ctx, pending.disconnected) ??
+        this.commitStart({ ctx, plan, connected: !pending.disconnected })
+      );
+    } finally {
+      this.starting = null;
+    }
+  }
+
+  /**
+   * Records a conversation whose provenance is stored, and makes it the active one. When the connection that asked
+   * has closed meanwhile (`connected` false), the conversation belongs to its client, through the connection that
+   * client has adopted since, or none, as `onDisconnect` would have left it.
+   */
+  private commitStart(input: {
+    ctx: CommandContext;
+    plan: ProvenancePlan<StoredObject>;
+    connected: boolean;
+  }): CommandResult {
+    const { ctx, plan, connected } = input;
+    const { writer } = this.deps;
     const previous = {
       conversation: this.conversation,
       connection: this.activeConnectionId,
       client: this.activeClientId,
     };
     try {
-      // eslint-disable-next-line no-restricted-syntax -- on the serving path until #53 makes engine commands async
-      const files = readConversationFilesSync(profile);
       // Unlike task transitions, this sets state inside the transaction, because `record` reads the active
       // conversation; the catch below restores it.
       return this.tx(() => {
-        const provenance = createConversationProvenance({
-          writer,
-          profile,
-          clientBuild: ctx.clientBuild,
-          identity: this.deps.identity,
-          files,
-        });
+        const provenance = recordConversationProvenance(writer, plan);
         const runtimeConversationId = randomUUID();
         const conv = writer.createConversation({
           provenanceSetId: provenance.provenance_set_id,
@@ -504,7 +603,8 @@ export class Engine {
           epoch: 0,
           pendingNote: null,
         };
-        this.activeConnectionId = ctx.connectionId;
+        // Disconnected, the active connection is none or one of this client's (refuseStart), so it stays.
+        if (connected) this.activeConnectionId = ctx.connectionId;
         this.activeClientId = ctx.clientId;
         this.record("provenance_recorded", provenance);
         this.emit({
@@ -891,6 +991,7 @@ export class Engine {
 
   /** Disconnection is not consent: pending approvals stay pending; the connection simply stops being active. */
   onDisconnect(connectionId: string): void {
+    if (this.starting?.connectionId === connectionId) this.starting.disconnected = true;
     if (this.activeConnectionId !== connectionId) return;
     if (this.conversation) {
       try {
@@ -1828,6 +1929,7 @@ export class Engine {
    */
   async shutdown(turnWait: AbortSignal): Promise<void> {
     this.shuttingDown = true;
+    this.starting?.abandon.abort(new Error("the server is shutting down"));
     const task = this.task;
     if (!task) return;
     const interruption = this.interrupt(task);
