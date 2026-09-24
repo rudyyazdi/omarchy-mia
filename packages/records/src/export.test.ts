@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { sha256Hex } from "@mia/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Catalog } from "./catalog.ts";
+import { Catalog, newId } from "./catalog.ts";
 import { exportConversationSync, verifyExportSync, type ExportManifest } from "./export.ts";
 import { EXPORT_TABLES, SCHEMA_VERSION } from "./schema.ts";
 import { RecordWriter } from "./writer.ts";
@@ -37,17 +37,17 @@ const createExport = async (root: string) => {
   try {
     const writer = new RecordWriter(catalog);
     const provenanceSetId = writer.createProvenanceSet("export verification fixture");
-    const conversation = writer.createConversation({
+    const conversationId = newId("conv");
+    writer.createConversation({
+      id: conversationId,
       provenanceSetId,
       runtimeConversationId: "runtime-export",
     });
-    const taskId = writer.createTask({
-      conversationId: conversation.id,
-      text: "retain evidence",
-      clientId: null,
-    });
+    const taskId = newId("task");
+    writer.createTask({ id: taskId, conversationId, text: "retain evidence", clientId: null });
     const event = writer.appendEvent({
-      conversationId: conversation.id,
+      id: newId("evt"),
+      conversationId,
       taskId,
       type: "task_started",
       payload: {},
@@ -64,12 +64,12 @@ const createExport = async (root: string) => {
     });
     writer.addDependency(artifact.artifactId, dependency.artifactId, "local_changes");
     writer.linkArtifact({
-      conversationId: conversation.id,
+      conversationId,
       artifactId: artifact.artifactId,
       relation: "event_payload",
       eventId: event.id,
     });
-    return exportConversationSync(catalog, conversation.id, join(root, "export"));
+    return exportConversationSync(catalog, conversationId, join(root, "export"));
   } finally {
     catalog.close();
   }

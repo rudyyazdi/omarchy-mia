@@ -5,7 +5,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { startWatch, type Watch, type WatchMessage, type WatchTimers } from "@mia/debug-cli";
-import { Catalog, RecordWriter, snapshotConversation, watchEntriesAfter } from "@mia/records";
+import {
+  Catalog,
+  RecordWriter,
+  newId,
+  snapshotConversation,
+  watchEntriesAfter,
+} from "@mia/records";
 import type { MiaClient } from "@mia/text-client";
 import { ackResult, must, mustString, useScriptedSession, type TestServer } from "./harness.ts";
 import type { ScriptedRuntime } from "./scripted-runtime.ts";
@@ -417,9 +423,11 @@ describe("mia debug watch", () => {
       const stalled = writable.transaction(() => {
         const writer = new RecordWriter(writable);
         const provenanceSetId = writer.createProvenanceSet("watch backpressure");
-        const { id } = writer.createConversation({ provenanceSetId, runtimeConversationId: "rt" });
+        const id = newId("conv");
+        writer.createConversation({ id, provenanceSetId, runtimeConversationId: "rt" });
         for (let index = 0; index < 200; index += 1)
           writer.appendEvent({
+            id: newId("evt"),
             conversationId: id,
             type: "text_delta",
             payload: { text: "x".repeat(64 * 1024) },

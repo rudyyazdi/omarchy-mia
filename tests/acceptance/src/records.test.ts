@@ -8,6 +8,7 @@ import {
   ObjectStore,
   RecordWriter,
   exportConversationSync,
+  newId,
   reconcileObjectsSync,
   snapshotConversation,
   verifyExportSync,
@@ -330,10 +331,20 @@ describe("records, report and export", () => {
     const catalog = Catalog.openSync(join(dir, "state"));
     const writer = new RecordWriter(catalog);
     const prov = writer.createProvenanceSet("t");
-    const conv = writer.createConversation({ provenanceSetId: prov, runtimeConversationId: "rt" });
-    writer.appendEvent({ conversationId: conv.id, type: "task_submitted", payload: { a: 1 } });
+    const conversationId = newId("conv");
+    writer.createConversation({
+      id: conversationId,
+      provenanceSetId: prov,
+      runtimeConversationId: "rt",
+    });
+    writer.appendEvent({
+      id: newId("evt"),
+      conversationId,
+      type: "task_submitted",
+      payload: { a: 1 },
+    });
     const exportDir = join(dir, "out");
-    exportConversationSync(catalog, conv.id, exportDir);
+    exportConversationSync(catalog, conversationId, exportDir);
     catalog.close();
     writeFileSync(join(exportDir, "events.jsonl"), "tampered\n");
     const verification = verifyExportSync(exportDir);

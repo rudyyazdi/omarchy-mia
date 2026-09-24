@@ -650,6 +650,10 @@ describe("approval path", () => {
     await tick();
     expect(turn.decisions).toHaveLength(0); // still held
     expect(approvalStatuses()).toEqual(["pending"]);
+    // The approval and the event that requested it name each other.
+    expect(rows("SELECT id, requesting_event_id FROM approvals")).toEqual([
+      { id: requested.payload.approval_id, requesting_event_id: requested.message_id },
+    ]);
     const ack = await decide(taskId, requested.payload.approval_id, "approve");
     expect(ack.disposition).toBe("accepted");
     expect(ackResult(ack).released).toBe(true);

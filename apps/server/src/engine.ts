@@ -34,7 +34,6 @@ import {
   type ToolCallStatus,
 } from "@mia/protocol";
 import {
-  newId,
   nowIso,
   type ArtifactKind,
   type Catalog,
@@ -217,6 +216,11 @@ export interface EngineDeps {
   readEvidence: RuntimeFileReader;
   /** Captures a tool output a completed call declared: `collectArtifact`, or a test's own. */
   collectArtifact: ArtifactCollector;
+  /**
+   * Names every record the engine creates, and every event it sends: `newId`. Injected randomness, so a
+   * transition's ids are chosen before its records are written and can refer to each other (RecordWriter).
+   */
+  newId: (prefix: string) => string;
   log: (message: string) => void;
 }
 
@@ -447,6 +451,7 @@ export class Engine {
     opts: EventOpts = {},
   ): { id: string; sequence: number } {
     const appended = this.deps.writer.appendEvent({
+      id: this.deps.newId("evt"),
       conversationId: this.activeConversation.id,
       type,
       payload,
@@ -475,7 +480,7 @@ export class Engine {
           redacted_arguments: call.redactedArguments,
         },
       },
-      { id: newId("evt"), sequence: null },
+      { id: this.deps.newId("evt"), sequence: null },
     );
   }
 
@@ -604,11 +609,13 @@ export class Engine {
       return this.tx(() => {
         const provenance = recordConversationProvenance(writer, plan);
         const runtimeConversationId = randomUUID();
+        const conversationId = this.deps.newId("conv");
         const conv = writer.createConversation({
+          id: conversationId,
           provenanceSetId: provenance.provenance_set_id,
           runtimeConversationId,
         });
-        writer.linkProvenanceSet(conv.id, provenance.provenance_set_id);
+        writer.linkProvenanceSet(conversationId, provenance.provenance_set_id);
         if (previous.conversation)
           writer.updateConversation(previous.conversation.id, { status: "closed" });
         // Every turn of this conversation appends the prompt bytes recorded in provenance: the runtime reads the
@@ -618,7 +625,7 @@ export class Engine {
             ? null
             : writer.objects.pathFor(provenance.agent_prompt_digest);
         this.conversation = {
-          id: conv.id,
+          id: conversationId,
           runtimeConversationId,
           provenanceSetId: provenance.provenance_set_id,
           directory: conv.directory,
@@ -635,14 +642,17 @@ export class Engine {
         this.emit({
           type: "conversation_started",
           payload: {
-            conversation_id: conv.id,
+            conversation_id: conversationId,
             started_at: conv.startedAt,
             provenance_set_id: provenance.provenance_set_id,
           },
         });
         return {
           ok: true,
-          result: { conversation_id: conv.id, provenance_set_id: provenance.provenance_set_id },
+          result: {
+            conversation_id: conversationId,
+            provenance_set_id: provenance.provenance_set_id,
+          },
         };
       });
     } catch (error) {
@@ -673,15 +683,18 @@ export class Engine {
     const turnIndex = conversation.turnCount + 1;
     const note = conversation.pendingNote;
     const runtimePrompt = note ? `${note}\n\n${payload.text}` : payload.text;
-    let ids: { taskId: string; executionId: string };
+    const taskId = this.deps.newId("task");
+    const executionId = this.deps.newId("exec");
     try {
-      ids = this.tx(() => {
-        const taskId = writer.createTask({
+      this.tx(() => {
+        writer.createTask({
+          id: taskId,
           conversationId: conversation.id,
           text: payload.text,
           clientId: ctx.clientId,
         });
-        const executionId = writer.createExecution({
+        writer.createExecution({
+          id: executionId,
           taskId,
           conversationId: conversation.id,
           runtimeIdentity: RUNTIME_IDENTITY,
@@ -715,7 +728,6 @@ export class Engine {
           },
           opts,
         );
-        return { taskId, executionId };
       });
     } catch (error) {
       return fail("record_failure", `could not record task: ${errorMessage(error)}`);
@@ -725,8 +737,8 @@ export class Engine {
     conversation.pendingNote = null;
     const finished: PromiseWithResolvers<void> = Promise.withResolvers();
     const task: TaskState = {
-      id: ids.taskId,
-      executionId: ids.executionId,
+      id: taskId,
+      executionId,
       epoch,
       status: "running",
       gateOpen: true,
@@ -1392,7 +1404,9 @@ export class Engine {
     const { runtimeCallId, toolIdentity, digest, policy, proposalEventId } = input;
     const revision = (task.calls.get(runtimeCallId)?.at(-1)?.revision ?? 0) + 1;
     const redactedArguments = redactValue(input.args);
-    const id = this.deps.writer.createToolCall({
+    const id = this.deps.newId("call");
+    this.deps.writer.createToolCall({
+      id,
       conversationId: this.activeConversation.id,
       taskId: task.id,
       executionId: task.executionId,
@@ -1661,12 +1675,7 @@ export class Engine {
         return { kind: "answer", decision: { behavior: "allow" } };
       })
       .with({ kind: "ask" }, (): PermissionAnswer => {
-        // Durable pending approval bound to (conversation, task, runtime call, revision, tool, digest, epoch).
-        const approvalId = this.deps.writer.createApproval({
-          toolCallId: call.id,
-          executionEpoch: task.epoch,
-          requestingEventId: null,
-        });
+        const approvalId = this.deps.newId("appr");
         const requested = this.emit(
           {
             type: "approval_requested",
@@ -1687,7 +1696,14 @@ export class Engine {
           },
           opts,
         );
-        this.deps.catalog.update("approvals", approvalId, { requesting_event_id: requested.id });
+        // Durable pending approval bound to (conversation, task, runtime call, revision, tool, digest, epoch), and
+        // to the event that asked for it: its id was chosen first, so the event could name it before it existed.
+        this.deps.writer.createApproval({
+          id: approvalId,
+          toolCallId: call.id,
+          executionEpoch: task.epoch,
+          requestingEventId: requested.id,
+        });
         this.deps.writer.updateToolCall(call.id, { status: "awaiting_approval" });
         this.onCommit(() => {
           call.status = "awaiting_approval";

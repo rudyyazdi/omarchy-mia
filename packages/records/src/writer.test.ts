@@ -25,18 +25,25 @@ afterEach(() => {
 describe("record writer", () => {
   it("enforces foreign keys and rolls back a failed transaction atomically", () => {
     const prov = writer.createProvenanceSet("test");
-    const conv = writer.createConversation({
+    writer.createConversation({
+      id: "conv-1",
       provenanceSetId: prov,
       runtimeConversationId: "rt-1",
     });
     expect(() =>
       catalog.transaction(() => {
         writer.appendEvent({
-          conversationId: conv.id,
+          id: "evt-1",
+          conversationId: "conv-1",
           type: "task_submitted",
           payload: { ok: true },
         });
-        writer.createTask({ conversationId: "conv_does_not_exist", text: "x", clientId: null });
+        writer.createTask({
+          id: "task-1",
+          conversationId: "conv_does_not_exist",
+          text: "x",
+          clientId: null,
+        });
       }),
     ).toThrow();
     expect(catalog.all("SELECT * FROM events")).toHaveLength(0);
@@ -44,30 +51,38 @@ describe("record writer", () => {
 
   it("records a conversation without creating its directory", () => {
     const conv = writer.createConversation({
+      id: "conv-1",
       provenanceSetId: writer.createProvenanceSet("test"),
       runtimeConversationId: "rt-1",
     });
+    expect(conv.directory.endsWith("_conv-1")).toBe(true);
     expect(conv.directory.startsWith(catalog.paths.conversations)).toBe(true);
     expect(existsSync(conv.directory)).toBe(false);
   });
 
   it("assigns a dense per-conversation sequence and redacts payloads", () => {
     const prov = writer.createProvenanceSet("test");
-    const conv = writer.createConversation({
+    writer.createConversation({
+      id: "conv-1",
       provenanceSetId: prov,
       runtimeConversationId: "rt-1",
     });
     const first = writer.appendEvent({
-      conversationId: conv.id,
+      id: "evt-1",
+      conversationId: "conv-1",
       type: "task_submitted",
       payload: { api_key: "sk-ant-abcdefghijklmnop", text: "Bearer abcdefghijklmnopqrstuvwxyz" },
     });
     const second = writer.appendEvent({
-      conversationId: conv.id,
+      id: "evt-2",
+      conversationId: "conv-1",
       type: "runtime_exit",
       payload: {},
     });
-    expect([first.sequence, second.sequence]).toEqual([1, 2]);
+    expect([first, second].map(({ id, sequence }) => ({ id, sequence }))).toEqual([
+      { id: "evt-1", sequence: 1 },
+      { id: "evt-2", sequence: 2 },
+    ]);
     const row = catalog.get<{ payload: string }>(
       "SELECT payload FROM events WHERE id = ?",
       first.id,
@@ -76,6 +91,33 @@ describe("record writer", () => {
     expect(row.payload).not.toContain("sk-ant");
     expect(row.payload).not.toContain("abcdefghijklmnopqrstuvwxyz");
     expect(row.payload).toContain("[REDACTED]");
+  });
+
+  it("names a transition's rows with the ids its caller gives, and refuses a reused one", () => {
+    const prov = writer.createProvenanceSet("test");
+    writer.createConversation({
+      id: "conv-1",
+      provenanceSetId: prov,
+      runtimeConversationId: "rt-1",
+    });
+    writer.createTask({ id: "task-1", conversationId: "conv-1", text: "t", clientId: null });
+    const append = (taskId: string | null) =>
+      writer.appendEvent({
+        id: "evt-1",
+        conversationId: "conv-1",
+        type: "task_submitted",
+        payload: {},
+        taskId,
+      });
+    append("task-1");
+    expect(() => append(null)).toThrow();
+    expect(() =>
+      writer.createTask({ id: "task-1", conversationId: "conv-1", text: "u", clientId: null }),
+    ).toThrow();
+    expect(catalog.all("SELECT id, task_id FROM events")).toEqual([
+      { id: "evt-1", task_id: "task-1" },
+    ]);
+    expect(catalog.all("SELECT id, text FROM tasks")).toEqual([{ id: "task-1", text: "t" }]);
   });
 
   it("stores artifact bytes once and keeps distinct logical records", async () => {
@@ -102,16 +144,18 @@ describe("record writer", () => {
 
   it("rejects duplicate approvals for the same binding and epoch, and duplicate command IDs", () => {
     const prov = writer.createProvenanceSet("test");
-    const conv = writer.createConversation({
+    writer.createConversation({
+      id: "conv-1",
       provenanceSetId: prov,
       runtimeConversationId: "rt-1",
     });
     writer.ensureClient("client-1", "text-client");
     writer.openConnection({ connectionId: "conn-1", clientId: "client-1", build: {} });
-    const task = writer.createTask({ conversationId: conv.id, text: "t", clientId: "client-1" });
-    const exec = writer.createExecution({
-      taskId: task,
-      conversationId: conv.id,
+    writer.createTask({ id: "task-1", conversationId: "conv-1", text: "t", clientId: "client-1" });
+    writer.createExecution({
+      id: "exec-1",
+      taskId: "task-1",
+      conversationId: "conv-1",
       runtimeIdentity: "claude-code",
       runtimeConversationId: "rt-1",
       requestedModel: "m",
@@ -119,10 +163,11 @@ describe("record writer", () => {
       provenanceSetId: prov,
       executionEpoch: 1,
     });
-    const call = writer.createToolCall({
-      conversationId: conv.id,
-      taskId: task,
-      executionId: exec,
+    writer.createToolCall({
+      id: "call-1",
+      conversationId: "conv-1",
+      taskId: "task-1",
+      executionId: "exec-1",
       runtimeCallId: "toolu_1",
       bindingRevision: 1,
       toolIdentity: "mcp__d1__change",
@@ -132,10 +177,9 @@ describe("record writer", () => {
       status: "awaiting_approval",
       proposalEventId: null,
     });
-    writer.createApproval({ toolCallId: call, executionEpoch: 1, requestingEventId: null });
-    expect(() =>
-      writer.createApproval({ toolCallId: call, executionEpoch: 1, requestingEventId: null }),
-    ).toThrow();
+    const approval = { toolCallId: "call-1", executionEpoch: 1, requestingEventId: null };
+    writer.createApproval({ id: "appr-1", ...approval });
+    expect(() => writer.createApproval({ id: "appr-2", ...approval })).toThrow();
     const command: CommandInput = {
       connectionId: "conn-1",
       clientId: "client-1",
