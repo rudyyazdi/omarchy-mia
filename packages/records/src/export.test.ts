@@ -20,6 +20,9 @@ import { exportConversationSync, verifyExportSync, type ExportManifest } from ".
 import { EXPORT_TABLES, SCHEMA_VERSION } from "./schema.ts";
 import { RecordWriter } from "./writer.ts";
 
+/** When the rows these tests write say they were recorded. */
+const AT = "2026-01-01T00:00:00.000Z";
+
 vi.mock("node:fs", async (importOriginal) => {
   const filesystem = await importOriginal<typeof import("node:fs")>();
   return {
@@ -40,13 +43,21 @@ const createExport = async (root: string) => {
     const conversationId = newId("conv");
     writer.createConversation({
       id: conversationId,
+      startedAt: AT,
       provenanceSetId,
       runtimeConversationId: "runtime-export",
     });
     const taskId = newId("task");
-    writer.createTask({ id: taskId, conversationId, text: "retain evidence", clientId: null });
+    writer.createTask({
+      id: taskId,
+      createdAt: AT,
+      conversationId,
+      text: "retain evidence",
+      clientId: null,
+    });
     const event = writer.appendEvent({
       id: newId("evt"),
+      receivedAt: AT,
       conversationId,
       taskId,
       type: "task_started",

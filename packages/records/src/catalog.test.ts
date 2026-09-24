@@ -6,6 +6,9 @@ import { Catalog, defaultStateDir, newId } from "./catalog.ts";
 import { RecordWriter } from "./writer.ts";
 import { SCHEMA_VERSION, type JournalEventType } from "./schema.ts";
 
+/** When the rows these tests write say they were recorded. */
+const AT = "2026-01-01T00:00:00.000Z";
+
 describe("defaultStateDir", () => {
   it("resolves from the environment it is given, not the process's", () => {
     expect(defaultStateDir({ MIA_STATE_DIR: "/state/override", XDG_STATE_HOME: "/xdg" })).toBe(
@@ -64,11 +67,18 @@ describe("savepoint", () => {
     const writer = new RecordWriter(catalog);
     writer.createConversation({
       id: "conv-1",
+      startedAt: AT,
       provenanceSetId: writer.createProvenanceSet("test"),
       runtimeConversationId: "rt-1",
     });
     const append = (type: JournalEventType) =>
-      writer.appendEvent({ id: newId("evt"), conversationId: "conv-1", type, payload: {} });
+      writer.appendEvent({
+        id: newId("evt"),
+        receivedAt: AT,
+        conversationId: "conv-1",
+        type,
+        payload: {},
+      });
     const eventTypes = () =>
       catalog
         .all<{ type: JournalEventType }>("SELECT type FROM events ORDER BY sequence")

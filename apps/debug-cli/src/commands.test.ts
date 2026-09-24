@@ -5,6 +5,9 @@ import { Catalog, RecordWriter, newId } from "@mia/records";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { exportToDirectory, reconcile } from "./commands.ts";
 
+/** When the rows these tests write say they were recorded. */
+const AT = "2026-01-01T00:00:00.000Z";
+
 let root: string;
 let log: MockInstance<typeof console.log>;
 beforeEach(() => {
@@ -37,7 +40,12 @@ describe("debug commands open the catalog read-only", () => {
       const writer = new RecordWriter(catalog);
       const provenanceSetId = writer.createProvenanceSet("debug-cli fixture");
       const id = newId("conv");
-      writer.createConversation({ id, provenanceSetId, runtimeConversationId: "runtime" });
+      writer.createConversation({
+        id,
+        startedAt: AT,
+        provenanceSetId,
+        runtimeConversationId: "runtime",
+      });
       return id;
     });
     catalog.close();

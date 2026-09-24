@@ -1228,6 +1228,71 @@ describe("approval path", () => {
   });
 });
 
+describe("record times", () => {
+  it("stamps each commit's rows, and each event sent, with a reading of the injected clock", async () => {
+    // Every reading is one second after the last, so rows that share a time came from one reading.
+    let reading = Date.parse("2031-01-01T00:00:00.000Z");
+    ts.setClock(() => new Date((reading += 1000)));
+    const { turn, taskId, held, requested } = await submitHeldCall("change once");
+    await decide(taskId, requested.payload.approval_id, "approve");
+    expect((await held).behavior).toBe("allow");
+    await turn.toolResult("toolu_1", JSON.stringify({ counter: 1 }));
+    turn.end();
+    const finished = await client.waitFor("task_finished");
+    const one = <T>(sql: string): T => must(rows<T>(sql, taskId)[0], sql);
+    const eventAt = (type: string): string =>
+      must(
+        rows<{ received_at: string }>(
+          "SELECT received_at FROM events WHERE task_id = ? AND type = ?",
+          taskId,
+          type,
+        )[0],
+        `${type} event`,
+      ).received_at;
+    const task = one<{ created_at: string; finished_at: string }>(
+      "SELECT created_at, finished_at FROM tasks WHERE id = ?",
+    );
+    const execution = one<{ started_at: string; ended_at: string }>(
+      "SELECT started_at, ended_at FROM executions WHERE task_id = ?",
+    );
+    const call = one<{ created_at: string; updated_at: string }>(
+      "SELECT created_at, updated_at FROM tool_calls WHERE task_id = ?",
+    );
+    const approval = one<{ requested_at: string; consumed_at: string }>(
+      "SELECT a.requested_at, a.consumed_at FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id WHERE t.task_id = ?",
+    );
+    // The submission, the approval request, the decision and the turn's end each commit together.
+    expect([execution.started_at, eventAt("task_submitted")]).toEqual([
+      task.created_at,
+      task.created_at,
+    ]);
+    expect([call.created_at, eventAt("approval_requested")]).toEqual([
+      approval.requested_at,
+      approval.requested_at,
+    ]);
+    expect([eventAt("approval_resolved"), eventAt("tool_dispatched")]).toEqual([
+      approval.consumed_at,
+      approval.consumed_at,
+    ]);
+    expect([execution.ended_at, call.updated_at, eventAt("task_finished")]).toEqual([
+      task.finished_at,
+      task.finished_at,
+      task.finished_at,
+    ]);
+    // Each commit read the injected clock afresh, and so did each event as it was sent.
+    const times = [
+      task.created_at,
+      approval.requested_at,
+      approval.consumed_at,
+      task.finished_at,
+      finished.server_time,
+    ];
+    expect(task.created_at > "2031-01-01T00:00:00.000Z").toBe(true);
+    expect(times.toSorted()).toEqual(times);
+    expect(new Set(times).size).toBe(times.length);
+  });
+});
+
 describe("interruption path", () => {
   it("keeps the gate open and the approval pending when an interruption cannot be recorded", async () => {
     const { turn, taskId, held, requested } = await submitHeldCall("change");

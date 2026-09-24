@@ -77,6 +77,8 @@ export const startServer = async (input: {
   readEvidence?: RuntimeFileReader;
   /** Captures a declared tool output; defaults to `collectArtifact`. A test injects one that holds a capture. */
   collectArtifact?: ArtifactCollector;
+  /** The clock the engine stamps its records and events with; defaults to the system clock. */
+  now?: () => Date;
   /**
    * The server process's environment: fills a profile's `${ENV}` placeholders, is what the runtime
    * inherits and is probed with at startup, and names the bridge's request log (`MIA_MCP_HTTP_LOG`).
@@ -115,6 +117,7 @@ export const startServer = async (input: {
         readEvidence: input.readEvidence ?? readRuntimeFile,
         collectArtifact: input.collectArtifact ?? collectArtifact,
         newId,
+        now: input.now ?? (() => new Date()),
         log,
       });
       const gateway = await startGateway({

@@ -16,6 +16,9 @@ import type { MiaClient } from "@mia/text-client";
 import { ackResult, must, mustString, useScriptedSession, type TestServer } from "./harness.ts";
 import type { ScriptedRuntime } from "./scripted-runtime.ts";
 
+/** When the rows these tests write say they were recorded. */
+const AT = "2026-01-01T00:00:00.000Z";
+
 let runtime: ScriptedRuntime;
 let ts: TestServer;
 let client: MiaClient;
@@ -424,10 +427,16 @@ describe("mia debug watch", () => {
         const writer = new RecordWriter(writable);
         const provenanceSetId = writer.createProvenanceSet("watch backpressure");
         const id = newId("conv");
-        writer.createConversation({ id, provenanceSetId, runtimeConversationId: "rt" });
+        writer.createConversation({
+          id,
+          startedAt: AT,
+          provenanceSetId,
+          runtimeConversationId: "rt",
+        });
         for (let index = 0; index < 200; index += 1)
           writer.appendEvent({
             id: newId("evt"),
+            receivedAt: AT,
             conversationId: id,
             type: "text_delta",
             payload: { text: "x".repeat(64 * 1024) },

@@ -34,7 +34,6 @@ import {
   type ToolCallStatus,
 } from "@mia/protocol";
 import {
-  nowIso,
   type ArtifactKind,
   type Catalog,
   type IdPrefix,
@@ -223,6 +222,11 @@ export interface EngineDeps {
    * before its records are written and can refer to each other.
    */
   newId: (prefix: IdPrefix) => string;
+  /**
+   * The clock. Each transaction reads it once, and every conversation, task, execution, tool call, approval and event
+   * row it writes carries that time (see RecordWriter); each event sent reads it for its `server_time`.
+   */
+  now: () => Date;
   log: (message: string) => void;
 }
 
@@ -375,8 +379,19 @@ export class Engine {
    * by `answerPrompt` after a commit, by its abandonment, or once its turn has ended (submitText).
    */
   private readonly prompts = new Holds<PermissionDecision>(MAX_HELD_PROMPTS);
+  /**
+   * When the transaction in progress was decided, or null outside one. One reading per transaction, as a kernel
+   * dispatch hands its `decide` one `now`, so the rows of one commit agree on when it happened.
+   */
+  private transactionTime: string | null = null;
 
   constructor(private readonly deps: EngineDeps) {}
+
+  /** The time the rows of the transaction in progress record (inside tx). */
+  private get recordedAt(): string {
+    if (this.transactionTime === null) throw new Error("engine records only inside a transaction");
+    return this.transactionTime;
+  }
 
   /** The conversation every guarded command and runtime callback operates on; callers check for one first. */
   private get activeConversation(): ConversationState {
@@ -394,11 +409,14 @@ export class Engine {
    */
   private tx<T>(records: () => T): T {
     let result: T;
+    this.transactionTime = this.deps.now().toISOString();
     try {
       result = this.deps.catalog.transaction(records);
     } catch (error) {
       this.queued = emptyQueue();
       throw error;
+    } finally {
+      this.transactionTime = null;
     }
     const { state, effects } = this.queued;
     this.queued = emptyQueue();
@@ -434,7 +452,7 @@ export class Engine {
       message_id: envelope.id,
       conversation_id: this.conversation?.id ?? null,
       sequence: envelope.sequence,
-      server_time: nowIso(),
+      server_time: this.deps.now().toISOString(),
       ...event,
     });
   }
@@ -454,6 +472,7 @@ export class Engine {
   ): { id: string; sequence: number } {
     const appended = this.deps.writer.appendEvent({
       id: this.deps.newId("evt"),
+      receivedAt: this.recordedAt,
       conversationId: this.activeConversation.id,
       type,
       payload,
@@ -612,8 +631,10 @@ export class Engine {
         const provenance = recordConversationProvenance(writer, plan);
         const runtimeConversationId = randomUUID();
         const conversationId = this.deps.newId("conv");
+        const startedAt = this.recordedAt;
         const conv = writer.createConversation({
           id: conversationId,
+          startedAt,
           provenanceSetId: provenance.provenance_set_id,
           runtimeConversationId,
         });
@@ -645,7 +666,7 @@ export class Engine {
           type: "conversation_started",
           payload: {
             conversation_id: conversationId,
-            started_at: conv.startedAt,
+            started_at: startedAt,
             provenance_set_id: provenance.provenance_set_id,
           },
         });
@@ -691,12 +712,14 @@ export class Engine {
       this.tx(() => {
         writer.createTask({
           id: taskId,
+          createdAt: this.recordedAt,
           conversationId: conversation.id,
           text: payload.text,
           clientId: ctx.clientId,
         });
         writer.createExecution({
           id: executionId,
+          startedAt: this.recordedAt,
           taskId,
           conversationId: conversation.id,
           runtimeIdentity: RUNTIME_IDENTITY,
@@ -869,6 +892,7 @@ export class Engine {
         );
         writer.updateApproval(approvalId, {
           status: decided.approval,
+          consumedAt: this.recordedAt,
           decisionEventId: resolved.id,
           decisionClientId: ctx.clientId,
         });
@@ -1140,6 +1164,7 @@ export class Engine {
   ): void {
     this.deps.writer.updateApproval(change.approvalId, {
       status: change.status,
+      consumedAt: this.recordedAt,
       reason: change.reason,
       ...(cause.decisionEventId ? { decisionEventId: cause.decisionEventId } : {}),
     });
@@ -1151,6 +1176,7 @@ export class Engine {
 
   private recordCallChange(change: CallChange): void {
     this.deps.writer.updateToolCall(change.callId, {
+      updatedAt: this.recordedAt,
       status: change.status,
       ...(change.detail ? { detail: change.detail } : {}),
     });
@@ -1174,6 +1200,7 @@ export class Engine {
       { ...this.taskOpts(task), causedBy: cause.causedBy },
     );
     this.deps.writer.updateToolCall(call.id, {
+      updatedAt: this.recordedAt,
       status: "dispatched",
       dispatchEventId: dispatched.id,
     });
@@ -1310,7 +1337,10 @@ export class Engine {
               digest,
             });
             if (binding.kind === "attach") {
-              this.deps.writer.updateToolCall(binding.call.id, { proposalEventId: proposal.id });
+              this.deps.writer.updateToolCall(binding.call.id, {
+                updatedAt: this.recordedAt,
+                proposalEventId: proposal.id,
+              });
               return;
             }
             const last = revisions.at(-1);
@@ -1351,7 +1381,11 @@ export class Engine {
             }
             const { call } = binding;
             const status = statusAfterResult(call.status, toolResult.isError);
-            this.deps.writer.updateToolCall(call.id, { status, resultEventId: result.id });
+            this.deps.writer.updateToolCall(call.id, {
+              updatedAt: this.recordedAt,
+              status,
+              resultEventId: result.id,
+            });
             if (status === "completed" && output)
               this.retainToolOutput(
                 { task, call, declared: output.declared, eventId: result.id },
@@ -1409,6 +1443,7 @@ export class Engine {
     const id = this.deps.newId("call");
     this.deps.writer.createToolCall({
       id,
+      createdAt: this.recordedAt,
       conversationId: this.activeConversation.id,
       taskId: task.id,
       executionId: task.executionId,
@@ -1702,11 +1737,15 @@ export class Engine {
         // to the event that asked for it: its id was chosen first, so the event could name it before it existed.
         this.deps.writer.createApproval({
           id: approvalId,
+          requestedAt: this.recordedAt,
           toolCallId: call.id,
           executionEpoch: task.epoch,
           requestingEventId: requested.id,
         });
-        this.deps.writer.updateToolCall(call.id, { status: "awaiting_approval" });
+        this.deps.writer.updateToolCall(call.id, {
+          updatedAt: this.recordedAt,
+          status: "awaiting_approval",
+        });
         this.onCommit(() => {
           call.status = "awaiting_approval";
           call.approvalId = approvalId;
@@ -1797,6 +1836,7 @@ export class Engine {
         const { writer } = this.deps;
         for (const action of actions)
           writer.updateToolCall(action.tool_call_id, {
+            updatedAt: this.recordedAt,
             status: action.status,
             detail: action.detail,
           });
@@ -1807,7 +1847,11 @@ export class Engine {
           task.id,
         );
         for (const approval of stillPending)
-          writer.updateApproval(approval.id, { status: "expired", reason: "task ended" });
+          writer.updateApproval(approval.id, {
+            status: "expired",
+            consumedAt: this.recordedAt,
+            reason: "task ended",
+          });
         if (transcriptRetention)
           this.retainEvidence(task, {
             kind: "runtime_transcript",
@@ -1826,7 +1870,7 @@ export class Engine {
           });
         writer.updateExecution(task.executionId, {
           status: executionStatusFor(task.interrupted, result),
-          endedAt: nowIso(),
+          endedAt: this.recordedAt,
           reportedModel: task.reportedModel,
           reportedEffort: efforts.length === 1 ? (efforts[0] ?? null) : null,
           effortEvidence: {
@@ -1852,7 +1896,7 @@ export class Engine {
             },
             opts,
           );
-        writer.updateTask(task.id, { status, finishedAt: nowIso() });
+        writer.updateTask(task.id, { status, finishedAt: this.recordedAt });
         this.emit(
           {
             type: "task_finished",

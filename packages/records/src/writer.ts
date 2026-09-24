@@ -87,6 +87,8 @@ const storedReply = (row: unknown): CommandReply | null => {
 export interface EventInput {
   /** Given by the caller (see RecordWriter). */
   id: string;
+  /** When the server recorded it, given by the caller (see RecordWriter). */
+  receivedAt: string;
   conversationId: string;
   type: JournalEventType;
   payload: unknown;
@@ -105,7 +107,6 @@ export interface EventInput {
 export interface AppendedEvent {
   id: string;
   sequence: number;
-  receivedAt: string;
 }
 
 /**
@@ -160,6 +161,10 @@ export interface ExecutionUsage {
  * (commands, provenance, artifacts, links, diagnostics) are still named here, which holds only while whatever
  * refers to one is written after it in the same transaction, as a conversation names its provenance set and an
  * artifact_registered event its artifact.
+ *
+ * The same rows take their timestamps from the caller too (`startedAt`, `createdAt`, `receivedAt`, `updatedAt`,
+ * `requestedAt`, `consumedAt`), as ISO strings: a pure transition decides with the time it is handed, so the
+ * records it returns carry that time rather than whenever the writer runs. The rows named here stamp themselves.
  */
 export class RecordWriter {
   readonly objects: ObjectStore;
@@ -392,14 +397,11 @@ export class RecordWriter {
    */
   createConversation(input: {
     id: string;
+    startedAt: string;
     provenanceSetId: string;
     runtimeConversationId: string;
-  }): {
-    startedAt: string;
-    directory: string;
-  } {
-    const { id } = input;
-    const startedAt = nowIso();
+  }): { directory: string } {
+    const { id, startedAt } = input;
     const directory = join(
       this.catalog.paths.conversations,
       `${startedAt.replace(/[:.]/g, "-")}_${id}`,
@@ -412,7 +414,7 @@ export class RecordWriter {
       directory,
       runtime_conversation_id: input.runtimeConversationId,
     });
-    return { startedAt, directory };
+    return { directory };
   }
 
   updateConversation(id: string, fields: { status?: ConversationStatus }): void {
@@ -421,6 +423,7 @@ export class RecordWriter {
 
   createTask(input: {
     id: string;
+    createdAt: string;
     conversationId: string;
     text: string;
     clientId: string | null;
@@ -429,7 +432,7 @@ export class RecordWriter {
       id: input.id,
       conversation_id: input.conversationId,
       status: "running",
-      created_at: nowIso(),
+      created_at: input.createdAt,
       text: redactString(input.text),
       client_id: input.clientId,
     });
@@ -441,6 +444,7 @@ export class RecordWriter {
 
   createExecution(input: {
     id: string;
+    startedAt: string;
     taskId: string;
     conversationId: string;
     runtimeIdentity: string;
@@ -461,7 +465,7 @@ export class RecordWriter {
       provenance_set_id: input.provenanceSetId,
       execution_epoch: input.executionEpoch,
       status: "running",
-      started_at: nowIso(),
+      started_at: input.startedAt,
     });
   }
 
@@ -504,8 +508,7 @@ export class RecordWriter {
   // ---- events ----
 
   appendEvent(input: EventInput): AppendedEvent {
-    const { id } = input;
-    const receivedAt = nowIso();
+    const { id, receivedAt } = input;
     const sequence = this.catalog.nextSequence(input.conversationId);
     this.catalog.insert("events", {
       id,
@@ -526,13 +529,14 @@ export class RecordWriter {
       duration_ms: input.durationMs ?? null,
       timing_source: input.timingSource ?? null,
     });
-    return { id, sequence, receivedAt };
+    return { id, sequence };
   }
 
   // ---- tool calls & approvals ----
 
   createToolCall(input: {
     id: string;
+    createdAt: string;
     conversationId: string;
     taskId: string;
     executionId: string;
@@ -545,7 +549,6 @@ export class RecordWriter {
     status: ToolCallStatus;
     proposalEventId: string | null;
   }): void {
-    const now = nowIso();
     this.catalog.insert("tool_calls", {
       id: input.id,
       conversation_id: input.conversationId,
@@ -559,14 +562,15 @@ export class RecordWriter {
       policy: input.policy,
       status: input.status,
       proposal_event_id: input.proposalEventId,
-      created_at: now,
-      updated_at: now,
+      created_at: input.createdAt,
+      updated_at: input.createdAt,
     });
   }
 
   updateToolCall(
     id: string,
     fields: {
+      updatedAt: string;
       status?: ToolCallStatus;
       detail?: string | null;
       dispatchEventId?: string | null;
@@ -580,12 +584,13 @@ export class RecordWriter {
       dispatch_event_id: fields.dispatchEventId,
       result_event_id: fields.resultEventId,
       proposal_event_id: fields.proposalEventId,
-      updated_at: nowIso(),
+      updated_at: fields.updatedAt,
     });
   }
 
   createApproval(input: {
     id: string;
+    requestedAt: string;
     toolCallId: string;
     executionEpoch: number;
     requestingEventId: string | null;
@@ -596,7 +601,7 @@ export class RecordWriter {
       execution_epoch: input.executionEpoch,
       status: "pending",
       requesting_event_id: input.requestingEventId,
-      requested_at: nowIso(),
+      requested_at: input.requestedAt,
     });
   }
 
@@ -604,6 +609,7 @@ export class RecordWriter {
     id: string,
     fields: {
       status: Exclude<ApprovalStatus, "pending">;
+      consumedAt: string;
       reason?: string | null;
       decisionEventId?: string | null;
       decisionClientId?: string | null;
@@ -614,7 +620,7 @@ export class RecordWriter {
       reason: fields.reason,
       decision_event_id: fields.decisionEventId,
       decision_client_id: fields.decisionClientId,
-      consumed_at: nowIso(),
+      consumed_at: fields.consumedAt,
     });
   }
 
