@@ -9,6 +9,9 @@ import { RecordWriter } from "./writer.ts";
 /** When the rows these tests write say they were recorded. */
 const AT = "2026-01-01T00:00:00.000Z";
 
+/** A distinct time for each row, so a test can tell which given time a row stored. */
+const second = (index: number) => `2026-01-01T00:00:0${index}.000Z`;
+
 type CommandInput = Parameters<RecordWriter["recordCommand"]>[0];
 
 let dir: string;
@@ -24,6 +27,10 @@ afterEach(() => {
   catalog.close();
   rmSync(dir, { recursive: true, force: true });
 });
+
+/** Stores `text` in the object store, as a capture does before its artifact is registered. */
+const put = (text: string) =>
+  writer.objects.put(Buffer.from(text), { signal: new AbortController().signal });
 
 /** Records a provenance set for a conversation to name, and returns its id. */
 const provenanceSet = (): string => {
@@ -208,8 +215,6 @@ describe("record writer", () => {
   });
 
   it("stores artifact bytes once and keeps distinct logical records", async () => {
-    const put = (text: string) =>
-      writer.objects.put(Buffer.from(text), { signal: new AbortController().signal });
     const one = writer.registerArtifact({
       id: "art-1",
       createdAt: AT,
@@ -235,10 +240,7 @@ describe("record writer", () => {
   });
 
   it("names and stamps provenance and artifact rows with the ids and times its caller gives", async () => {
-    const second = (index: number) => `2026-01-01T00:00:0${index}.000Z`;
-    const stored = await writer.objects.put(Buffer.from("snapshot"), {
-      signal: new AbortController().signal,
-    });
+    const stored = await put("snapshot");
     writer.createProvenanceSet({ id: "prov-a", createdAt: second(1), description: "given" });
     writer.registerArtifact({
       id: "art-a",
@@ -294,7 +296,6 @@ describe("record writer", () => {
   });
 
   it("stamps a transition's rows with the times its caller gives", () => {
-    const second = (index: number) => `2026-01-01T00:00:0${index}.000Z`;
     seedToolCall({
       conversation: second(1),
       task: second(2),

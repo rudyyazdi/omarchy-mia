@@ -1229,11 +1229,15 @@ describe("approval path", () => {
 });
 
 describe("record times", () => {
-  it("stamps each commit's rows, and each event sent, with a reading of the injected clock", async () => {
-    // Every reading is one second after the last, so rows that share a time came from one reading.
-    const start = "2031-01-01T00:00:00.000Z";
+  const start = "2031-01-01T00:00:00.000Z";
+  /** Every reading is one second after the last, so rows that share a time came from one reading. */
+  const useSteppingClock = (): void => {
     let reading = Date.parse(start);
     ts.setClock(() => new Date((reading += 1000)));
+  };
+
+  it("stamps each commit's rows, and each event sent, with a reading of the injected clock", async () => {
+    useSteppingClock();
     const conversationId = await client.startConversation();
     const started = await client.waitFor(
       "conversation_started",
@@ -1322,8 +1326,7 @@ describe("record times", () => {
   });
 
   it("stamps provenance, tool-output and evidence artifacts with the reading of the commit that records them", async () => {
-    let reading = Date.parse("2031-01-01T00:00:00.000Z");
-    ts.setClock(() => new Date((reading += 1000)));
+    useSteppingClock();
     const conversationId = await client.startConversation();
     const conversation = must(
       rows<{ started_at: string; provenance_set_id: string }>(

@@ -8,7 +8,7 @@ import {
 } from "@mia/agent-adapter";
 import { PROTOCOL_VERSION, redactValue, sha256Hex } from "@mia/protocol";
 import type {
-  IdPrefix,
+  NewId,
   ObjectStore,
   ProvenanceEntryRow,
   ProvenanceRole,
@@ -290,7 +290,7 @@ export const storeProvenance = async (
 
 /** How the rows of one commit are named and stamped: fresh ids, and the commit's one reading of the clock. */
 export interface RowNaming {
-  newId: (prefix: IdPrefix) => string;
+  newId: NewId;
   createdAt: string;
 }
 
@@ -367,7 +367,7 @@ export const recordConversationProvenance = (
 export const linkConversationProvenance = (
   writer: RecordWriter,
   input: { conversationId: string; provenance: ProvenanceSummary },
-  newId: RowNaming["newId"],
+  newId: NewId,
 ): void => {
   const { conversationId, provenance } = input;
   for (const entry of provenance.entries)

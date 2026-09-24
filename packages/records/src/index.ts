@@ -16,7 +16,7 @@ export type {
   ToolCallRow,
 } from "./schema.ts";
 export { Catalog, defaultStateDir, newId, nowIso } from "./catalog.ts";
-export type { IdPrefix } from "./catalog.ts";
+export type { IdPrefix, NewId } from "./catalog.ts";
 export { ObjectStore, type StoredObject } from "./objects.ts";
 export { RecordWriter } from "./writer.ts";
 export type { RecordedCommand } from "./writer.ts";
