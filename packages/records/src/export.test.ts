@@ -53,12 +53,12 @@ const createExport = (root: string) => {
     const artifact = writer.registerArtifact({
       kind: "tool_output",
       logicalName: "result.txt",
-      bytes: Buffer.from("retained result"),
+      stored: writer.objects.putSync(Buffer.from("retained result")),
     });
     const dependency = writer.registerArtifact({
       kind: "tool_output",
       logicalName: "source.txt",
-      bytes: Buffer.from("retained source"),
+      stored: writer.objects.putSync(Buffer.from("retained source")),
     });
     writer.addDependency(artifact.artifactId, dependency.artifactId, "local_changes");
     writer.linkArtifact({
