@@ -984,6 +984,26 @@ describe("approval path", () => {
     expect(rows("SELECT id FROM tool_calls")).toHaveLength(0);
   });
 
+  it("denies an asked call whose approval request cannot be recorded, without holding its prompt", async () => {
+    const { turn, taskId } = await submit("change");
+    turn.init();
+    failNextCommit();
+    const refused = await turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
+    expect(refused).toMatchObject({
+      behavior: "deny",
+      message: expect.stringContaining("could not record"),
+    });
+    expect(rows("SELECT id FROM approvals")).toHaveLength(0);
+    must(turn.pendingAbandons[0], "refused prompt").abort();
+    const retry = turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
+    const requested = await client.waitFor("approval_requested");
+    await decide(taskId, requested.payload.approval_id, "approve");
+    expect((await retry).behavior).toBe("allow");
+    expect(approvalStatuses()).toEqual(["approved"]);
+    turn.end();
+    await client.waitFor("task_finished");
+  });
+
   it("keeps the earlier approval pending when a changed binding cannot be recorded", async () => {
     const { turn, taskId, held, requested } = await submitHeldCall("change");
     failNextCommit();
@@ -1125,6 +1145,18 @@ describe("approval path", () => {
       expect((await again).behavior).toBe("allow");
       turn.end();
       await client.waitFor("task_finished");
+    });
+
+    it("answers the prompts still held even when the turn's end cannot be recorded", async () => {
+      const { turn, held } = await holdAll();
+      ts.server.catalog.db.exec(`CREATE TRIGGER fail_task_finish BEFORE UPDATE ON tasks
+        WHEN NEW.finished_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'simulated finish failure'); END`);
+      const failed = ts.waitForLog((line) => line.includes("finishTurn record failure"));
+      turn.end();
+      await failed;
+      const answers = await Promise.all(held);
+      expect(answers.every((answer) => answer.behavior === "deny")).toBe(true);
+      expect(new Set(approvalStatuses())).toEqual(new Set(["pending"]));
     });
 
     it("answers every prompt still held when the turn ends, so the next turn can ask", async () => {

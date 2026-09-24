@@ -107,7 +107,7 @@ const fail = (code: ErrorCode, message: string): CommandResult => ({ ok: false, 
  */
 export const MAX_HELD_PROMPTS = 32;
 
-/** The answer to a prompt still held once its turn is recorded finished: the runtime is gone, and nothing was released. */
+/** The answer to a prompt still held once its turn has ended, recorded or not: the runtime is gone, and nothing was released. */
 const TURN_ENDED: PermissionDecision = {
   behavior: "deny",
   message: "Mia: the turn ended before the user decided; this call was not released.",
@@ -366,7 +366,7 @@ export class Engine {
   private queued: CommitQueue = emptyQueue();
   /**
    * The runtime's permission prompts waiting for the user's decision, keyed by approval id. Each is answered once:
-   * by `answerPrompt` after a commit, by its abandonment, or when its turn is recorded finished.
+   * by `answerPrompt` after a commit, by its abandonment, or once its turn has ended (submitText).
    */
   private readonly prompts = new Holds<PermissionDecision>(MAX_HELD_PROMPTS);
 
@@ -761,6 +761,11 @@ export class Engine {
         ),
       )
       .finally(() => {
+        // However finishTurn ended, even by throwing: the runtime has ended, so a prompt it never abandoned is
+        // answered with a denial rather than left holding a place under MAX_HELD_PROMPTS. One already answered is
+        // skipped.
+        for (const revisions of task.calls.values())
+          for (const call of revisions) this.answerPrompt(call, TURN_ENDED);
         if (this.task === task) this.task = null;
         finished.resolve();
       });
@@ -1080,7 +1085,7 @@ export class Engine {
 
   /**
    * Answer the prompt held for `call`'s approval, if one is still held. None is when the call never asked, or its
-   * prompt was already answered: abandoned by the runtime, or released when its turn was recorded finished. The
+   * prompt was already answered: abandoned by the runtime, or denied once its turn ended. The
    * runtime then already has a denial, and this answer is dropped.
    */
   private answerPrompt(call: ToolCallState, decision: PermissionDecision): void {
@@ -1486,7 +1491,7 @@ export class Engine {
       policy,
       gateOpen: task.gateOpen,
       toolIdentity: req.toolName,
-      promptsFull: this.prompts.size >= MAX_HELD_PROMPTS,
+      promptsFull: this.prompts.full,
     });
     let recorded: { call: ToolCallState; answer: PermissionAnswer };
     try {
@@ -1866,9 +1871,6 @@ export class Engine {
     } catch (recordError) {
       this.deps.log(`finishTurn record failure: ${String(recordError)}`);
     }
-    // Whether or not the records committed: the runtime has ended, so a prompt it never abandoned is answered
-    // with a denial rather than left holding a place under MAX_HELD_PROMPTS. A prompt already answered is skipped.
-    for (const call of calls) this.answerPrompt(call, TURN_ENDED);
     // Set even when the records failed: the note is how the next turn learns what may have happened.
     const note = noteAfterTurn({
       interrupted: task.interrupted,
