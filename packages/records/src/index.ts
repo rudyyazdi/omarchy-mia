@@ -33,7 +33,7 @@ export type {
   DiagnosticsView,
   TaskView,
 } from "./queries.ts";
-export { watchEntriesAfter, watchTree } from "./watch.ts";
+export { capturedInDebugMode, watchEntriesAfter, watchTree } from "./watch.ts";
 export type {
   WatchEntry,
   WatchParent,

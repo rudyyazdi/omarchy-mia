@@ -132,6 +132,17 @@ describe("messagesAfter", () => {
       view: { summary: expect.stringContaining("closed") },
     });
   });
+
+  it("marks every call's MCP bodies as not recorded unless the conversation recorded the debug-mode flag", () => {
+    const marked = (rows: WatchRows) =>
+      poll(rows, NOTHING_SENT)
+        .messages.filter((message) => message.op === "node" && message.kind === "tool_call")
+        .map((message) => JSON.stringify(message).includes("not recorded (debug mode off)"));
+    expect(marked(conversation())).toEqual([true]);
+    const debug = conversation();
+    debug.events.push(eventRow({ sequence: 4, type: "captured_in_debug_mode" }));
+    expect(marked(debug)).toEqual([false]);
+  });
 });
 
 describe("sseRecord", () => {

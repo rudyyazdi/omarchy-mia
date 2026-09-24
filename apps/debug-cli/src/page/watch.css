@@ -64,7 +64,9 @@ h4 {
 }
 
 .ids,
-time {
+time,
+.capture,
+.not-recorded {
   color: var(--muted);
 }
 

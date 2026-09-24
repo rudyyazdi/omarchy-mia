@@ -13,8 +13,15 @@ import {
   watchEntriesAfter,
 } from "@mia/records";
 import type { MiaClient } from "@mia/text-client";
-import { ackResult, must, mustString, useScriptedSession, type TestServer } from "./harness.ts";
-import type { ScriptedRuntime } from "./scripted-runtime.ts";
+import {
+  ackResult,
+  must,
+  mustString,
+  startTestServer,
+  useScriptedSession,
+  type TestServer,
+} from "./harness.ts";
+import { ScriptedRuntime } from "./scripted-runtime.ts";
 
 /** When the rows these tests write say they were recorded. */
 const AT = "2026-01-01T00:00:00.000Z";
@@ -24,6 +31,12 @@ let ts: TestServer;
 let client: MiaClient;
 useScriptedSession((session) => {
   ({ runtime, server: ts, client } = session);
+});
+
+/** Servers a test starts beside the session's. Registered before the watch's teardown, so they close after it. */
+const ownServers: TestServer[] = [];
+afterEach(async () => {
+  await Promise.all(ownServers.splice(0).map((server) => server.close()));
 });
 
 const ViewSchema = z.object({ summary: z.string(), body: z.string() });
@@ -273,6 +286,44 @@ describe("mia debug watch", () => {
         .length,
     ).toBeGreaterThan(0);
     expect(JSON.stringify(messages)).not.toContain("super-secret-value");
+    // The session's server runs with debug mode off, so the call's MCP bodies are marked, not silently missing.
+    expect(messages[0]).toMatchObject({
+      op: "conversation",
+      view: { summary: expect.stringContaining("debug mode off") },
+    });
+    expect(nodes[1]?.view.body).toContain(
+      "MCP request and response: not recorded (debug mode off)",
+    );
+  });
+
+  it("shows a conversation captured in debug mode as such, with nothing marked not recorded", async () => {
+    const debugRuntime = new ScriptedRuntime();
+    const debugServer = await startTestServer(debugRuntime, {}, { debugMode: true });
+    ownServers.push(debugServer);
+    const debugClient = await debugServer.connect("client-A");
+    await debugClient.startConversation();
+    const next = debugRuntime.nextTurn();
+    await debugClient.submitText("read it");
+    const turn = await next;
+    turn.init();
+    expect((await turn.request("mcp__d1__read", {}, "toolu_read")).behavior).toBe("allow");
+    await turn.toolResult("toolu_read", JSON.stringify({ unread: 3 }));
+    turn.end();
+    await debugClient.waitFor("task_finished");
+
+    const debugId = must(debugClient.conversationId, "conversation id");
+    const { watch, catalog } = await watchConversation(debugId, debugServer.catalog());
+    const page = await openPage(watch.url);
+    const messages = await page.take(initialCount(catalog, debugId));
+    expect(messages[0]).toMatchObject({
+      op: "conversation",
+      view: { summary: expect.stringContaining("debug mode on") },
+    });
+    expect(messages.filter((message) => message.op === "node").map((node) => node.kind)).toEqual([
+      "task",
+      "tool_call",
+    ]);
+    expect(JSON.stringify(messages)).not.toContain("not recorded");
   });
 
   it("appends a new command, a tool call, its result and an auto-rejection without a reload, and re-sends a status that changed", async () => {

@@ -1,6 +1,12 @@
 import { match } from "ts-pattern";
 import { sha256Hex } from "@mia/protocol";
-import { watchEntriesAfter, type WatchEntry, type WatchParent, type WatchRows } from "@mia/records";
+import {
+  capturedInDebugMode,
+  watchEntriesAfter,
+  type WatchEntry,
+  type WatchParent,
+  type WatchRows,
+} from "@mia/records";
 import {
   conversationView,
   eventView,
@@ -47,7 +53,10 @@ const nodeId = (parent: WatchParent): string =>
 const digest = (view: NodeView): string => sha256Hex(JSON.stringify(view));
 
 /** A node's header and the id the page knows it by. */
-const nodeOf = (entry: WatchEntry & { kind: NodeKind }): { id: string; view: NodeView } =>
+const nodeOf = (
+  entry: WatchEntry & { kind: NodeKind },
+  debugMode: boolean,
+): { id: string; view: NodeView } =>
   match(entry)
     .with({ kind: "task" }, ({ task, executions }) => ({
       id: nodeId({ level: "task", task_id: task.id }),
@@ -55,7 +64,7 @@ const nodeOf = (entry: WatchEntry & { kind: NodeKind }): { id: string; view: Nod
     }))
     .with({ kind: "tool_call" }, ({ tool_call, approvals }) => ({
       id: nodeId({ level: "tool_call", task_id: tool_call.task_id, tool_call_id: tool_call.id }),
-      view: toolCallView(tool_call, approvals),
+      view: toolCallView(tool_call, approvals, debugMode),
     }))
     .exhaustive();
 
@@ -75,6 +84,7 @@ export const messagesAfter = (
   const conversation = rows.conversations[0];
   if (!conversation) throw new Error("the rows hold no conversation");
   const entries = watchEntriesAfter(rows, -1);
+  const debugMode = capturedInDebugMode(rows);
   const headers = new Map<string, string>();
   /** Records a header and reports whether the page lacks it: the node is new, or its row changed. */
   const changed = (id: string, view: NodeView, isNew: boolean): boolean => {
@@ -82,13 +92,13 @@ export const messagesAfter = (
     headers.set(id, current);
     return isNew || sent.headers.get(id) !== current;
   };
-  const header = conversationView(conversation);
+  const header = conversationView(conversation, debugMode);
   const sendHeader = changed(CONVERSATION_NODE, header, false);
   /** The node messages to send, by entry: at most one per task and tool call. */
   const nodeMessages = new Map<WatchEntry, WatchMessage>();
   for (const entry of entries) {
     if (entry.kind === "event") continue;
-    const { id, view } = nodeOf(entry);
+    const { id, view } = nodeOf(entry, debugMode);
     if (changed(id, view, entry.sequence > sent.sequence))
       nodeMessages.set(entry, {
         op: "node",
