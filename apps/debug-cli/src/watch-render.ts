@@ -7,13 +7,16 @@ import {
   redactValue,
   type ToolCallStatus,
 } from "@mia/protocol";
+import { match } from "ts-pattern";
 import type {
   ApprovalRow,
   ConversationRow,
   EventRow,
   ExecutionRow,
+  McpEventType,
   TaskRow,
   ToolCallRow,
+  WatchMcpMessage,
 } from "@mia/records";
 
 /** What a page shows for one node: the line it shows collapsed, and what expanding it reveals. */
@@ -38,8 +41,10 @@ const shown = (text: string): string => escapeHtml(redactString(text));
 
 /** The first `length` characters of already-redacted text, so a cut never splits a secret out of view. */
 const clipped = (text: string, length = 80): string => {
-  // By code point, so a cut never splits a surrogate pair.
-  const points = Array.from(text);
+  // By code point, so a cut never splits a surrogate pair, and no further than the cut: an MCP body can be megabytes.
+  const points = Iterator.from(text)
+    .take(length + 1)
+    .toArray();
   return points.length > length ? `${points.slice(0, length).join("")}…` : text;
 };
 
@@ -139,7 +144,34 @@ export const toolCallView = (
   };
 };
 
+const MCP_LABEL: Record<McpEventType, string> = {
+  mcp_request: "MCP request",
+  mcp_response: "MCP response",
+};
+
+/** Every field of an event row, its payload decoded. */
+const eventFieldsHtml = (event: EventRow): string =>
+  fieldsHtml({ ...event, payload: parseStored(event.payload) });
+
+/**
+ * One MCP message of a call: its body on the collapsed line, clipped, or why no body was recorded, and the whole
+ * event when expanded. The body was redacted when it was recorded, and is redacted again here like everything shown.
+ */
+export const mcpView = ({ type, event, content }: WatchMcpMessage): NodeView => ({
+  summary: `<b>${MCP_LABEL[type]}</b> ${match(content)
+    .with(
+      { status: "recorded" },
+      ({ body }) => `<code>${escapeHtml(clipped(JSON.stringify(redactValue(body)), 160))}</code>`,
+    )
+    .with(
+      { status: "unrecorded" },
+      ({ reason }) => `<span class="not-recorded">not recorded: ${shown(reason)}</span>`,
+    )
+    .exhaustive()} <time>${shown(event.received_at)}</time>`,
+  body: eventFieldsHtml(event),
+});
+
 export const eventView = (event: EventRow): NodeView => ({
   summary: `#${event.sequence} ${shown(event.type)} <time>${shown(event.received_at)}</time>`,
-  body: fieldsHtml({ ...event, payload: parseStored(event.payload) }),
+  body: eventFieldsHtml(event),
 });

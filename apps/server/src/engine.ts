@@ -42,8 +42,10 @@ import {
   type NewId,
   type JournalEventType,
   type LinkRelation,
+  type McpEventType,
   type RecordWriter,
   type StoredObject,
+  mcpPayload,
 } from "@mia/records";
 import {
   captureFields,
@@ -348,23 +350,10 @@ interface ResultReads {
 
 const NOTHING_READ: ResultReads = { output: null, bodies: null };
 
-const MCP_BODY_EVENT: Record<BodyDirection, JournalEventType> = {
+const MCP_BODY_EVENT: Record<BodyDirection, McpEventType> = {
   request: "mcp_request",
   response: "mcp_response",
 };
-
-/** An `mcp_request` or `mcp_response` payload: the call it belongs to, and its redacted body or why there is none. */
-const mcpBodyPayload = (
-  call: { id: string; runtimeCallId: string },
-  body: McpBody,
-): Record<string, unknown> => ({
-  tool_call_id: call.id,
-  runtime_call_id: call.runtimeCallId,
-  ...match(body)
-    .with({ status: "recorded" }, ({ body: recorded }) => ({ body: recorded }))
-    .with({ status: "unrecorded" }, ({ reason }) => ({ unrecorded: reason }))
-    .exhaustive(),
-});
 
 /** What a turn-end read gives to retain: the bytes read, or why they could not be. */
 const evidenceCapture = (content: Exclude<RuntimeFileRead, { status: "absent" }>): Capture =>
@@ -1605,11 +1594,15 @@ export class Engine {
             if (status === "completed" && output)
               this.registerToolOutput({ task, call, ...output, eventId: result.id });
             for (const body of read.bodies ?? [])
-              this.record(MCP_BODY_EVENT[body.direction], mcpBodyPayload(call, body), {
-                ...links,
-                id: body.eventId,
-                causedBy: result.id,
-              });
+              this.record(
+                MCP_BODY_EVENT[body.direction],
+                mcpPayload({ toolCallId: call.id, runtimeCallId: call.runtimeCallId }, body),
+                {
+                  ...links,
+                  id: body.eventId,
+                  causedBy: result.id,
+                },
+              );
             this.onCommit(() => {
               call.status = status;
             });

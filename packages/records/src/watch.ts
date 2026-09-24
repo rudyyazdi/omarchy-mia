@@ -1,6 +1,7 @@
 import { match } from "ts-pattern";
 import { z } from "zod";
 import { parseJson } from "./catalog.ts";
+import { isMcpEventType, mcpContentOf, type McpContent, type McpEventType } from "./mcp-payload.ts";
 import type {
   ApprovalRow,
   ConversationRow,
@@ -15,7 +16,8 @@ import type {
  * The read model behind `mia debug watch` (issue #6): a conversation's rows as a tree of
  * conversation → task → tool call, with the raw events kept at the level they belong to, and the
  * same tree as a stream of entries ordered by `events.sequence`, so a live view that has shown
- * everything up to sequence N asks only for the entries after N.
+ * everything up to sequence N asks only for the entries after N. The MCP request and response bodies debug mode
+ * records for a call are nodes under it rather than raw events.
  */
 
 /** The rows the read model reads; a `ConversationSnapshot`'s tables satisfy it. */
@@ -29,6 +31,13 @@ export type WatchTaskParent = { level: "task"; task_id: string };
 export type WatchToolCallParent = { level: "tool_call"; task_id: string; tool_call_id: string };
 /** The tree node an entry is appended under. */
 export type WatchParent = WatchConversationParent | WatchTaskParent | WatchToolCallParent;
+
+/** One MCP request or response node under a tool call: the event that recorded it, and what it holds. */
+export interface WatchMcpMessage {
+  type: McpEventType;
+  event: EventRow;
+  content: McpContent;
+}
 
 /**
  * One addition to the tree. `sequence` is the event sequence that introduced it: a task and a tool
@@ -54,11 +63,15 @@ export type WatchEntry =
       tool_call: ToolCallRow;
       approvals: ApprovalRow[];
     }
+  | { kind: "mcp"; sequence: number; parent: WatchToolCallParent; mcp: WatchMcpMessage }
   | { kind: "event"; sequence: number; parent: WatchParent; event: EventRow };
 
 export interface WatchToolCall {
   tool_call: ToolCallRow;
   approvals: ApprovalRow[];
+  /** The call's MCP requests and responses, in the order they were recorded. */
+  mcp: WatchMcpMessage[];
+  /** The call's other events. */
   events: EventRow[];
 }
 
@@ -95,6 +108,16 @@ const Proposal = z.object({
   argument_digest: z.string(),
 });
 
+/**
+ * The MCP message an event is, or null when it is not one: another type, or a payload the view cannot read, which
+ * it keeps as a raw event so nothing recorded is hidden. Only an event of a known call becomes its node.
+ */
+const mcpMessageOf = (event: EventRow, payload: unknown): WatchMcpMessage | null => {
+  if (!isMcpEventType(event.type)) return null;
+  const content = mcpContentOf(payload);
+  return content ? { type: event.type, event, content } : null;
+};
+
 const bindingKey = (binding: {
   execution_id: string | null;
   runtime_call_id: string;
@@ -109,7 +132,7 @@ const bindingKey = (binding: {
   ]);
 
 /**
- * Which tool call each event belongs to, taking the first of these that is a call of the event's
+ * Which tool call an event belongs to, given its parsed payload, taking the first of these that is a call of the event's
  * own (known) task: the call its payload names; the call whose row references it (the proposal and
  * the result, whose payloads carry only the runtime's call id); for a `tool_proposed` event, the
  * only call of its execution with the binding it announces.
@@ -120,10 +143,10 @@ const bindingKey = (binding: {
  * sequence a view already showed. Events recorded before the call exists (`tool_proposal_started`)
  * stay with the task, for the same reason.
  */
-const toolCallOfEvents = (
+const toolCallOwner = (
   rows: WatchRows,
   taskIds: ReadonlySet<string>,
-): Map<string, ToolCallRow> => {
+): ((event: EventRow, payload: unknown) => ToolCallRow | undefined) => {
   const calls = new Map(
     rows.tool_calls.filter((call) => taskIds.has(call.task_id)).map((call) => [call.id, call]),
   );
@@ -140,18 +163,14 @@ const toolCallOfEvents = (
     );
     return matches?.length === 1 ? matches[0] : undefined;
   };
-  const owners = new Map<string, ToolCallRow>();
-  for (const event of rows.events) {
-    const payload = parseJson(event.payload);
+  return (event, payload) => {
     const named = NamesToolCall.safeParse(payload);
-    const call = [
+    return [
       named.success ? calls.get(named.data.tool_call_id) : undefined,
       referenced.get(event.id),
       announced(event, payload),
     ].find((candidate) => candidate?.task_id === event.task_id);
-    if (call) owners.set(event.id, call);
-  }
-  return owners;
+  };
 };
 
 const parentOf = (call: ToolCallRow | undefined, taskId: string | null): WatchParent => {
@@ -160,7 +179,7 @@ const parentOf = (call: ToolCallRow | undefined, taskId: string | null): WatchPa
   return { level: "conversation" };
 };
 
-const KIND_ORDER: Record<WatchEntry["kind"], number> = { task: 0, tool_call: 1, event: 2 };
+const KIND_ORDER: Record<WatchEntry["kind"], number> = { task: 0, tool_call: 1, mcp: 2, event: 3 };
 
 /** Records the lowest sequence seen per id. */
 const firstSequences = () => {
@@ -181,14 +200,24 @@ const firstSequences = () => {
  */
 const allEntries = (rows: WatchRows): WatchEntry[] => {
   const taskIds = new Set(rows.tasks.map((task) => task.id));
-  const owners = toolCallOfEvents(rows, taskIds);
+  const ownerOf = toolCallOwner(rows, taskIds);
   const taskFirst = firstSequences();
   const callFirst = firstSequences();
   const eventEntries = rows.events.map((event): WatchEntry => {
-    const call = owners.get(event.id);
+    // Parsed once per event, and dropped with it: a payload can be a large MCP body.
+    const payload = parseJson(event.payload);
+    const call = ownerOf(event, payload);
     const taskId = event.task_id !== null && taskIds.has(event.task_id) ? event.task_id : null;
     if (taskId !== null) taskFirst.note(taskId, event.sequence);
     if (call) callFirst.note(call.id, event.sequence);
+    const mcp = mcpMessageOf(event, payload);
+    if (call && mcp)
+      return {
+        kind: "mcp",
+        sequence: event.sequence,
+        parent: { level: "tool_call", task_id: call.task_id, tool_call_id: call.id },
+        mcp,
+      };
     return { kind: "event", sequence: event.sequence, parent: parentOf(call, taskId), event };
   });
   const taskEntries = rows.tasks.map((task): WatchEntry => ({
@@ -263,10 +292,11 @@ export const watchTree = (rows: WatchRows): WatchTree => {
         tree.tasks.push(node);
       })
       .with({ kind: "tool_call" }, ({ parent, tool_call, approvals }) => {
-        const node: WatchToolCall = { tool_call, approvals, events: [] };
+        const node: WatchToolCall = { tool_call, approvals, mcp: [], events: [] };
         calls.set(tool_call.id, node);
         nodeOf(tasks, parent.task_id).tool_calls.push(node);
       })
+      .with({ kind: "mcp" }, ({ parent, mcp }) => nodeOf(calls, parent.tool_call_id).mcp.push(mcp))
       .with({ kind: "event" }, ({ parent, event }) => appendEvent(parent, event))
       .exhaustive();
   return tree;

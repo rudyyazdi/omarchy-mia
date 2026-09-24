@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { conversationView, eventView, taskView, toolCallView } from "./watch-render.ts";
+import type { WatchMcpMessage } from "@mia/records";
+import { conversationView, eventView, mcpView, taskView, toolCallView } from "./watch-render.ts";
 import { conversationRow, eventRow, executionRow, taskRow, toolCallRow } from "./watch-fixture.ts";
 
 const SECRET = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -64,5 +65,33 @@ describe("watch views", () => {
   it("shows on the conversation's line whether it was captured in debug mode", () => {
     expect(conversationView(conversationRow(), false).summary).toContain("debug mode off");
     expect(conversationView(conversationRow(), true).summary).toContain("debug mode on");
+  });
+
+  it("shows an MCP message's body on its line, redacted and escaped, and the whole event when expanded", () => {
+    const body = { method: "tools/call", params: { note: "<b>hi</b>", api_key: SECRET } };
+    const message: WatchMcpMessage = {
+      type: "mcp_request",
+      event: eventRow({ sequence: 7, type: "mcp_request", payload: JSON.stringify({ body }) }),
+      content: { status: "recorded", body },
+    };
+    const view = mcpView(message);
+    expect(view.summary).toContain("<b>MCP request</b>");
+    expect(view.summary).toContain("&lt;b&gt;hi&lt;/b&gt;");
+    expect(view.body).toContain("tools/call");
+    expect(JSON.stringify(view)).not.toContain(SECRET);
+    expect(JSON.stringify(view)).not.toContain("<b>hi</b>");
+  });
+
+  it("shows why an MCP message holds no body", () => {
+    const reason = "the body log has no <response> for this call";
+    const view = mcpView({
+      type: "mcp_response",
+      event: eventRow({ sequence: 8, type: "mcp_response" }),
+      content: { status: "unrecorded", reason },
+    });
+    expect(view.summary).toContain("<b>MCP response</b>");
+    expect(view.summary).toContain(
+      "not recorded: the body log has no &lt;response&gt; for this call",
+    );
   });
 });

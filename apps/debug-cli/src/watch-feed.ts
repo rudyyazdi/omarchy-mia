@@ -10,13 +10,19 @@ import {
 import {
   conversationView,
   eventView,
+  mcpView,
   taskView,
   toolCallView,
   type NodeView,
 } from "./watch-render.ts";
 
-/** The nodes of the tree that have a header of their own, which the engine can change after it was shown. */
+/** The nodes of the tree a page shows as sections of their own. */
 type NodeKind = Exclude<WatchEntry["kind"], "event">;
+/**
+ * The nodes whose header the engine can change after it was shown. An MCP message is one event, which never
+ * changes, so like an event it is sent once, when its sequence is new.
+ */
+type HeaderKind = Exclude<NodeKind, "mcp">;
 
 /**
  * What the watch server sends a page, one per Server-Sent Event. A `node` message adds the node under `parent`
@@ -50,11 +56,14 @@ const nodeId = (parent: WatchParent): string =>
     .with({ level: "tool_call" }, ({ tool_call_id }) => `tool_call:${tool_call_id}`)
     .exhaustive();
 
+/** An MCP message node's id: its event's, which no other node shares. */
+const mcpNodeId = (eventId: string): string => `mcp:${eventId}`;
+
 const digest = (view: NodeView): string => sha256Hex(JSON.stringify(view));
 
 /** A node's header and the id the page knows it by. */
 const nodeOf = (
-  entry: WatchEntry & { kind: NodeKind },
+  entry: WatchEntry & { kind: HeaderKind },
   debugMode: boolean,
 ): { id: string; view: NodeView } =>
   match(entry)
@@ -66,6 +75,24 @@ const nodeOf = (
       id: nodeId({ level: "tool_call", task_id: tool_call.task_id, tool_call_id: tool_call.id }),
       view: toolCallView(tool_call, approvals, debugMode),
     }))
+    .exhaustive();
+
+/** The message for an entry that never changes once recorded (an event or an MCP message), or null for a header. */
+const unchangingMessage = (entry: WatchEntry): WatchMessage | null =>
+  match(entry)
+    .with({ kind: "event" }, ({ parent, event }): WatchMessage => ({
+      op: "event",
+      parent: nodeId(parent),
+      view: eventView(event),
+    }))
+    .with({ kind: "mcp" }, ({ parent, mcp }): WatchMessage => ({
+      op: "node",
+      id: mcpNodeId(mcp.event.id),
+      parent: nodeId(parent),
+      kind: "mcp",
+      view: mcpView(mcp),
+    }))
+    .with({ kind: "task" }, { kind: "tool_call" }, () => null)
     .exhaustive();
 
 /**
@@ -97,7 +124,7 @@ export const messagesAfter = (
   /** The node messages to send, by entry: at most one per task and tool call. */
   const nodeMessages = new Map<WatchEntry, WatchMessage>();
   for (const entry of entries) {
-    if (entry.kind === "event") continue;
+    if (entry.kind === "event" || entry.kind === "mcp") continue;
     const { id, view } = nodeOf(entry, debugMode);
     if (changed(id, view, entry.sequence > sent.sequence))
       nodeMessages.set(entry, {
@@ -115,8 +142,10 @@ export const messagesAfter = (
       for (const entry of entries) {
         const node = nodeMessages.get(entry);
         if (node) yield node;
-        else if (entry.kind === "event" && entry.sequence > sent.sequence)
-          yield { op: "event", parent: nodeId(entry.parent), view: eventView(entry.event) };
+        else if (entry.sequence > sent.sequence) {
+          const message = unchangingMessage(entry);
+          if (message) yield message;
+        }
       }
       return undefined;
     },
