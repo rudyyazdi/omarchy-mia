@@ -144,22 +144,16 @@ const UNANSWERED: PermissionDecision = {
   message: "Mia could not answer this call; it was not released.",
 };
 
-/**
- * The permission request `decidePermission` is dispatching, as its `answer_permission` effect takes it: the effect
- * holds the prompt, if it asks, before anything else of the commit is performed, and leaves the runtime's answer here.
- */
+/** The permission request `decidePermission` is dispatching, and what its `answer_permission` effect took. */
 interface Asking {
   taskId: string;
   /** Aborted once the runtime drops the prompt. */
   abandoned: AbortSignal;
-  /** True until the request's dispatch returns: an abandonment meanwhile is deferred (see `abandon`). */
+  /** True until the request's dispatch returns (see `abandon`). */
   dispatching: boolean;
   /** What answers the runtime, once `answer_permission` has been performed: at once, or when the held prompt settles. */
   answer: Promise<PermissionDecision> | null;
-  /**
-   * The call whose prompt was abandoned while the request was being dispatched: its expiry is a follow-up event,
-   * dispatched once that dispatch returns, because dispatching it from inside the request's effects would be nested.
-   */
+  /** The call whose prompt was abandoned during the dispatch, whose expiry follows it (see `abandon`). */
   expireAfter: string | null;
 }
 
@@ -331,15 +325,14 @@ export class Engine {
    */
   private starting: PendingStart | null = null;
   /**
-   * The runtime's permission prompts waiting for the user's decision, keyed by approval id, each held by the first
-   * effect of the commit that requested its approval. Each is answered once: by an `answer_prompt` effect after a
-   * commit, by its abandonment, or once its turn has ended (startTurn).
+   * The runtime's permission prompts waiting for the user's decision, keyed by approval id, each held by the
+   * `answer_permission` effect of the commit that requested its approval. Each is answered once: by an `answer_prompt`
+   * effect after a commit, by its abandonment, or once its turn has ended (startTurn).
    */
   private readonly prompts = new Holds<PermissionDecision>(MAX_HELD_PROMPTS);
   /**
    * The permission request `decidePermission` is dispatching, or null outside that dispatch. The request's
-   * `answer_permission` effect holds its prompt and writes its answer here; the dispatch is synchronous, so at most
-   * one is ever set.
+   * `answer_permission` effect writes its answer here; the dispatch is synchronous, so at most one is ever set.
    */
   private asking: Asking | null = null;
   /**
@@ -466,7 +459,7 @@ export class Engine {
       )
       .with({ kind: "answer_permission" }, ({ answer }) => {
         const asking = this.asking;
-        if (!asking) throw new Error("no permission request is being committed");
+        if (!asking) throw new Error("no permission request is being dispatched");
         if (asking.answer) throw new Error("a permission request is answered once");
         asking.answer = this.takeAnswer(asking, answer);
       })
@@ -1246,9 +1239,8 @@ export class Engine {
 
   /**
    * Dispatch one permission request, returning what answers the runtime: the answer its committed transition gave
-   * through `answer_permission` (taken through `asking`, with the prompt already held if it asks), the one a rejection
-   * carries, or a denial when its records did not commit. A prompt abandoned while the request was dispatched has its
-   * expiry dispatched here, once the request's dispatch has returned. It throws only when a transition does.
+   * through `answer_permission` (taken through `asking`), the one a rejection carries, or a denial when its records did
+   * not commit. It throws only when the request's transition does.
    */
   private decidePermission(taskId: string, req: PermissionRequest): Promise<PermissionDecision> {
     // Restored, not cleared, so a dispatch nested inside this one's effects could not take the outer request's slot.
@@ -1300,8 +1292,15 @@ export class Engine {
       this.deps.log(`permission handling failed: ${errorMessage(dispatched.error)}`);
       return Promise.resolve(NOT_RECORDED);
     }
-    // After the request's own events, so its approval_resolved follows its approval_requested.
-    if (asking.expireAfter !== null) this.expireAbandoned(taskId, asking.expireAfter);
+    // The deferred expiry (see `abandon`), after the request's own events, so its approval_resolved follows its
+    // approval_requested. The runtime already has its denial, which a transition that throws here does not change.
+    if (asking.expireAfter !== null) {
+      try {
+        this.expireAbandoned(taskId, asking.expireAfter);
+      } catch (error) {
+        this.deps.log(`could not expire abandoned approval: ${errorMessage(error)}`);
+      }
+    }
     if (asking.answer) return asking.answer;
     // Unreachable: a committed request's transition always queues its answer, and taking it cannot fail. The request
     // was recorded, so this denial does not claim otherwise.
@@ -1309,11 +1308,7 @@ export class Engine {
     return Promise.resolve(UNANSWERED);
   }
 
-  /**
-   * Take a committed permission request's answer, as its `answer_permission` effect is performed: the first effect of
-   * the commit, so a prompt that asks is held before its approval_requested is delivered, and a decision can never
-   * arrive for a prompt not held yet.
-   */
+  /** Take a committed permission request's answer as its `answer_permission` effect is performed (see `EngineEffect`). */
   private takeAnswer(asking: Asking, answer: PermissionAnswer): Promise<PermissionDecision> {
     return match(answer)
       .with({ kind: "answer" }, ({ decision }) => Promise.resolve(decision))
@@ -1326,10 +1321,11 @@ export class Engine {
   /**
    * Hold the runtime's prompt for a call whose approval request has committed, until the user decides or the
    * runtime abandons it. Held only after the commit, so a request that could not be recorded is never held. A
-   * prompt the runtime abandoned before this (a signal already aborted) is abandoned at once, and its expiry follows
-   * the request's dispatch (see `abandon`). The cap was checked before the request was recorded and nothing ran
-   * since, so a refusal here is a bug; its approval is expired as abandoned in the same way, so no decision can
-   * release a call whose runtime was denied.
+   * prompt the runtime abandoned before this (a signal already aborted) is abandoned at once (see `abandon`). The cap
+   * was checked before the request was recorded (`promptsFull`), and nothing ran since. That check counts a prompt the
+   * request supersedes as still held, though the request's effects answer it only after this hold, so a request at
+   * the cap never asks, and a refusal here is a bug; its approval is expired as abandoned, so no decision can release
+   * a call whose runtime was denied.
    */
   private holdPrompt(
     asking: Asking,
@@ -1371,9 +1367,13 @@ export class Engine {
   /**
    * The runtime dropped the held prompt (process gone or turn aborted): the pending approval can never release
    * anything. Returns the runtime's answer; `prompts` calls this at most once per hold, and never after a reply. The
-   * expiry is dispatched at once, unless the request that asked is still being dispatched (the prompt was dropped
-   * before Mia held it, or while its commit's effects ran): a dispatch from there would be nested, so the expiry is
-   * left to `decidePermission` as a follow-up, and until then no decision can arrive.
+   * expiry is dispatched at once, unless the request that asked is still being dispatched: the prompt was dropped
+   * before Mia held it, its hold was refused, or one of its commit's effects aborted it. A dispatch from there would
+   * be nested, which the kernel refuses, so `decidePermission` dispatches the expiry once the request's dispatch has
+   * returned; nothing can decide the approval in between, since the dispatch is synchronous. Only the asking request
+   * is covered: the prompt of an earlier request, aborted synchronously by another commit's effect, would have its
+   * expiry refused as nested, and stay decidable. Nothing does that: the runtime drops a prompt from its own I/O, and
+   * reports what an interrupt causes only after `interrupt` returns (see `TurnHandle`).
    */
   private abandon(asking: Asking, callId: string): PermissionDecision {
     const task = this.taskOf(asking.taskId);

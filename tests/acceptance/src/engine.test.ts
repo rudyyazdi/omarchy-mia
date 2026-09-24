@@ -1252,12 +1252,22 @@ describe("approval path", () => {
     await expectAbandonedAtTurnEnd(turn);
   });
 
-  /**
-   * The client is told of the approval's expiry only after its request, in delivery and in sequence order; the
-   * expired approval released nothing and cannot be decided; the task resumes, and its turn ends with the call
-   * abandoned.
-   */
-  const expectExpiredAfterRequest = async (turn: ScriptedTurn, taskId: string): Promise<void> => {
+  it("expires an approval whose prompt the runtime drops while the client is told of it", async () => {
+    // The prompt is held before approval_requested is delivered, so dropping it then abandons a held prompt from
+    // inside the request's own dispatch: the expiry must follow that dispatch, not nest in it (the harness fails
+    // any test whose server refused a nested dispatch).
+    const { engine, gateway } = ts.server;
+    const { turn, taskId } = await submit("change");
+    engine.attachDelivery((connectionId, event) => {
+      if (event.type === "approval_requested") must(turn.pendingAbandons[0], "prompt").abort();
+      gateway.send(connectionId, event);
+    });
+    turn.init();
+    const decision = await turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
+    expect(decision).toMatchObject({
+      behavior: "deny",
+      message: expect.stringContaining("was abandoned before the user decided"),
+    });
     const resolved = await client.waitFor("approval_resolved");
     const requested = must(
       client.events.find((event) => event.type === "approval_requested"),
@@ -1276,32 +1286,26 @@ describe("approval path", () => {
     });
     expect(rows("SELECT id FROM events WHERE type = 'tool_dispatched'")).toHaveLength(0);
     await expectAbandonedAtTurnEnd(turn);
-  };
-
-  it("tells the client of an approval abandoned before Mia got it only after telling it of the request", async () => {
-    const { turn, taskId } = await submit("change");
-    turn.init();
-    await turn.requestAbandoned("mcp__d1__change", { delta: 1 }, "toolu_1");
-    await expectExpiredAfterRequest(turn, taskId);
   });
 
-  it("expires an approval whose prompt the runtime drops while the client is told of it", async () => {
-    // The prompt is held before approval_requested is delivered, so dropping it then abandons a held prompt from
-    // inside the request's own dispatch: the expiry must follow that dispatch, not nest in it (the harness fails
-    // any test whose server refused a nested dispatch).
-    const { engine, gateway } = ts.server;
+  it("keeps an approval abandoned before Mia got it undecidable when its expiry cannot be recorded", async () => {
     const { turn, taskId } = await submit("change");
-    engine.attachDelivery((connectionId, event) => {
-      if (event.type === "approval_requested") must(turn.pendingAbandons[0], "prompt").abort();
-      gateway.send(connectionId, event);
-    });
     turn.init();
-    const decision = await turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
-    expect(decision).toMatchObject({
-      behavior: "deny",
-      message: expect.stringContaining("was abandoned before the user decided"),
+    // The request commits; the expiry that follows it does not.
+    ts.server.catalog.db.exec(`CREATE TRIGGER fail_expiry BEFORE UPDATE ON approvals
+      WHEN NEW.status = 'expired' BEGIN SELECT RAISE(ABORT, 'simulated expiry failure'); END`);
+    const decision = await turn.requestAbandoned("mcp__d1__change", { delta: 1 }, "toolu_1");
+    expect(decision.behavior).toBe("deny");
+    const requested = await client.waitFor("approval_requested");
+    expect(approvalStatuses()).toEqual(["pending"]);
+    expect(ts.logs).toContainEqual(expect.stringContaining("could not record abandoned approval"));
+    ts.server.catalog.db.exec("DROP TRIGGER fail_expiry");
+    expect(ackError(await decide(taskId, requested.payload.approval_id, "approve"))).toMatchObject({
+      code: "invalid_state",
+      message: expect.stringContaining("can no longer be decided; its call was not released"),
     });
-    await expectExpiredAfterRequest(turn, taskId);
+    expect(rows("SELECT id FROM events WHERE type = 'tool_dispatched'")).toHaveLength(0);
+    await expectAbandonedAtTurnEnd(turn);
   });
 
   describe("with as many prompts held as the server holds at once", () => {
