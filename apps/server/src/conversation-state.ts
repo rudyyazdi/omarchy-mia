@@ -55,8 +55,8 @@ export interface TaskState {
    * that order is the order a disconnect lists them in and an interruption resolves them in.
    */
   readonly pendingApprovals: ReadonlyMap<string, string>;
-  /** Calls whose held approval prompt the runtime dropped before a decision; never released. */
-  readonly abandoned: readonly CallState[];
+  /** The ids of the calls whose held approval prompt the runtime dropped before a decision; never released. */
+  readonly abandoned: readonly string[];
   readonly clientId: string;
   readonly reportedModel: string | null;
 }

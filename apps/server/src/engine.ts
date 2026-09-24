@@ -457,7 +457,7 @@ export class Engine {
 
   constructor(private readonly deps: EngineDeps) {}
 
-  /** The active conversation, as its last commit left it; null before the first start. */
+  /** The active conversation's state as it is now (see `current`); null before the first start. */
   get conversation(): ConversationState | null {
     return this.current;
   }
@@ -2172,7 +2172,7 @@ export class Engine {
           return {
             ...invalidated,
             status: expire.taskStatus,
-            abandoned: [...next.abandoned, { ...call, status: expire.call.status }],
+            abandoned: [...next.abandoned, callId],
           };
         });
       try {
@@ -2199,7 +2199,11 @@ export class Engine {
   private async finishTurn(taskId: string, result: TurnResult): Promise<void> {
     const ended = this.taskOf(taskId);
     const current = this.current;
-    if (!ended || !current) return;
+    // Unreachable: only the turn's end clears its task, once this has returned (submitText).
+    if (!ended || !current) {
+      this.deps.log(`turn of task ${taskId} ended after its task was cleared; not recorded`);
+      return;
+    }
     // Before the reads below yield: a decision or interruption handled while they are awaited must not release
     // a call to, or record an interruption of, a runtime that already exited. An approval then ends blocked.
     // Memory only: nothing records the runtime's end until the transaction below.
@@ -2238,7 +2242,10 @@ export class Engine {
     // The task as the commands handled while the reads were awaited left it.
     const task = this.taskOf(taskId);
     const conversation = this.current;
-    if (!task || !conversation) return;
+    if (!task || !conversation) {
+      this.deps.log(`turn of task ${taskId} ended after its task was cleared; not recorded`);
+      return;
+    }
     const opts = this.taskOpts(task);
     const calls = callsOf(task);
     const actions = classifyActions(calls, task.interrupted);
@@ -2376,7 +2383,7 @@ export class Engine {
     const note = noteAfterTurn({
       interrupted: task.interrupted,
       actions,
-      abandoned: task.abandoned,
+      abandoned: task.abandoned.flatMap((callId) => callById(task, callId) ?? []),
     });
     // Memory only: the next turn records the note it carries, with its task_submitted.
     if (note && this.current) this.current = { ...this.current, pendingNote: note };
@@ -2491,15 +2498,17 @@ export class Engine {
     this.shuttingDown = true;
     this.starting?.abandon.abort(new Error("the server is shutting down"));
     const task = this.task;
-    const turn = this.running;
-    if (!task || turn?.taskId !== task.id) return;
+    if (!task) return;
     const interruption = this.interrupt(task);
+    const turn = this.running;
     if (!interruption.ok) {
       this.deps.log(`shutdown: ${interruption.message}; killing the runtime anyway`);
-      turn.handle
+      turn?.handle
         .interrupt()
         .catch((error: unknown) => this.deps.log(`interrupt failed: ${errorMessage(error)}`));
     }
+    // A task whose turn never started (the adapter threw as it submitted it) has no runtime to wait for.
+    if (turn?.taskId !== task.id) return;
     const timedOut = Promise.withResolvers<"timed_out">();
     const onAbort = () => {
       this.stopping.abort(new Error("abandoned at shutdown"));
