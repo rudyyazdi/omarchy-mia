@@ -380,8 +380,19 @@ export class RecordWriter {
   // ---- conversations, tasks, executions ----
 
   /**
-   * Records a conversation and names its directory without creating it, so recording one does no file I/O; whoever
-   * first writes into the directory creates it.
+   * The directory a conversation recorded with this id and start time owns. A pure path, so a caller can name it
+   * before the conversation's transaction commits.
+   */
+  conversationDirectory(input: { id: string; startedAt: string }): string {
+    return join(
+      this.catalog.paths.conversations,
+      `${input.startedAt.replace(/[:.]/g, "-")}_${input.id}`,
+    );
+  }
+
+  /**
+   * Records a conversation and names its directory (`conversationDirectory`) without creating it, so recording one
+   * does no file I/O; whoever first writes into the directory creates it.
    */
   createConversation(input: {
     id: string;
@@ -390,10 +401,7 @@ export class RecordWriter {
     runtimeConversationId: string;
   }): { directory: string } {
     const { id, startedAt } = input;
-    const directory = join(
-      this.catalog.paths.conversations,
-      `${startedAt.replace(/[:.]/g, "-")}_${id}`,
-    );
+    const directory = this.conversationDirectory({ id, startedAt });
     this.catalog.insert("conversations", {
       id,
       started_at: startedAt,

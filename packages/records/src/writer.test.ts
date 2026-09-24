@@ -135,6 +135,8 @@ describe("record writer", () => {
     expect(conv.directory.endsWith("_conv-1")).toBe(true);
     expect(conv.directory.startsWith(catalog.paths.conversations)).toBe(true);
     expect(existsSync(conv.directory)).toBe(false);
+    // Named before the commit by whoever records it, and the same directory.
+    expect(writer.conversationDirectory({ id: "conv-1", startedAt: AT })).toBe(conv.directory);
   });
 
   it("assigns a dense per-conversation sequence and redacts payloads", () => {
