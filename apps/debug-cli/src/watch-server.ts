@@ -5,7 +5,15 @@ import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { setTimeout } from "node:timers/promises";
 import { match } from "ts-pattern";
-import { findConversation, snapshotConversation, type Catalog } from "@mia/records";
+import { bodyLogServersIn, type BodyLogServers } from "@mia/agent-adapter";
+import { errorMessage } from "@mia/protocol";
+import {
+  findConversation,
+  readConversationProvenance,
+  snapshotConversation,
+  type Catalog,
+  type ProvenanceContent,
+} from "@mia/records";
 import { messagesAfter, NOTHING_SENT, sseRecord, type Sent } from "./watch-feed.ts";
 
 /**
@@ -87,10 +95,42 @@ const stoppedMessage = (end: WatchEnd): string =>
     .with({ kind: "failed" }, () => "the watch stopped after an error")
     .exhaustive();
 
+/** The most the retained tool contracts may hold: a profile's servers and policy, measured in KiB. */
+const MAX_TOOL_CONTRACTS_BYTES = 1024 * 1024;
+
+/**
+ * Which of the conversation's MCP servers write a body log, from the tool contracts its provenance retained, read
+ * once: they never change. Contracts that cannot be read leave it unknown, so the page says so on each call instead
+ * of refusing to show the conversation. A stop while reading leaves it unknown too, and the watch then stops.
+ */
+const readBodyLogServers = async (
+  catalog: Catalog,
+  conversationId: string,
+  signal: AbortSignal,
+): Promise<BodyLogServers> => {
+  const contracts = await readConversationProvenance(catalog, {
+    conversationId,
+    role: "tool_contracts",
+    maxBytes: MAX_TOOL_CONTRACTS_BYTES,
+    signal,
+  }).catch((error: unknown): ProvenanceContent => {
+    if (!signal.aborted) throw error;
+    return { status: "unavailable", reason: "the watch was stopped" };
+  });
+  if (contracts.status === "unavailable") return { status: "unknown", reason: contracts.reason };
+  try {
+    const parsed: unknown = JSON.parse(contracts.bytes.toString("utf8"));
+    return bodyLogServersIn(parsed);
+  } catch (error) {
+    return { status: "unknown", reason: `its tool contracts are not JSON: ${errorMessage(error)}` };
+  }
+};
+
 /** Starts watching `conversationId`, or reports that the catalog has no such conversation. */
 export const startWatch = async (options: WatchOptions): Promise<WatchStart> => {
   const { catalog, conversationId, timers } = options;
   if (!findConversation(catalog, conversationId)) return { kind: "unknown_conversation" };
+  const bodyLogServers = await readBodyLogServers(catalog, conversationId, options.signal);
   const assets = await Promise.all(
     PAGE_FILES.map(async (asset) => ({
       ...asset,
@@ -117,7 +157,11 @@ export const startWatch = async (options: WatchOptions): Promise<WatchStart> => 
       while (!signal.aborted) {
         let polled: ReturnType<typeof messagesAfter>;
         try {
-          polled = messagesAfter(snapshotConversation(catalog, conversationId).tables, sent);
+          polled = messagesAfter(
+            snapshotConversation(catalog, conversationId).tables,
+            sent,
+            bodyLogServers,
+          );
         } catch (error) {
           halt({ kind: "failed", error });
           break;

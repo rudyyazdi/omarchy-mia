@@ -33,6 +33,8 @@ export type {
   DiagnosticsView,
   TaskView,
 } from "./queries.ts";
+export { readConversationProvenance } from "./provenance-read.ts";
+export type { ProvenanceContent } from "./provenance-read.ts";
 export { capturedInDebugMode, watchEntriesAfter, watchTree } from "./watch.ts";
 export { mcpPayload } from "./mcp-payload.ts";
 export type { McpContent, McpEventType } from "./mcp-payload.ts";

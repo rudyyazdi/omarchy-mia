@@ -1,4 +1,5 @@
 import { match } from "ts-pattern";
+import type { BodyLogServers } from "@mia/agent-adapter";
 import { sha256Hex } from "@mia/protocol";
 import {
   capturedInDebugMode,
@@ -13,6 +14,7 @@ import {
   mcpView,
   taskView,
   toolCallView,
+  type Capture,
   type NodeView,
 } from "./watch-render.ts";
 
@@ -64,7 +66,7 @@ const digest = (view: NodeView): string => sha256Hex(JSON.stringify(view));
 /** A node's header and the id the page knows it by. */
 const nodeOf = (
   entry: WatchEntry & { kind: HeaderKind },
-  debugMode: boolean,
+  capture: Capture,
 ): { id: string; view: NodeView } =>
   match(entry)
     .with({ kind: "task" }, ({ task, executions }) => ({
@@ -73,7 +75,7 @@ const nodeOf = (
     }))
     .with({ kind: "tool_call" }, ({ tool_call, approvals }) => ({
       id: nodeId({ level: "tool_call", task_id: tool_call.task_id, tool_call_id: tool_call.id }),
-      view: toolCallView(tool_call, approvals, debugMode),
+      view: toolCallView(tool_call, approvals, capture),
     }))
     .exhaustive();
 
@@ -103,15 +105,18 @@ const unchangingMessage = (entry: WatchEntry): WatchMessage | null =>
  *
  * Headers are rendered up front, since `sent` needs every one of them; events, the bulk of a conversation, are
  * rendered one at a time as `messages` is iterated, so a page's first poll never holds its whole history as HTML.
+ * `bodyLogServers` is read once from the conversation's retained tool contracts, which never change.
  */
 export const messagesAfter = (
   rows: WatchRows,
   sent: Sent,
+  bodyLogServers: BodyLogServers,
 ): { messages: Iterable<WatchMessage>; sent: Sent } => {
   const conversation = rows.conversations[0];
   if (!conversation) throw new Error("the rows hold no conversation");
   const entries = watchEntriesAfter(rows, -1);
   const debugMode = capturedInDebugMode(rows);
+  const capture: Capture = { debugMode, bodyLogServers };
   const headers = new Map<string, string>();
   /** Records a header and reports whether the page lacks it: the node is new, or its row changed. */
   const changed = (id: string, view: NodeView, isNew: boolean): boolean => {
@@ -125,7 +130,7 @@ export const messagesAfter = (
   const nodeMessages = new Map<WatchEntry, WatchMessage>();
   for (const entry of entries) {
     if (entry.kind === "event" || entry.kind === "mcp") continue;
-    const { id, view } = nodeOf(entry, debugMode);
+    const { id, view } = nodeOf(entry, capture);
     if (changed(id, view, entry.sequence > sent.sequence))
       nodeMessages.set(entry, {
         op: "node",

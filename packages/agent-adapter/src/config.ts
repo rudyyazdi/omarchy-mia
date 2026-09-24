@@ -84,7 +84,7 @@ export const RuntimeConfigSchema = z
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
 
 /** The MCP server a fully qualified tool identity (mcp__<server>__<tool>) names, or null when it names none. */
-const serverOf = (identity: string): string | null =>
+export const serverOf = (identity: string): string | null =>
   /^mcp__([A-Za-z0-9_-]+)__/.exec(identity)?.[1] ?? null;
 
 /**

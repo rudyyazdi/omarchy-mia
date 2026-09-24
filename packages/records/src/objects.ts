@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { access, chmod, mkdir, open, rename, rm } from "node:fs/promises";
+import { access, chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 import { sha256Hex } from "@mia/protocol";
 import type { CatalogPaths } from "./catalog.ts";
@@ -134,6 +134,11 @@ export class ObjectStore {
     });
     await this.directories.flush(dirname(target));
     return stored;
+  }
+
+  /** The stored bytes of `digest`, as written; the caller checks them against the digest when it matters. */
+  read(digest: string, options: { signal: AbortSignal }): Promise<Buffer> {
+    return readFile(this.pathFor(digest), { signal: options.signal });
   }
 
   readSync(digest: string): Buffer {

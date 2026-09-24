@@ -7,6 +7,7 @@ import { z } from "zod";
 import { startWatch, type Watch, type WatchMessage, type WatchTimers } from "@mia/debug-cli";
 import {
   Catalog,
+  ObjectStore,
   RecordWriter,
   newId,
   snapshotConversation,
@@ -245,16 +246,20 @@ const get = (url: string, headers: Record<string, string>) => {
 };
 
 /**
- * What a page is sent on connecting to a finished conversation of a server started in debug mode: one task whose
- * allowed read call runs. With `bodyLog`, the d1 server names that log, and `beforeResult` writes it as the fixture
- * would, before the call's result arrives.
+ * What a page is sent on connecting to a finished conversation of a server started with `debugMode`: one task whose
+ * allowed read call runs. With `bodyLog`, the d1 server names that log, as the controlled MCP fixture does, and
+ * `beforeResult` writes it as the fixture would, before the call's result arrives. `beforeWatch` runs on the
+ * server's state directory before the watch starts.
  */
-const watchedInDebugMode = async (
-  body: { bodyLog: string; beforeResult: () => void } | null = null,
-): Promise<WatchMessage[]> => {
-  const debugRuntime = new ScriptedRuntime();
-  const debugServer = await startTestServer(
-    debugRuntime,
+const watchedFinished = async (options: {
+  debugMode: boolean;
+  body?: { bodyLog: string; beforeResult: () => void };
+  beforeWatch?: (catalog: Catalog, conversationId: string) => void;
+}): Promise<WatchMessage[]> => {
+  const { debugMode, body } = options;
+  const finishedRuntime = new ScriptedRuntime();
+  const finishedServer = await startTestServer(
+    finishedRuntime,
     body
       ? {
           mcpServers: {
@@ -262,27 +267,62 @@ const watchedInDebugMode = async (
           },
         }
       : {},
-    { debugMode: true },
+    { debugMode },
   );
   // After every afterEach hook, so after the watch's teardown has closed its catalog.
-  onTestFinished(() => debugServer.close());
-  const debugClient = await debugServer.connect("client-A");
-  await debugClient.startConversation();
-  const next = debugRuntime.nextTurn();
-  await debugClient.submitText("read it");
+  onTestFinished(() => finishedServer.close());
+  const finishedClient = await finishedServer.connect("client-A");
+  await finishedClient.startConversation();
+  const next = finishedRuntime.nextTurn();
+  await finishedClient.submitText("read it");
   const turn = await next;
   turn.init();
   expect((await turn.request("mcp__d1__read", {}, "toolu_read")).behavior).toBe("allow");
   body?.beforeResult();
   await turn.toolResult("toolu_read", JSON.stringify({ unread: 3 }));
   turn.end();
-  await debugClient.waitFor("task_finished");
+  await finishedClient.waitFor("task_finished");
 
-  const debugId = must(debugClient.conversationId, "conversation id");
-  const { watch, catalog } = await watchConversation(debugId, debugServer.catalog());
+  const finishedId = must(finishedClient.conversationId, "conversation id");
+  const catalog = finishedServer.catalog();
+  options.beforeWatch?.(catalog, finishedId);
+  const { watch } = await watchConversation(finishedId, catalog);
   const page = await openPage(watch.url);
-  return page.take(initialCount(catalog, debugId));
+  return page.take(initialCount(catalog, finishedId));
 };
+
+/** A body log path in a fresh directory the test removes. */
+const bodyLogPath = (): string => {
+  const logDirectory = mkdtempSync(join(tmpdir(), "mia-watch-body-log-"));
+  onTestFinished(() => rmSync(logDirectory, { recursive: true, force: true }));
+  return join(logDirectory, "mcp-bodies.jsonl");
+};
+
+/** Writes the body log as the fixture does for the call `toolu_read`: one line per message, in order. */
+const writeBodyLog = (bodyLog: string, messages: { direction: string; body: unknown }[]) =>
+  writeFileSync(
+    bodyLog,
+    messages
+      .map((message) => `${JSON.stringify({ tool_use_id: "toolu_read", ...message })}\n`)
+      .join(""),
+  );
+
+/** A body log whose `beforeResult` writes only the call's request. */
+const requestOnlyBodyLog = (request: unknown) => {
+  const bodyLog = bodyLogPath();
+  return {
+    bodyLog,
+    beforeResult: () => writeBodyLog(bodyLog, [{ direction: "request", body: request }]),
+  };
+};
+
+const toolCallNode = (messages: WatchMessage[]): NodeMessage =>
+  must(
+    messages.find(
+      (message): message is NodeMessage => message.op === "node" && message.kind === "tool_call",
+    ),
+    "the tool call's node",
+  );
 
 describe("mia debug watch", () => {
   // The token is also redacted before it is stored, so the view's own redaction is covered by watch-render.test.ts.
@@ -320,18 +360,32 @@ describe("mia debug watch", () => {
         .length,
     ).toBeGreaterThan(0);
     expect(JSON.stringify(messages)).not.toContain("super-secret-value");
-    // The session's server runs with debug mode off, so the call's MCP bodies are marked, not silently missing.
+    // The session's d1 server writes no body log, as a real MCP server does not, so its bodies are marked as not
+    // recorded, and not as something debug mode would add.
     expect(messages[0]).toMatchObject({
       op: "conversation",
       view: { summary: expect.stringContaining("debug mode off") },
     });
-    expect(nodes[1]?.view.body).toContain(
-      "MCP request and response: not recorded (debug mode off)",
-    );
+    expect(nodes[1]?.view.body).toContain("MCP request and response: not recorded</p>");
+    expect(nodes[1]?.view.body).not.toContain("(debug mode off)");
   });
 
-  it("shows a conversation captured in debug mode as such, with nothing marked not recorded", async () => {
-    const messages = await watchedInDebugMode();
+  it("marks a call to the fixture as not recorded because debug mode was off", async () => {
+    const messages = await watchedFinished({
+      debugMode: false,
+      body: requestOnlyBodyLog({ jsonrpc: "2.0", id: 3, method: "tools/call" }),
+    });
+    expect(toolCallNode(messages).view.body).toContain(
+      "MCP request and response: not recorded (debug mode off)",
+    );
+    expect(messages.filter((message) => message.op === "node").map((node) => node.kind)).toEqual([
+      "task",
+      "tool_call",
+    ]);
+  });
+
+  it("marks a call to a real server as not recorded in a conversation captured in debug mode", async () => {
+    const messages = await watchedFinished({ debugMode: true });
     expect(messages[0]).toMatchObject({
       op: "conversation",
       view: { summary: expect.stringContaining("debug mode on") },
@@ -340,13 +394,34 @@ describe("mia debug watch", () => {
       "task",
       "tool_call",
     ]);
-    expect(JSON.stringify(messages)).not.toContain("not recorded");
+    expect(toolCallNode(messages).view.body).toContain(
+      "MCP request and response: not recorded</p>",
+    );
+    expect(JSON.stringify(messages)).not.toContain("debug mode off)");
+  });
+
+  it("says a call's server is unknown when the conversation's tool contracts cannot be read", async () => {
+    const messages = await watchedFinished({
+      debugMode: false,
+      beforeWatch: (catalog, id) => {
+        const { digest } = must(
+          catalog.get<{ digest: string }>(
+            `SELECT a.object_digest AS digest FROM conversations c
+              JOIN provenance_entries p ON p.provenance_set_id = c.provenance_set_id AND p.role = 'tool_contracts'
+              JOIN artifacts a ON a.id = p.artifact_id WHERE c.id = ?`,
+            id,
+          ),
+          "the tool contracts' object",
+        );
+        rmSync(new ObjectStore(catalog.paths).pathFor(digest));
+      },
+    });
+    expect(toolCallNode(messages).view.body).toContain(
+      "MCP request and response: not recorded unless shown below (whether its server records bodies is unknown: its tool_contracts object could not be read",
+    );
   });
 
   it("shows the MCP request and response debug mode recorded for a call as nodes under it, redacted", async () => {
-    const logDirectory = mkdtempSync(join(tmpdir(), "mia-watch-body-log-"));
-    onTestFinished(() => rmSync(logDirectory, { recursive: true, force: true }));
-    const bodyLog = join(logDirectory, "mcp-bodies.jsonl");
     // As the fixture writes it: the request only, so the response is recorded as missing, with why.
     const request = {
       jsonrpc: "2.0",
@@ -354,14 +429,7 @@ describe("mia debug watch", () => {
       method: "tools/call",
       params: { name: "read", arguments: { token: "super-secret-value-123456" } },
     };
-    const messages = await watchedInDebugMode({
-      bodyLog,
-      beforeResult: () =>
-        writeFileSync(
-          bodyLog,
-          `${JSON.stringify({ tool_use_id: "toolu_read", direction: "request", body: request })}\n`,
-        ),
-    });
+    const messages = await watchedFinished({ debugMode: true, body: requestOnlyBodyLog(request) });
     const nodes = messages.filter((message): message is NodeMessage => message.op === "node");
     expect(nodes.map((node) => node.kind)).toEqual(["task", "tool_call", "mcp", "mcp"]);
     const [, call, sentRequest, response] = nodes;
@@ -381,6 +449,46 @@ describe("mia debug watch", () => {
       ),
     ).toEqual([]);
     expect(JSON.stringify(messages)).not.toContain("super-secret-value");
+  });
+
+  it("appends a fixture call's MCP request and response under it without a reload, in debug mode", async () => {
+    const bodyLog = bodyLogPath();
+    const liveRuntime = new ScriptedRuntime();
+    const liveServer = await startTestServer(
+      liveRuntime,
+      { mcpServers: { d1: { type: "http", url: "http://127.0.0.1:1/mcp", bodyLog } } },
+      { debugMode: true },
+    );
+    // After every afterEach hook, so after the watch's teardown has closed its catalog.
+    onTestFinished(() => liveServer.close());
+    const liveClient = await liveServer.connect("client-A");
+    await liveClient.startConversation();
+    const liveId = must(liveClient.conversationId, "conversation id");
+    const catalog = liveServer.catalog();
+    const { watch, poll } = await watchConversation(liveId, catalog);
+    const page = await openPage(watch.url);
+    await page.take(initialCount(catalog, liveId));
+
+    const next = liveRuntime.nextTurn();
+    await liveClient.submitText("read it");
+    const turn = await next;
+    turn.init();
+    expect((await turn.request("mcp__d1__read", {}, "toolu_read")).behavior).toBe("allow");
+    writeBodyLog(bodyLog, [
+      { direction: "request", body: { jsonrpc: "2.0", id: 3, method: "tools/call" } },
+      { direction: "response", body: { jsonrpc: "2.0", id: 3, result: { unread: 3 } } },
+    ]);
+    await turn.toolResult("toolu_read", JSON.stringify({ unread: 3 }));
+    await poll.fire();
+    const call = await page.untilNode((node) => node.kind === "tool_call");
+    const request = await page.untilNode((node) => node.kind === "mcp");
+    const response = await page.untilNode((node) => node.kind === "mcp");
+    expect([request.parent, response.parent]).toEqual([call.id, call.id]);
+    expect(request.view.summary).toContain("MCP request");
+    expect(response.view.summary).toContain("MCP response");
+    expect(response.view.summary).toContain("unread");
+    turn.end();
+    await liveClient.waitFor("task_finished");
   });
 
   it("appends a new command, a tool call, its result and an auto-rejection without a reload, and re-sends a status that changed", async () => {
