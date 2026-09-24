@@ -75,7 +75,8 @@ const layerOverrides = LAYERS.flatMap((layer, index) =>
 );
 
 // @mia/kernel has no dependencies at all (#132): its source imports only node: modules and its own files, so the
-// order it enforces cannot come to depend on Mia's domain or on a library. Its tests may import vitest.
+// order it enforces cannot come to depend on Mia's domain or on a library. Its tests keep only the layer rule (no
+// workspace imports), so they may import vitest. A dynamic `import()` is left to review.
 const KERNEL_NO_DEPENDENCIES = {
   files: ["packages/kernel/**"],
   ignores: ["**/*.test.ts"],

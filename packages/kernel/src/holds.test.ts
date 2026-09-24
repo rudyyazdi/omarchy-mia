@@ -94,6 +94,11 @@ describe("holds", () => {
     expect(holds.hold("approval-3", { signal, onAbort }).kind).toBe("held");
   });
 
+  it("refuses a cap that is not a positive integer", () => {
+    expect(() => new Holds<string>(Number.NaN)).toThrow(RangeError);
+    expect(() => new Holds<string>(0)).toThrow(RangeError);
+  });
+
   it("does not answer a new hold on an id with the abort of an earlier, settled one", async () => {
     const holds = new Holds<string>(4);
     const first = new AbortController();

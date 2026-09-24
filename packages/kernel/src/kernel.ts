@@ -1,4 +1,10 @@
-import { ChangeFeed, type FeedLimits, type Sequenced, type Subscribed } from "./feed.ts";
+import {
+  ChangeFeed,
+  type FeedDeps,
+  type FeedLimits,
+  type Sequenced,
+  type Subscribed,
+} from "./feed.ts";
 
 /** What a machine decides for one event: refuse it, or the next state with the records and effects it takes. */
 export type Decision<State, Rejection, Rec, Effect> =
@@ -6,8 +12,10 @@ export type Decision<State, Rejection, Rec, Effect> =
   | { kind: "accepted"; next: State; records: readonly Rec[]; effects: readonly Effect[] };
 
 /**
- * One entity kind's rules. Pure and synchronous: it reads only its input, and an answer that arrives later (a
- * runtime callback, a user's decision) comes back as a new event.
+ * One entity kind's rules, and one transaction boundary: whatever must commit together belongs to one machine.
+ * Pure and synchronous: it reads only its input and never mutates `state` (a failed commit keeps it as the next
+ * state of nothing), and an answer that arrives later (a runtime callback, a user's decision) comes back as a new
+ * event. A `decide` that throws is a bug: the dispatch throws, and nothing is committed, applied or performed.
  */
 export type Decide<State, Event, Rejection, Rec, Effect> = (input: {
   state: State;
@@ -33,15 +41,16 @@ export interface Machine<State, Event, Rejection, Change> {
 export interface KernelDeps<Rec, Change extends Sequenced, Effect> {
   /**
    * Write `records` in one transaction and return the changes it committed, in increasing sequence order; a
-   * record may commit no change. It throws when nothing committed. It must not dispatch.
+   * record may commit no change. It throws when nothing committed. Every commit a subscriber should see live goes
+   * through here: the feed publishes only what this returns.
    */
   commit: (records: readonly Rec[]) => readonly Change[];
   /** Perform one effect (deliver to a client, answer the runtime) once its commit landed and the state moved on. */
   perform: (effect: Effect, changes: readonly Change[]) => void;
-  /** An effect threw. The commit, the state and the other effects stand. */
+  /** An effect threw. The commit, the state and the other effects stand; a throw from here is dropped. */
   reportEffectFailure: (error: unknown) => void;
   /** The committed changes after a sequence, read from the store; see FeedDeps.replay. */
-  replay: (after: number) => Iterable<Change>;
+  replay: FeedDeps<Change>["replay"];
   now: () => Date;
   limits: FeedLimits;
 }
@@ -102,38 +111,52 @@ class KernelMachine<State, Event, Rejection, Rec, Change, Effect> implements Mac
  * Orders every state change the same way: decide, commit the records, apply the next state, publish the changes,
  * then perform the effects. Memory and clients follow the store, never the other way round, so nothing is
  * applied, released or delivered for a record that did not commit. A dispatch runs to completion without
- * yielding, because the commit is synchronous; an effect may dispatch again, and that dispatch completes before
- * the rest of the effects run.
+ * yielding, because the commit is synchronous. Neither a commit nor an effect may dispatch: a nested dispatch
+ * fails without committing, since it would apply state inside another transaction, or deliver its effects ahead
+ * of the rest of an earlier commit's. A follow-up is a new event, dispatched once the dispatch returned.
  */
 export const createKernel = <Rec, Change extends Sequenced, Effect>(
   deps: KernelDeps<Rec, Change, Effect>,
 ): Kernel<Rec, Change, Effect> => {
   const feed = new ChangeFeed<Change>({ replay: deps.replay, limits: deps.limits });
-  let committing = false;
+  let dispatching = false;
+
+  const report = (error: unknown): void => {
+    try {
+      deps.reportEffectFailure(error);
+    } catch {
+      // Dropped: a reporter that throws must not skip the remaining effects or unwind a committed dispatch.
+    }
+  };
 
   const pipeline: Pipeline<Rec, Change, Effect> = {
     now: deps.now,
     commit: (records) => {
-      // A dispatch inside a commit would nest transactions and apply state before the outer one committed.
-      if (committing)
-        return { kind: "failed", error: new Error("dispatch while a commit is in progress") };
-      committing = true;
+      if (dispatching)
+        return {
+          kind: "failed",
+          error: new Error("dispatch while another dispatch is in progress"),
+        };
+      dispatching = true;
       try {
         return { kind: "committed", changes: deps.commit(records) };
       } catch (error) {
+        dispatching = false;
         return { kind: "failed", error };
-      } finally {
-        committing = false;
       }
     },
     follow: (changes, effects) => {
-      feed.publish(changes);
-      for (const effect of effects) {
-        try {
-          deps.perform(effect, changes);
-        } catch (error) {
-          deps.reportEffectFailure(error);
+      try {
+        feed.publish(changes);
+        for (const effect of effects) {
+          try {
+            deps.perform(effect, changes);
+          } catch (error) {
+            report(error);
+          }
         }
+      } finally {
+        dispatching = false;
       }
     },
   };

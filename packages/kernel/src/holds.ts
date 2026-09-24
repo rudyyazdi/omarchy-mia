@@ -1,3 +1,5 @@
+import { assertLimits } from "./limits.ts";
+
 /** Why a hold was refused: the table is at its cap, or the id is already held. */
 export type HoldRefusal = "full" | "duplicate";
 
@@ -22,7 +24,9 @@ export class Holds<Reply> {
   private readonly held = new Map<string, Held<Reply>>();
 
   /** `max`: holds open at once; one more is refused with `full`, and the caller answers without waiting. */
-  constructor(private readonly max: number) {}
+  constructor(private readonly max: number) {
+    assertLimits({ max });
+  }
 
   get size(): number {
     return this.held.size;
