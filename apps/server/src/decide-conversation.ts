@@ -1655,9 +1655,9 @@ const disconnectTransition: ConversationTransition<ClientDisconnectedEvent, neve
 /**
  * Start the conversation: its provenance rows, the conversation that names them and its links to them, the close of
  * the conversation it replaces, then its provenance_recorded and conversation_started events, and in debug mode
- * captured_in_debug_mode, all in one commit. Once it commits, the conversation becomes the active one, then its client
- * is told it started. Built from no conversation, so it is never refused; the machine refuses a start of one already
- * started (`conversationStartTransition`).
+ * captured_in_debug_mode, all in one commit; then `activate_conversation` and the delivery of conversation_started.
+ * Built from no conversation, so it is never refused; the machine refuses a start of one already started
+ * (`conversationStartTransition`).
  */
 const conversationStart = (input: {
   event: ConversationStartEvent;

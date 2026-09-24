@@ -269,8 +269,9 @@ const evidenceCapture = (content: Exclude<RuntimeFileRead, { status: "absent" }>
 
 /**
  * The one conversation start awaiting its reads and stores. Shutdown abandons its I/O and refuses it. A disconnect
- * of the connection that asked does not: the start still commits, with no active connection, so the client's
- * resend of the same message_id on a new connection gets the start's reply and adopts the conversation.
+ * of the connection that asked does not: the start still commits, under the connection its client has adopted since
+ * or none (`startConnection`), so the client's resend of the same message_id on a new connection gets the start's
+ * reply and adopts the conversation.
  */
 interface PendingStart {
   connectionId: string;
@@ -312,15 +313,14 @@ interface ActiveTurn {
 export class Engine {
   /**
    * The connection the active conversation's events are delivered to, and the client that owns the conversation. A
-   * start sets both with its conversation (`activate_conversation`); a disconnect clears the connection, and a
-   * reconnecting client adopts a new one (`adoptConnection`).
+   * start sets both (`activate_conversation`); a disconnect clears the connection; while none is active, a client's
+   * command adopts its own, if no other client owns the conversation (`adoptConnection`).
    */
   activeConnectionId: string | null = null;
   activeClientId: string | null = null;
   /**
    * The active conversation's machine, null before the first start. Its state moves only through its dispatches (see
-   * `dispatch`), and is never null: a machine replaces this one only once its start has committed, as that start's
-   * first effect (`activate_conversation`).
+   * `dispatch`), and is never null: a machine replaces this one only through its start (`activate_conversation`).
    */
   private machine: ConversationMachine | null = null;
   /** The runtime running the active task's turn, if one has started (see ActiveTurn). */
@@ -352,9 +352,8 @@ export class Engine {
   private asking: Asking | null = null;
   /**
    * The task submission `submitText` is committing, or null outside that commit. The submission's `start_turn` effect
-   * writes its turn here, and `submitText` starts it once the commit has returned; at most one is ever set. The turn is
-   * started after the dispatch, not while the effect is performed, because the kernel logs an effect that throws as a
-   * delivery failure and moves on, whereas an adapter that cannot start the turn must fail the submission's command.
+   * writes its turn here, and `submitText` starts it once the commit has returned, not while the effect is performed
+   * (see `start_turn`); at most one is ever set.
    */
   private submitting: Submitting | null = null;
 
@@ -637,11 +636,7 @@ export class Engine {
     const prompt = agentPromptObject(provenance);
     const event: ConversationStartEvent = {
       kind: "start_conversation",
-      // Disconnected, the active connection is none or one of this client's (refuseStart), so it stays.
-      origin: {
-        clientId: ctx.clientId,
-        connectionId: connected ? ctx.connectionId : this.activeConnectionId,
-      },
+      origin: { clientId: ctx.clientId, connectionId: this.startConnection(ctx, connected) },
       closes: this.conversation?.id ?? null,
       provenance,
       promptFile: prompt === null ? null : this.deps.writer.objects.pathFor(prompt.digest),
@@ -656,8 +651,8 @@ export class Engine {
       },
     };
     // The conversation starting has a machine of its own, from no state (see ./decide-conversation.ts); the one it
-    // closes is named by id. Its start's first effect makes it the active one, with the start's client and connection
-    // (`activate_conversation`), so a start that does not commit drops the new machine and changes nothing else.
+    // closes is named by id. A start that does not commit drops the new machine; one that does activates it
+    // (`activate_conversation`).
     const machine = this.openConversation(event.ids.conversation);
     let dispatched: Dispatched<ConversationRejection, EventChange>;
     try {
@@ -679,6 +674,17 @@ export class Engine {
         provenance_set_id: conversation.provenanceSetId,
       },
     };
+  }
+
+  /**
+   * The connection a start reaches its client through: the one that asked, or, once that one has closed, the one its
+   * client has adopted since, if any. Another client's connection is never it: before the first conversation, any
+   * client's first command adopts a connection (`adoptConnection`), and `refuseStart` guards ownership only once
+   * there is a conversation to own.
+   */
+  private startConnection(ctx: CommandContext, connected: boolean): string | null {
+    if (connected) return ctx.connectionId;
+    return this.activeClientId === ctx.clientId ? this.activeConnectionId : null;
   }
 
   submitText(

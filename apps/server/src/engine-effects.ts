@@ -8,7 +8,7 @@ export type OutgoingEvent = {
 
 /**
  * The client and the connection a transition's events are recorded under: the conversation's active ones when the
- * transition was decided. They are not part of the conversation's state (they belong with the client lifecycle), so
+ * transition was decided, or, for a start, the ones it makes active. They are not part of the conversation's state (they belong with the client lifecycle), so
  * the boundary reads them and hands them in with the event, as it does the ids.
  */
 export interface Origin {
