@@ -20,5 +20,14 @@ export type {
   DiagnosticsView,
   TaskView,
 } from "./queries.ts";
+export { watchEntriesAfter, watchTree } from "./watch.ts";
+export type {
+  WatchEntry,
+  WatchParent,
+  WatchRows,
+  WatchTask,
+  WatchToolCall,
+  WatchTree,
+} from "./watch.ts";
 export { exportConversationSync, reconcileObjectsSync, verifyExportSync } from "./export.ts";
 export type { ExportManifest } from "./export.ts";
