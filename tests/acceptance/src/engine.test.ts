@@ -997,13 +997,9 @@ describe("approval path", () => {
     const noId = await turn.request("mcp__d1__change", { delta: 1 }, undefined);
     expect(noId.behavior).toBe("deny");
     expect(rows("SELECT id FROM approvals")).toHaveLength(0);
+    // Each wait is the assertion: the client is told of both refusals.
     await client.waitFor("error", (event) => event.payload.code === "configuration_error");
     await client.waitFor("error", (event) => event.payload.code === "runtime_failure");
-    const errors = client.events.flatMap((event) =>
-      event.type === "error" ? [event.payload.code] : [],
-    );
-    expect(errors).toContain("configuration_error");
-    expect(errors).toContain("runtime_failure");
     turn.end();
     await client.waitFor("task_finished");
     const statuses = rows<{ tool_identity: string; status: ToolCallStatus }>(
