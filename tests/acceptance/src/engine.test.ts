@@ -147,6 +147,12 @@ const watchObjectWrites = (): (() => boolean) => {
   return () => writtenInside;
 };
 
+/** How many conversations and provenance sets are recorded: what a refused start must leave unchanged. */
+const conversationRecords = () => ({
+  conversations: rows("SELECT id FROM conversations").length,
+  sets: rows("SELECT id FROM provenance_sets").length,
+});
+
 /** Whether the object store holds bytes for `digest`. */
 const objectStored = (digest: string | null): boolean =>
   digest !== null && existsSync(new ObjectStore(ts.server.catalog.paths).pathFor(digest));
@@ -1344,6 +1350,14 @@ describe("conversation start", () => {
     // Commands on one connection are handled in order, so once this is answered the resend has been handled too.
     await again.sendDiagnostics();
     expect(answered).toBe(false);
+    // Only one resend waits; a further one is refused at once, unrecorded.
+    const third = await ts.connect("client-A");
+    expect(
+      ackError(await third.send("start_conversation", {}, { messageId: "cmd-start" })),
+    ).toEqual({
+      code: "busy",
+      message: "this command is still running; resend it once its reply arrives",
+    });
     held.release();
     const original = await ack;
     expect(await resent).toEqual({ ...original, duplicate: true });
@@ -1374,31 +1388,34 @@ describe("conversation start", () => {
     await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
   });
 
-  it("abandons a start whose client disconnects during its reads", async () => {
+  it("commits a start whose client disconnects during its reads, for its resend to adopt", async () => {
     const before = conversationCount();
-    const { ack } = await startHoldingPrompt("cmd-start");
-    const unanswered = expect(ack).rejects.toThrow("connection closed");
+    const { held, ack } = await startHoldingPrompt("cmd-start");
+    const unanswered = ack.catch(() => undefined);
+    const disconnected = ts.waitForLog((line) => line.endsWith(" closed"));
     client.close();
-    await unanswered;
-    await ts.waitForLog((line) => line.endsWith(" closed"));
-    // Closing waits for every command still being handled to store its reply.
-    await ts.server.close(new AbortController().signal);
-    expect(startRow("cmd-start")).toEqual([
-      {
-        disposition: "rejected",
-        error_code: "invalid_state",
-        error_message: "conversation start abandoned: the client disconnected",
-      },
-    ]);
-    expect(conversationCount()).toBe(before);
+    await Promise.all([unanswered, disconnected]);
+    const again = await ts.connect("client-A");
+    const resent = again.send("start_conversation", {}, { messageId: "cmd-start" });
+    await again.sendDiagnostics();
+    held.release();
+    const started = await resent;
+    expect(started).toMatchObject({ disposition: "accepted", duplicate: true });
+    expect(conversationCount()).toBe(before + 1);
+    again.conversationId = mustString(ackResult(started).conversation_id, "conversation id");
+    const next = runtime.nextTurn();
+    const submitted = await again.submitText("on the adopted conversation");
+    expect(submitted.disposition).toBe("accepted");
+    (await next).end();
+    await again.waitFor("task_finished");
   });
 
   it("stores the reply of a start that shutdown abandons before the catalog closes", async () => {
     const before = conversationCount();
     const { ack } = await startHoldingPrompt("cmd-start");
-    const unanswered = expect(ack).rejects.toThrow("connection closed");
+    const settled = ack.catch(() => undefined);
     await ts.server.close(new AbortController().signal);
-    await unanswered;
+    await settled;
     expect(startRow("cmd-start")).toEqual([
       {
         disposition: "rejected",
@@ -1408,6 +1425,42 @@ describe("conversation start", () => {
     ]);
     expect(conversationCount()).toBe(before);
     expect(ts.logs).not.toContainEqual(expect.stringContaining("command handling failed"));
+  });
+
+  it("refuses a start whose read outlives its deadline, and keeps the current conversation", async () => {
+    const current = must(client.conversationId, "conversation id");
+    const before = conversationCount();
+    const { ack } = await startHoldingPrompt("cmd-start");
+    ts.expireEvidenceReads();
+    const refused = ackError(await ack);
+    expect(refused.code).toBe("record_failure");
+    expect(refused.message).toContain("timed out");
+    expect(conversationCount()).toBe(before);
+    expect(client.conversationId).toBe(current);
+  });
+
+  it("stores a start's snapshots before its transaction, and keeps the current conversation when it fails", async () => {
+    const promptFile = ts.profile.runtime.agentPromptFile;
+    const current = must(client.conversationId, "conversation id");
+    const before = conversationRecords();
+    const writtenInside = watchObjectWrites();
+    const failedPrompt = "# a prompt whose start fails\n";
+    writeFileSync(promptFile, failedPrompt);
+    failNextCommit();
+    expect(ackError(await client.send("start_conversation", {})).code).toBe("record_failure");
+    expect(conversationRecords()).toEqual(before);
+    expect(client.conversationId).toBe(current);
+    expect(rows("SELECT status FROM conversations WHERE id = ?", current)).toEqual([
+      { status: "active" },
+    ]);
+    // Stored before the transaction, then left unreferenced by its rollback.
+    const digest = ObjectStore.digestOf(Buffer.from(failedPrompt));
+    expect(objectStored(digest)).toBe(true);
+    expect(rows("SELECT id FROM artifacts WHERE object_digest = ?", digest)).toEqual([]);
+    writeFileSync(promptFile, "# a prompt whose start commits\n");
+    await client.startConversation();
+    expect(conversationRecords().conversations).toBe(before.conversations + 1);
+    expect(writtenInside()).toBe(false);
   });
 
   it("refuses a start whose prompt is a FIFO or too large, without waiting on it", async () => {
@@ -1513,15 +1566,12 @@ describe("configuration and provenance", () => {
     writeFileSync(promptFile, "prompt");
     await restartSession({ agentPromptFile: promptFile });
     const current = must(client.conversationId, "conversation id");
-    const count = (table: string) => rows(`SELECT id FROM ${table}`).length;
-    const before = { conversations: count("conversations"), sets: count("provenance_sets") };
+    const before = conversationRecords();
     // A directory where the prompt was: it exists, so it is not "missing", and reading it fails (EISDIR).
     rmSync(promptFile);
     mkdirSync(promptFile);
     await expect(client.startConversation()).rejects.toThrow("record_failure");
-    expect({ conversations: count("conversations"), sets: count("provenance_sets") }).toEqual(
-      before,
-    );
+    expect(conversationRecords()).toEqual(before);
     expect(client.conversationId).toBe(current);
     const { turn, taskId } = await submit("still here");
     turn.end();

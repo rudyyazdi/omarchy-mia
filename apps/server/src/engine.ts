@@ -257,15 +257,17 @@ interface DeclaredOutput {
 }
 
 /**
- * The one conversation start awaiting its reads and stores: the connection that asked, and what abandons its I/O
- * when that connection closes or shutdown begins, since either refuses the start once the I/O settles.
+ * The one conversation start awaiting its reads and stores. Shutdown abandons its I/O and refuses it. A disconnect
+ * of the connection that asked does not: the start still commits, with no active connection, so the client's
+ * resend of the same message_id on a new connection gets the start's reply and adopts the conversation.
  */
 interface PendingStart {
   connectionId: string;
+  disconnected: boolean;
   abandon: AbortController;
 }
 
-/** The answer to a start whose I/O was abandoned, or null while it was not. */
+/** The answer to a start whose I/O shutdown abandoned, or null while it was not. */
 const abandonedStart = (pending: PendingStart): CommandResult | null =>
   pending.abandon.signal.aborted
     ? fail(
@@ -483,8 +485,12 @@ export class Engine {
       .exhaustive();
   }
 
-  /** Why a conversation cannot start for `ctx` now, or null; checked again once the start's I/O has settled. */
-  private refuseStart(ctx: CommandContext): CommandResult | null {
+  /**
+   * Why a conversation cannot start for `ctx` now, or null; checked again once the start's I/O has settled. A start
+   * whose connection has closed (`disconnected`) yields only to another client: its own client may already have
+   * reconnected and adopted the conversation, to resend this very start.
+   */
+  private refuseStart(ctx: CommandContext, disconnected = false): CommandResult | null {
     if (this.shuttingDown) return fail("invalid_state", "the server is shutting down");
     if (this.task)
       return fail(
@@ -494,7 +500,8 @@ export class Engine {
     if (
       this.conversation &&
       this.activeConnectionId &&
-      this.activeConnectionId !== ctx.connectionId
+      this.activeConnectionId !== ctx.connectionId &&
+      !(disconnected && this.activeClientId === ctx.clientId)
     ) {
       return fail("busy", "another client owns the active conversation");
     }
@@ -511,6 +518,7 @@ export class Engine {
     if (this.starting) return fail("busy", "another conversation is starting");
     const pending: PendingStart = {
       connectionId: ctx.connectionId,
+      disconnected: false,
       abandon: new AbortController(),
     };
     this.starting = pending;
@@ -538,14 +546,27 @@ export class Engine {
           fail("record_failure", `could not create conversation: ${errorMessage(error)}`)
         );
       }
-      return abandonedStart(pending) ?? this.refuseStart(ctx) ?? this.commitStart(ctx, plan);
+      return (
+        abandonedStart(pending) ??
+        this.refuseStart(ctx, pending.disconnected) ??
+        this.commitStart({ ctx, plan, connected: !pending.disconnected })
+      );
     } finally {
       this.starting = null;
     }
   }
 
-  /** Records a conversation whose provenance is stored, and makes it the active one. */
-  private commitStart(ctx: CommandContext, plan: ProvenancePlan<StoredObject>): CommandResult {
+  /**
+   * Records a conversation whose provenance is stored, and makes it the active one. When the connection that asked
+   * has closed meanwhile (`connected` false), the conversation belongs to its client, through the connection that
+   * client has adopted since, or none, as `onDisconnect` would have left it.
+   */
+  private commitStart(input: {
+    ctx: CommandContext;
+    plan: ProvenancePlan<StoredObject>;
+    connected: boolean;
+  }): CommandResult {
+    const { ctx, plan, connected } = input;
     const { writer } = this.deps;
     const previous = {
       conversation: this.conversation,
@@ -582,7 +603,8 @@ export class Engine {
           epoch: 0,
           pendingNote: null,
         };
-        this.activeConnectionId = ctx.connectionId;
+        // Disconnected, the active connection is none or one of this client's (refuseStart), so it stays.
+        if (connected) this.activeConnectionId = ctx.connectionId;
         this.activeClientId = ctx.clientId;
         this.record("provenance_recorded", provenance);
         this.emit({
@@ -969,8 +991,7 @@ export class Engine {
 
   /** Disconnection is not consent: pending approvals stay pending; the connection simply stops being active. */
   onDisconnect(connectionId: string): void {
-    if (this.starting?.connectionId === connectionId)
-      this.starting.abandon.abort(new Error("the client disconnected"));
+    if (this.starting?.connectionId === connectionId) this.starting.disconnected = true;
     if (this.activeConnectionId !== connectionId) return;
     if (this.conversation) {
       try {

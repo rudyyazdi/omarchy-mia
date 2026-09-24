@@ -216,17 +216,20 @@ export const planConversationProvenance = (input: {
 
   // Architecture document revision.
   const architecture = files.architecture;
-  const architectureRevision = architecture.bytes === null ? null : sha256Hex(architecture.bytes);
-  items.push(
-    architecture.bytes === null || architectureRevision === null
-      ? unavailable("architecture", `architecture document missing: ${architecture.path}`)
-      : retained("architecture", {
-          bytes: architecture.bytes,
-          version: architectureRevision.slice(0, 12),
-          mime: "text/markdown",
-          logicalName: basename(architecture.path),
-        }),
-  );
+  let architectureRevision: string | null = null;
+  if (architecture.bytes === null) {
+    items.push(unavailable("architecture", `architecture document missing: ${architecture.path}`));
+  } else {
+    architectureRevision = sha256Hex(architecture.bytes);
+    items.push(
+      retained("architecture", {
+        bytes: architecture.bytes,
+        version: architectureRevision.slice(0, 12),
+        mime: "text/markdown",
+        logicalName: basename(architecture.path),
+      }),
+    );
+  }
 
   // Server build, plus retained local changes for dirty trees (recorded as a dependency of the build).
   const build = identity.build;

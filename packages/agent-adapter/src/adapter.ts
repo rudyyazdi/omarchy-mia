@@ -475,7 +475,10 @@ const parseHookLine = (line: string): Record<string, unknown> | null => {
   }
 };
 
-/** A file the runtime writes during a turn, read after it ends; `absent` when the runtime never wrote it. */
+/**
+ * A file read while the server serves: one the runtime writes during a turn, read after it ends, or a file a
+ * conversation start retains. `absent` when nothing exists at the path.
+ */
 export type RuntimeFileRead =
   | { status: "absent" }
   | { status: "read"; bytes: Buffer }
@@ -490,7 +493,7 @@ export interface RuntimeFileReadOptions {
   maxBytes?: number;
 }
 
-/** Reads a runtime-written file at a path; `readRuntimeFile` is the real one, and a test injects its own. */
+/** Reads a file at a path while serving; `readRuntimeFile` is the real one, and a test injects its own. */
 export type RuntimeFileReader = (
   path: string,
   options?: RuntimeFileReadOptions,
@@ -502,12 +505,6 @@ const abortReason = (reason: unknown): string =>
     ? "timed out"
     : errorMessage(reason);
 
-/**
- * Opens without blocking and reads only a regular file. A blocking open of a FIFO waits for a writer that may
- * never come, and a read of one waits for data, each holding one of libuv's few worker threads meanwhile; a
- * runtime that leaves a FIFO on every turn would take one more each turn until every async fs call stalls.
- * O_NOCTTY keeps a terminal device at the path from becoming the server's controlling terminal.
- */
 /** Reads at most `maxBytes` + 1 bytes from the start of `handle`: one more than the cap shows the file is longer. */
 const readCapped = async (
   handle: FileHandle,
@@ -521,19 +518,29 @@ const readCapped = async (
   return Buffer.concat(chunks);
 };
 
+/**
+ * Opens without blocking and reads only a regular file. A blocking open of a FIFO waits for a writer that may
+ * never come, and a read of one waits for data, each holding one of libuv's few worker threads meanwhile; a
+ * runtime that leaves a FIFO on every turn would take one more each turn until every async fs call stalls.
+ * O_NOCTTY keeps a terminal device at the path from becoming the server's controlling terminal.
+ */
 const readRegularFile = async (
   path: string,
   { signal, maxBytes }: RuntimeFileReadOptions,
 ): Promise<RuntimeFileRead> => {
   const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY);
   try {
-    if (!(await handle.stat()).isFile())
-      return { status: "unreadable", reason: "not a regular file" };
+    const stats = await handle.stat();
+    if (!stats.isFile()) return { status: "unreadable", reason: "not a regular file" };
     if (maxBytes === undefined) return { status: "read", bytes: await handle.readFile({ signal }) };
+    const tooLarge: RuntimeFileRead = {
+      status: "unreadable",
+      reason: `larger than ${maxBytes} bytes`,
+    };
+    if (stats.size > maxBytes) return tooLarge;
+    // Capped as well, because the file can grow after the stat.
     const bytes = await readCapped(handle, maxBytes, signal);
-    return bytes.byteLength > maxBytes
-      ? { status: "unreadable", reason: `larger than ${maxBytes} bytes` }
-      : { status: "read", bytes };
+    return bytes.byteLength > maxBytes ? tooLarge : { status: "read", bytes };
   } finally {
     // Nothing was written through this descriptor, so a failed close loses nothing the result depends on.
     await handle.close().catch(() => undefined);
@@ -613,12 +620,14 @@ export const boundedRuntimeFileReader = ({
  * Abandoned reads the process lets stay blocked before it refuses to start another. The libuv worker pool (4
  * threads by default) is per process, and every async fs call and `dns.lookup` queues behind it, so this keeps
  * threads free when a turn's two concurrent evidence reads (transcript and hook evidence) are the last to stick.
+ * A conversation start's two reads (agent prompt and architecture document) share the budget, because the pool is
+ * shared: a stale mount under either path can cost later turns their evidence until those reads return.
  */
 const MAX_STUCK_READS = 2;
 
 /**
- * Reads a runtime-written file without throwing, because a throw after the turn would keep it from being
- * recorded as finished. Only a missing file is absent; anything that is not a regular file (a directory, a
+ * Reads a runtime-written file, or a file a conversation start retains, without throwing, because a throw after
+ * the turn would keep it from being recorded as finished. Only a missing file is absent; anything that is not a regular file (a directory, a
  * FIFO) and any other failure (EACCES, ENOTDIR) is reported. Asynchronous because the server reads at turn end
  * while it serves other connections.
  *

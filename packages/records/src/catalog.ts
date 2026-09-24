@@ -181,7 +181,8 @@ export class Catalog {
     const conditions = definedColumns(where.expected);
     if (columns.length === 0) return false;
     const assignments = columns.map(([name]) => `${name} = ?`).join(", ");
-    const guards = conditions.map(([name]) => ` AND ${name} = ?`).join("");
+    // IS, not =, so an expected null matches a null column.
+    const guards = conditions.map(([name]) => ` AND ${name} IS ?`).join("");
     const sql = `UPDATE ${table} SET ${assignments} WHERE id = ?${guards}`;
     const { changes } = this.db
       .prepare(sql)

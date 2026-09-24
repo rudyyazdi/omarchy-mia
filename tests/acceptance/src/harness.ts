@@ -27,7 +27,7 @@ export interface TestServer {
   dir: string;
   /** What the server logged, in order: how a test observes a loss the records cannot hold. */
   logs: readonly string[];
-  /** Resolves with the first line the server logged, or logs later, that `matches`. */
+  /** Resolves with the next line the server logs that `matches`; call it before what makes the server log it. */
   waitForLog(matches: (line: string) => boolean): Promise<string>;
   /** Aborts the deadline of every evidence read in progress (turn end or conversation start), as if it had timed out. */
   expireEvidenceReads(): void;
@@ -201,8 +201,6 @@ export const startTestServer = async (
     dir,
     logs,
     waitForLog: (matches) => {
-      const logged = logs.find(matches);
-      if (logged !== undefined) return Promise.resolve(logged);
       const { promise, resolve } = Promise.withResolvers<string>();
       const waiter = (line: string) => {
         if (!matches(line)) return;
