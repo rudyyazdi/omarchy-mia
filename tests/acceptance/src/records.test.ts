@@ -333,7 +333,8 @@ describe("records, report and export", () => {
     const dir = mkdtempSync(join(tmpdir(), "mia-export-"));
     const catalog = Catalog.openSync(join(dir, "state"));
     const writer = new RecordWriter(catalog);
-    const prov = writer.createProvenanceSet("t");
+    const prov = newId("prov");
+    writer.createProvenanceSet({ id: prov, createdAt: AT, description: "t" });
     const conversationId = newId("conv");
     writer.createConversation({
       id: conversationId,

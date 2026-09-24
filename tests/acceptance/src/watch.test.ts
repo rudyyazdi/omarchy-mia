@@ -425,7 +425,12 @@ describe("mia debug watch", () => {
       const writable = Catalog.openSync(dir);
       const stalled = writable.transaction(() => {
         const writer = new RecordWriter(writable);
-        const provenanceSetId = writer.createProvenanceSet("watch backpressure");
+        const provenanceSetId = newId("prov");
+        writer.createProvenanceSet({
+          id: provenanceSetId,
+          createdAt: AT,
+          description: "watch backpressure",
+        });
         const id = newId("conv");
         writer.createConversation({
           id,

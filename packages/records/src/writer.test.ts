@@ -9,6 +9,9 @@ import { RecordWriter } from "./writer.ts";
 /** When the rows these tests write say they were recorded. */
 const AT = "2026-01-01T00:00:00.000Z";
 
+/** A distinct time for each row, so a test can tell which given time a row stored. */
+const second = (index: number) => `2026-01-01T00:00:0${index}.000Z`;
+
 type CommandInput = Parameters<RecordWriter["recordCommand"]>[0];
 
 let dir: string;
@@ -25,6 +28,16 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+/** Stores `text` in the object store, as a capture does before its artifact is registered. */
+const put = (text: string) =>
+  writer.objects.put(Buffer.from(text), { signal: new AbortController().signal });
+
+/** Records a provenance set for a conversation to name, and returns its id. */
+const provenanceSet = (): string => {
+  writer.createProvenanceSet({ id: "prov-1", createdAt: AT, description: "test" });
+  return "prov-1";
+};
+
 /**
  * A tool call awaiting approval, with the conversation, task, execution and client it belongs to, each stamped with
  * the time `at` gives it.
@@ -37,7 +50,7 @@ const seedToolCall = (
     call: AT,
   },
 ): void => {
-  const prov = writer.createProvenanceSet("test");
+  const prov = provenanceSet();
   writer.createConversation({
     id: "conv-1",
     startedAt: at.conversation,
@@ -84,7 +97,7 @@ const seedToolCall = (
 
 describe("record writer", () => {
   it("enforces foreign keys and rolls back a failed transaction atomically", () => {
-    const prov = writer.createProvenanceSet("test");
+    const prov = provenanceSet();
     writer.createConversation({
       id: "conv-1",
       startedAt: AT,
@@ -116,7 +129,7 @@ describe("record writer", () => {
     const conv = writer.createConversation({
       id: "conv-1",
       startedAt: AT,
-      provenanceSetId: writer.createProvenanceSet("test"),
+      provenanceSetId: provenanceSet(),
       runtimeConversationId: "rt-1",
     });
     expect(conv.directory.endsWith("_conv-1")).toBe(true);
@@ -125,7 +138,7 @@ describe("record writer", () => {
   });
 
   it("assigns a dense per-conversation sequence and redacts payloads", () => {
-    const prov = writer.createProvenanceSet("test");
+    const prov = provenanceSet();
     writer.createConversation({
       id: "conv-1",
       startedAt: AT,
@@ -161,7 +174,7 @@ describe("record writer", () => {
   });
 
   it("names a transition's rows with the ids its caller gives, and refuses a reused one", () => {
-    const prov = writer.createProvenanceSet("test");
+    const prov = provenanceSet();
     writer.createConversation({
       id: "conv-1",
       startedAt: AT,
@@ -203,28 +216,86 @@ describe("record writer", () => {
 
   it("stores artifact bytes once and keeps distinct logical records", async () => {
     const one = writer.registerArtifact({
+      id: "art-1",
+      createdAt: AT,
       kind: "tool_output",
       logicalName: "a.txt",
-      stored: await writer.objects.put(Buffer.from("same"), {
-        signal: new AbortController().signal,
-      }),
+      stored: await put("same"),
     });
     const two = writer.registerArtifact({
+      id: "art-2",
+      createdAt: AT,
       kind: "tool_output",
       logicalName: "b.txt",
-      stored: await writer.objects.put(Buffer.from("same"), {
-        signal: new AbortController().signal,
-      }),
+      stored: await put("same"),
     });
     expect(one.digest).toBe(two.digest);
-    expect(one.artifactId).not.toBe(two.artifactId);
+    expect(catalog.all("SELECT id FROM artifacts ORDER BY id")).toEqual([
+      { id: "art-1" },
+      { id: "art-2" },
+    ]);
     expect(catalog.all("SELECT * FROM objects")).toHaveLength(1);
     if (!one.digest) throw new Error("artifact bytes were not stored");
     expect(writer.objects.verifySync(one.digest)).toBe("verified");
   });
 
+  it("names and stamps provenance and artifact rows with the ids and times its caller gives", async () => {
+    const stored = await put("snapshot");
+    writer.createProvenanceSet({ id: "prov-a", createdAt: second(1), description: "given" });
+    writer.registerArtifact({
+      id: "art-a",
+      createdAt: second(2),
+      kind: "snapshot",
+      logicalName: "prompt",
+      stored,
+    });
+    // The same bytes again: the object keeps the time of the registration that first recorded it.
+    writer.registerArtifact({
+      id: "art-b",
+      createdAt: second(3),
+      kind: "snapshot",
+      logicalName: "prompt again",
+      stored,
+    });
+    writer.addProvenanceEntry({
+      id: "pe-a",
+      provenanceSetId: "prov-a",
+      role: "agent_prompt",
+      artifactId: "art-a",
+      availability: "retained",
+    });
+    writer.createConversation({
+      id: "conv-1",
+      startedAt: second(1),
+      provenanceSetId: "prov-a",
+      runtimeConversationId: "rt-1",
+    });
+    writer.linkArtifact({
+      id: "link-a",
+      conversationId: "conv-1",
+      artifactId: "art-a",
+      relation: "provenance",
+      provenanceSetId: "prov-a",
+    });
+    expect([
+      catalog.all("SELECT id, created_at FROM provenance_sets"),
+      catalog.all("SELECT id, created_at FROM artifacts ORDER BY id"),
+      catalog.all("SELECT created_at FROM objects"),
+      catalog.all("SELECT id, artifact_id FROM provenance_entries"),
+      catalog.all("SELECT id, artifact_id FROM artifact_links"),
+    ]).toEqual([
+      [{ id: "prov-a", created_at: second(1) }],
+      [
+        { id: "art-a", created_at: second(2) },
+        { id: "art-b", created_at: second(3) },
+      ],
+      [{ created_at: second(2) }],
+      [{ id: "pe-a", artifact_id: "art-a" }],
+      [{ id: "link-a", artifact_id: "art-a" }],
+    ]);
+  });
+
   it("stamps a transition's rows with the times its caller gives", () => {
-    const second = (index: number) => `2026-01-01T00:00:0${index}.000Z`;
     seedToolCall({
       conversation: second(1),
       task: second(2),

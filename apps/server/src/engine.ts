@@ -36,7 +36,7 @@ import {
 import {
   type ArtifactKind,
   type Catalog,
-  type IdPrefix,
+  type NewId,
   type JournalEventType,
   type LinkRelation,
   type RecordWriter,
@@ -51,6 +51,7 @@ import {
 } from "./artifact-capture.ts";
 import type { ArtifactCollector } from "./artifact-collector.ts";
 import {
+  linkConversationProvenance,
   planConversationProvenance,
   readConversationFiles,
   recordConversationProvenance,
@@ -217,14 +218,14 @@ export interface EngineDeps {
   /** Captures a tool output a completed call declared: `collectArtifact`, or a test's own. */
   collectArtifact: ArtifactCollector;
   /**
-   * Names the conversations, tasks, executions, tool calls, approvals and events the engine creates (see
-   * RecordWriter), and every event it sends: `newId`. Injected randomness, so a transition's ids are chosen
-   * before its records are written and can refer to each other.
+   * Names the conversations, tasks, executions, tool calls, approvals, events, provenance sets and entries, artifacts
+   * and artifact links the engine records (see RecordWriter), and every event it sends: `newId`. Injected randomness, so a transition's ids are
+   * chosen before its records are written and can refer to each other.
    */
-  newId: (prefix: IdPrefix) => string;
+  newId: NewId;
   /**
-   * The clock. Each transaction reads it once, and every conversation, task, execution, tool call, approval and event
-   * row it writes carries that time (see RecordWriter); each event sent reads it for its `server_time`.
+   * The clock. Each transaction reads it once, and every row it writes carries that time except a diagnostics row,
+   * which stamps itself (see RecordWriter); each event sent reads it for its `server_time`.
    */
   now: () => Date;
   log: (message: string) => void;
@@ -382,7 +383,7 @@ export class Engine {
   /**
    * When the transaction in progress was decided, or null outside one. One reading per transaction, as a kernel
    * dispatch hands its `decide` one `now`, so the transition rows of one commit (see `EngineDeps.now`) agree on when
-   * it happened. The rows the writer still names (provenance, artifacts, diagnostics) stamp themselves.
+   * it happened. The rows the writer still names (diagnostics) stamp themselves.
    */
   private transactionTime: string | null = null;
 
@@ -629,17 +630,20 @@ export class Engine {
       // Unlike task transitions, this sets state inside the transaction, because `record` reads the active
       // conversation; the catch below restores it.
       return this.tx(() => {
-        const provenance = recordConversationProvenance(writer, plan);
+        const startedAt = this.recordedAt;
+        const provenance = recordConversationProvenance(writer, plan, {
+          newId: this.deps.newId,
+          createdAt: startedAt,
+        });
         const runtimeConversationId = randomUUID();
         const conversationId = this.deps.newId("conv");
-        const startedAt = this.recordedAt;
         const conv = writer.createConversation({
           id: conversationId,
           startedAt,
           provenanceSetId: provenance.provenance_set_id,
           runtimeConversationId,
         });
-        writer.linkProvenanceSet(conversationId, provenance.provenance_set_id);
+        linkConversationProvenance(writer, { conversationId, provenance }, this.deps.newId);
         if (previous.conversation)
           writer.updateConversation(previous.conversation.id, { status: "closed" });
         // Every turn of this conversation appends the prompt bytes recorded in provenance: the runtime reads the
@@ -1971,8 +1975,11 @@ export class Engine {
   }
 
   private registerEvidence(task: TaskState, evidence: TurnEvidence, retention: Retention): void {
-    const { writer } = this.deps;
-    const artifact = writer.registerArtifact({
+    const { writer, newId } = this.deps;
+    const artifactId = newId("art");
+    writer.registerArtifact({
+      id: artifactId,
+      createdAt: this.recordedAt,
       kind: evidence.kind,
       logicalName: evidence.name,
       mimeType: "application/x-ndjson",
@@ -1981,8 +1988,9 @@ export class Engine {
       ...captureFields(retention),
     });
     writer.linkArtifact({
+      id: newId("link"),
       conversationId: this.activeConversation.id,
-      artifactId: artifact.artifactId,
+      artifactId,
       relation: evidence.relation,
       taskId: task.id,
     });
@@ -2004,9 +2012,12 @@ export class Engine {
    */
   private registerToolOutput(output: DeclaredOutput, retention: Retention): void {
     const { task, call, declared, eventId } = output;
-    const { writer } = this.deps;
+    const { writer, newId } = this.deps;
     const conversationId = this.activeConversation.id;
+    const artifactId = newId("art");
     const art = writer.registerArtifact({
+      id: artifactId,
+      createdAt: this.recordedAt,
       kind: "tool_output",
       logicalName: declared.name ?? declared.path,
       mimeType: declared.mimeType ?? "application/octet-stream",
@@ -2017,23 +2028,25 @@ export class Engine {
       ...captureFields(retention),
     });
     writer.linkArtifact({
+      id: newId("link"),
       conversationId,
-      artifactId: art.artifactId,
+      artifactId,
       relation: "tool_result",
       toolCallId: call.id,
       taskId: task.id,
     });
     if (retention.status === "retained") {
       writer.linkArtifact({
+        id: newId("link"),
         conversationId,
-        artifactId: art.artifactId,
+        artifactId,
         relation: "task_output",
         taskId: task.id,
       });
       this.record(
         "artifact_registered",
         {
-          artifact_id: art.artifactId,
+          artifact_id: artifactId,
           tool_call_id: call.id,
           digest: art.digest,
           size: art.byteSize,

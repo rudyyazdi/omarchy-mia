@@ -38,7 +38,12 @@ describe("debug commands open the catalog read-only", () => {
     const catalog = Catalog.openSync(state);
     const conversationId = catalog.transaction(() => {
       const writer = new RecordWriter(catalog);
-      const provenanceSetId = writer.createProvenanceSet("debug-cli fixture");
+      const provenanceSetId = newId("prov");
+      writer.createProvenanceSet({
+        id: provenanceSetId,
+        createdAt: AT,
+        description: "debug-cli fixture",
+      });
       const id = newId("conv");
       writer.createConversation({
         id,

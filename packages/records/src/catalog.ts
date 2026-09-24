@@ -27,7 +27,10 @@ export type IdPrefix =
   | "prov"
   | "task";
 
-export const newId = (prefix: IdPrefix): string => `${prefix}_${randomUUID().replace(/-/g, "")}`;
+/** Draws a fresh id for a row of one kind: `newId`, or a caller's own. */
+export type NewId = (prefix: IdPrefix) => string;
+
+export const newId: NewId = (prefix) => `${prefix}_${randomUUID().replace(/-/g, "")}`;
 
 export const nowIso = (): string => new Date().toISOString();
 
