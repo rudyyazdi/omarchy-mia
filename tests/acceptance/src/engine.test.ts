@@ -688,6 +688,81 @@ describe("approval path", () => {
     expect(rows("SELECT id FROM events WHERE type = 'tool_result_unmatched'")).toHaveLength(0);
   });
 
+  it("tells the client each call's progress in the status that call committed in", async () => {
+    // Record, as each tool_call notification is sent, the status the catalog then holds for its call.
+    const { engine, gateway } = ts.server;
+    const notified: {
+      call: string;
+      status: ToolCallStatus;
+      detail?: string;
+      committed: unknown;
+    }[] = [];
+    let lastPayload: unknown = null;
+    engine.attachDelivery((connectionId, event) => {
+      if (event.type === "tool_call") {
+        const { runtime_call_id: call, status, detail, tool_call_id: id } = event.payload;
+        const committed = rows("SELECT status FROM tool_calls WHERE id = ?", id)[0]?.status;
+        notified.push({ call, status, ...(detail ? { detail } : {}), committed });
+        lastPayload = event.payload;
+      }
+      gateway.send(connectionId, event);
+    });
+    const { turn, taskId } = await submit("progress");
+    turn.init();
+    turn.propose("toolu_read", "mcp__d1__read", {});
+    expect((await turn.request("mcp__d1__read", {}, "toolu_read")).behavior).toBe("allow");
+    await turn.toolResult("toolu_read", "read");
+    expect((await turn.request("mcp__d1__forbidden", {}, "toolu_forbidden")).behavior).toBe("deny");
+    const approved = turn.request("mcp__d1__change", { delta: 1 }, "toolu_approved");
+    const requested = await client.waitFor("approval_requested");
+    await decide(taskId, requested.payload.approval_id, "approve");
+    expect((await approved).behavior).toBe("allow");
+    const rejected = turn.request("mcp__d1__change", { delta: 3 }, "toolu_rejected");
+    const rejection = await client.waitFor(
+      "approval_requested",
+      (event) => event.payload.runtime_call_id === "toolu_rejected",
+    );
+    await decide(taskId, rejection.payload.approval_id, "reject");
+    expect((await rejected).behavior).toBe("deny");
+    const interrupted = turn.request("mcp__d1__change", { delta: 2 }, "toolu_interrupted");
+    const asked = await client.waitFor(
+      "approval_requested",
+      (event) => event.payload.runtime_call_id === "toolu_interrupted",
+    );
+    expect((await client.interrupt(taskId)).disposition).toBe("accepted");
+    expect((await interrupted).behavior).toBe("deny");
+    await client.waitFor("task_finished");
+    const progress = (call: string, status: ToolCallStatus, detail?: string) => ({
+      call,
+      status,
+      ...(detail ? { detail } : {}),
+      committed: status,
+    });
+    expect(notified).toEqual([
+      progress("toolu_read", "proposed"),
+      progress("toolu_read", "dispatched"),
+      progress("toolu_read", "completed"),
+      progress("toolu_forbidden", "denied"),
+      progress("toolu_approved", "awaiting_approval"),
+      progress("toolu_approved", "dispatched"),
+      progress("toolu_rejected", "awaiting_approval"),
+      progress("toolu_rejected", "denied", "rejected"),
+      progress("toolu_interrupted", "awaiting_approval"),
+      progress("toolu_interrupted", "invalidated", "interrupted"),
+    ]);
+    // The whole payload, built with the transition, names the call and its task as the approval request did.
+    expect(lastPayload).toEqual({
+      conversation_id: asked.payload.conversation_id,
+      task_id: taskId,
+      tool_call_id: asked.payload.tool_call_id,
+      runtime_call_id: "toolu_interrupted",
+      tool_identity: "mcp__d1__change",
+      status: "invalidated",
+      detail: "interrupted",
+      redacted_arguments: { delta: 2 },
+    });
+  });
+
   it("invalidates an approval when arguments change under the same runtime call id", async () => {
     const { turn, taskId } = await submit("change");
     turn.init();

@@ -30,7 +30,6 @@ import {
   type ErrorCode,
   type EventPayload,
   type ServerEvent,
-  type ServerEventType,
   type TaskStatus,
   type ToolCallPolicy,
   type ToolCallStatus,
@@ -62,6 +61,7 @@ import {
   type BodyReadPoint,
   type McpBody,
 } from "./mcp-bodies.ts";
+import type { EngineEffect, OutgoingEvent } from "./engine-effects.ts";
 import {
   commitRecords,
   eventSequence,
@@ -140,6 +140,12 @@ const TURN_ENDED: PermissionDecision = {
  */
 type PermissionAnswer =
   { kind: "answer"; decision: PermissionDecision } | { kind: "hold"; approvalId: string };
+
+/** What recording a permission rule's outcome decided: the runtime's answer, and the status the call commits in. */
+interface PermissionRecorded {
+  answer: PermissionAnswer;
+  status: ToolCallStatus;
+}
 
 interface ToolCallState {
   id: string;
@@ -272,11 +278,6 @@ interface EventLinks {
 interface EventOpts extends EventLinks {
   id: string;
 }
-
-/** A client-facing event as a correlated type/payload pair, so the envelope needs no assertion. */
-type OutgoingEvent = {
-  [T in ServerEventType]: { type: T; payload: EventPayload<T> };
-}[ServerEventType];
 
 interface NewCallInput {
   /** The revision's id, drawn before the transaction. */
@@ -421,7 +422,7 @@ const abandonedStart = (pending: PendingStart): CommandResult | null =>
 interface CommitQueue {
   records: EngineRecord[];
   state: (() => void)[];
-  effects: ((changes: readonly CommittedChange[]) => void)[];
+  effects: EngineEffect[];
 }
 
 const emptyQueue = (): CommitQueue => ({ records: [], state: [], effects: [] });
@@ -488,7 +489,7 @@ export class Engine {
   private queued: CommitQueue = emptyQueue();
   /**
    * The runtime's permission prompts waiting for the user's decision, keyed by approval id. Each is answered once:
-   * by `answerPrompt` after a commit, by its abandonment, or once its turn has ended (submitText).
+   * by an `answer_prompt` effect after a commit, by its abandonment, or once its turn has ended (submitText).
    */
   private readonly prompts = new Holds<PermissionDecision>(MAX_HELD_PROMPTS);
   /**
@@ -552,7 +553,7 @@ export class Engine {
     for (const apply of state) apply();
     for (const effect of effects) {
       try {
-        effect(changes);
+        this.perform(effect, changes);
       } catch (error) {
         this.deps.log(`delivery failed after commit; records stand: ${errorMessage(error)}`);
       }
@@ -575,11 +576,36 @@ export class Engine {
   }
 
   /**
-   * Queue an effect (client delivery or runtime answer) for after the commit and its state changes (inside tx); it is
-   * handed what the commit changed.
+   * Queue an effect (see `EngineEffect`) for after the commit and its state changes (inside tx); `perform` hands it
+   * what the commit changed.
    */
-  private afterCommit(effect: (changes: readonly CommittedChange[]) => void): void {
+  private afterCommit(effect: EngineEffect): void {
     this.queued.effects.push(effect);
+  }
+
+  /**
+   * Perform one effect of a committed transition, once its state changes have applied (see `tx`). It reads the
+   * connection, the held prompts and the active task as they are now, not as they were when the effect was queued.
+   */
+  private perform(effect: EngineEffect, changes: readonly CommittedChange[]): void {
+    match(effect)
+      .with({ kind: "deliver_event" }, ({ eventId, event }) =>
+        this.deliver(event, { id: eventId, sequence: eventSequence(changes, eventId) }),
+      )
+      .with({ kind: "notify_tool_call" }, ({ payload }) =>
+        this.deliver({ type: "tool_call", payload }, { id: this.newId("evt"), sequence: null }),
+      )
+      .with({ kind: "answer_prompt" }, ({ approvalId, decision }) =>
+        this.prompts.reply(approvalId, decision),
+      )
+      .with({ kind: "interrupt_runtime" }, ({ taskId }) => {
+        const task = this.task;
+        if (task?.id !== taskId || !task.handle) return;
+        task.handle
+          .interrupt()
+          .catch((error: unknown) => this.deps.log(`interrupt failed: ${String(error)}`));
+      })
+      .exhaustive();
   }
 
   private deliver(event: OutgoingEvent, envelope: { id: string; sequence: number | null }): void {
@@ -598,9 +624,7 @@ export class Engine {
   /** Persist an event (inside tx) and queue its delivery with the id it was given and the sequence it committed at. */
   private emit(event: OutgoingEvent, opts: EventOpts): void {
     this.record(event.type, event.payload, opts);
-    this.afterCommit((changes) =>
-      this.deliver(event, { id: opts.id, sequence: eventSequence(changes, opts.id) }),
-    );
+    this.afterCommit({ kind: "deliver_event", eventId: opts.id, event });
   }
 
   /** Persist evidence that has no client-facing schema (inside tx). */
@@ -622,24 +646,28 @@ export class Engine {
     });
   }
 
-  /** Unpersisted status notification (tool call progress); the durable evidence is the underlying events. */
-  private notifyToolCall(task: TaskState, call: ToolCallState, detail?: string): void {
-    this.deliver(
-      {
-        type: "tool_call",
-        payload: {
-          conversation_id: this.activeConversation.id,
-          task_id: task.id,
-          tool_call_id: call.id,
-          runtime_call_id: call.runtimeCallId,
-          tool_identity: call.toolIdentity,
-          status: call.status,
-          ...(detail ? { detail } : {}),
-          redacted_arguments: call.redactedArguments,
-        },
+  /**
+   * The progress notification for `call` once the transaction in progress commits (inside tx): `status` is the one
+   * the commit leaves it in, which its queued state change applies.
+   */
+  private toolCallNotice(
+    task: TaskState,
+    call: ToolCallState,
+    change: Pick<CallChange, "status" | "notice">,
+  ): EngineEffect {
+    return {
+      kind: "notify_tool_call",
+      payload: {
+        conversation_id: this.activeConversation.id,
+        task_id: task.id,
+        tool_call_id: call.id,
+        runtime_call_id: call.runtimeCallId,
+        tool_identity: call.toolIdentity,
+        status: change.status,
+        ...(change.notice ? { detail: change.notice } : {}),
+        redacted_arguments: call.redactedArguments,
       },
-      { id: this.newId("evt"), sequence: null },
-    );
+    };
   }
 
   /**
@@ -1082,7 +1110,7 @@ export class Engine {
         else this.recordCallChange(change);
         this.recordTaskStatus(task, decided.taskStatus);
         this.onCommit(() => task.pendingApprovals.delete(approvalId));
-        this.afterCommit(() => this.notifyToolCall(task, call, change.notice));
+        this.afterCommit(this.toolCallNotice(task, call, change));
         this.commitCallChange(call, change);
       });
     } catch (error) {
@@ -1176,15 +1204,10 @@ export class Engine {
         });
         for (const { call, change } of interruption.calls) {
           this.recordCallChange(change);
-          this.afterCommit(() => this.notifyToolCall(task, call, change.notice));
+          this.afterCommit(this.toolCallNotice(task, call, change));
           this.commitCallChange(call, change);
         }
-        this.afterCommit(() => {
-          if (task.handle)
-            task.handle
-              .interrupt()
-              .catch((error) => this.deps.log(`interrupt failed: ${String(error)}`));
-        });
+        this.afterCommit({ kind: "interrupt_runtime", taskId: task.id });
       });
     } catch (error) {
       return fail("record_failure", `interruption not recorded: ${errorMessage(error)}`);
@@ -1424,8 +1447,12 @@ export class Engine {
     this.onCommit(() => {
       call.status = change.status;
     });
-    const settle = change.settle;
-    if (settle) this.afterCommit(() => this.answerPrompt(call, settle));
+    if (change.settle && call.approvalId !== null)
+      this.afterCommit({
+        kind: "answer_prompt",
+        approvalId: call.approvalId,
+        decision: change.settle,
+      });
   }
 
   // ---------------------------------------------------------------- runtime events
@@ -1673,7 +1700,7 @@ export class Engine {
               policy,
               proposalEventId: ids.event,
             });
-            this.afterCommit(() => this.notifyToolCall(task, state));
+            this.afterCommit(this.toolCallNotice(task, state, { status: state.status }));
           })
           .with({ type: "assistant_message" }, (message) => {
             this.record("assistant_message", message.message, opts);
@@ -1720,7 +1747,7 @@ export class Engine {
             this.onCommit(() => {
               call.status = status;
             });
-            this.afterCommit(() => this.notifyToolCall(task, call));
+            this.afterCommit(this.toolCallNotice(task, call, { status }));
           })
           .with({ type: "turn_result" }, ({ summary }) => {
             this.record("runtime_result", summary.evidence, opts);
@@ -1939,14 +1966,14 @@ export class Engine {
           },
           { ...opts, id: ids.evaluation },
         );
-        const answer = this.recordPermission({
+        const { answer, status } = this.recordPermission({
           task,
           call: bound,
           rule,
           evaluationId: ids.evaluation,
           ids,
         });
-        this.afterCommit(() => this.notifyToolCall(task, bound));
+        this.afterCommit(this.toolCallNotice(task, bound, { status }));
         return { call: bound, answer };
       });
     } catch (error) {
@@ -2020,19 +2047,22 @@ export class Engine {
     return refusal.settle;
   }
 
-  /** Record what the permission rule decided for a bound call, and what that answers the runtime (inside tx). */
+  /**
+   * Record what the permission rule decided for a bound call (inside tx): what that answers the runtime, and the
+   * status the call takes once it commits.
+   */
   private recordPermission(input: {
     task: TaskState;
     call: ToolCallState;
     rule: PermissionRule;
     evaluationId: string;
     ids: Pick<PermissionIds, "outcome" | "approval">;
-  }): PermissionAnswer {
+  }): PermissionRecorded {
     const { task, call, rule, evaluationId, ids } = input;
     const conversation = this.activeConversation;
     const opts = { ...this.taskOpts(task), id: ids.outcome };
     return match(rule)
-      .with({ kind: "deny" }, (denial): PermissionAnswer => {
+      .with({ kind: "deny" }, (denial): PermissionRecorded => {
         if (denial.unlisted)
           this.emit(
             {
@@ -2056,20 +2086,26 @@ export class Engine {
         this.commitCallChange(call, change);
         const { message } = denial;
         return {
-          kind: "answer",
-          decision: denial.interrupt
-            ? { behavior: "deny", message, interrupt: true }
-            : { behavior: "deny", message },
+          answer: {
+            kind: "answer",
+            decision: denial.interrupt
+              ? { behavior: "deny", message, interrupt: true }
+              : { behavior: "deny", message },
+          },
+          status: denial.status,
         };
       })
-      .with({ kind: "dispatch" }, (): PermissionAnswer => {
+      .with({ kind: "dispatch" }, (): PermissionRecorded => {
         this.recordDispatch(task, call, { id: ids.outcome, via: "policy", causedBy: evaluationId });
         this.onCommit(() => {
           call.status = "dispatched";
         });
-        return { kind: "answer", decision: { behavior: "allow" } };
+        return {
+          answer: { kind: "answer", decision: { behavior: "allow" } },
+          status: "dispatched",
+        };
       })
-      .with({ kind: "ask" }, (): PermissionAnswer => {
+      .with({ kind: "ask" }, (): PermissionRecorded => {
         const approvalId = ids.approval;
         this.emit(
           {
@@ -2116,7 +2152,7 @@ export class Engine {
           task.pendingApprovals.set(approvalId, call);
         });
         this.recordTaskStatus(task, "awaiting_approval");
-        return { kind: "hold", approvalId };
+        return { answer: { kind: "hold", approvalId }, status: "awaiting_approval" };
       })
       .exhaustive();
   }
