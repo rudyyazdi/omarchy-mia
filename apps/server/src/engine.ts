@@ -1396,7 +1396,7 @@ export class Engine {
               resultEventId: result.id,
             });
             if (status === "completed" && output)
-              this.retainToolOutput(
+              this.registerToolOutput(
                 { task, call, declared: output.declared, eventId: result.id },
                 output.retention,
               );
@@ -1810,9 +1810,11 @@ export class Engine {
     // a call to, or record an interruption of, a runtime that already exited. An approval then ends blocked.
     task.runtimeEnded = true;
     task.gateOpen = false;
-    // Read and store before the transaction: retaining evidence is best-effort, recording that the task finished
-    // is not. Read and store before anything else is computed: a command handled while they are awaited (a
-    // decision) changes the task, and the records must reflect it.
+    // Read and store before the transaction: retaining evidence is best-effort, so a read or store that fails
+    // becomes a failed capture that says why, and the transaction only records that outcome. Its rows then commit
+    // or fail with the turn's end, like every other record of it. Read and store before anything else is
+    // computed: a command handled while they are awaited (a decision) changes the task, and the records must
+    // reflect it.
     const signal = AbortSignal.any([this.stopping.signal, this.deps.evidenceReadDeadline()]);
     const [transcript, hookRead] = await Promise.all([
       this.deps.readEvidence(result.streamLogPath, { signal }),
@@ -1862,7 +1864,7 @@ export class Engine {
             reason: "task ended",
           });
         if (transcriptRetention)
-          this.retainEvidence(task, {
+          this.registerEvidence(task, {
             kind: "runtime_transcript",
             name: `turn-${conversation.turnCount}.stream.jsonl`,
             relation: "runtime_transcript",
@@ -1870,7 +1872,7 @@ export class Engine {
             retention: transcriptRetention,
           });
         if (hookRetention)
-          this.retainEvidence(task, {
+          this.registerEvidence(task, {
             kind: "effort_evidence",
             name: `turn-${conversation.turnCount}.hooks.jsonl`,
             relation: "task_output",
@@ -1951,34 +1953,11 @@ export class Engine {
     if (note) conversation.pendingNote = note;
   }
 
-  /** Retain one piece of a finished turn's evidence, linked to its task (inside tx), best-effort. */
-  private retainEvidence(task: TaskState, evidence: TurnEvidence): void {
-    this.retainBestEffort(evidence.name, evidence.retention, (attempt) =>
-      this.registerEvidence(task, evidence, attempt),
-    );
-  }
-
   /**
-   * Register a retention (inside tx) so that retaining it is best-effort and the records committed with it are
-   * not. Its bytes are already stored (`store`). The attempt runs in a savepoint: rows that cannot be written
-   * leave a failed capture that says why, and if even that cannot be recorded the loss is logged. A savepoint
-   * undoes rows only, so register must queue no state change or effect.
+   * Registers one piece of a finished turn's evidence, linked to its task (inside tx). Retention was decided before
+   * the transaction opened (`store`), so these rows only record that outcome and commit or fail with the turn's end.
    */
-  private retainBestEffort(
-    name: string,
-    retention: Retention,
-    register: (retention: Retention) => void,
-  ): void {
-    const { catalog } = this.deps;
-    const first = catalog.savepoint(() => register(retention));
-    if (first.ok) return;
-    const reason = `not retained: ${errorMessage(first.error)}`;
-    const fallback = catalog.savepoint(() => register({ status: "failed", reason }));
-    if (!fallback.ok)
-      this.deps.log(`${name} lost, ${reason}; not recorded: ${errorMessage(fallback.error)}`);
-  }
-
-  private registerEvidence(task: TaskState, evidence: TurnEvidence, retention: Retention): void {
+  private registerEvidence(task: TaskState, evidence: TurnEvidence): void {
     const { writer, newId } = this.deps;
     const artifactId = newId("art");
     writer.registerArtifact({
@@ -1989,7 +1968,7 @@ export class Engine {
       mimeType: "application/x-ndjson",
       producerExecutionId: task.executionId,
       originalPath: evidence.originalPath,
-      ...captureFields(retention),
+      ...captureFields(evidence.retention),
     });
     writer.linkArtifact({
       id: newId("link"),
@@ -2001,18 +1980,9 @@ export class Engine {
   }
 
   /**
-   * Records a declared tool output whatever its capture status, best-effort, so a failed write cannot undo
-   * the tool result and call update recorded with it.
-   */
-  private retainToolOutput(output: DeclaredOutput, retention: Retention): void {
-    this.retainBestEffort(`tool output ${output.declared.path}`, retention, (attempt) =>
-      this.registerToolOutput(output, attempt),
-    );
-  }
-
-  /**
-   * Only a retained tool output becomes a task output and gets an artifact_registered event. It runs in a
-   * savepoint (retainBestEffort), so it writes rows only: `record`, never `emit` or a commit queue.
+   * Records a declared tool output whatever its capture status (inside tx), with the tool result that declared it.
+   * Retention was decided before the transaction opened (`store`), so these rows only record that outcome. Only a
+   * retained tool output becomes a task output and gets an artifact_registered event.
    */
   private registerToolOutput(output: DeclaredOutput, retention: Retention): void {
     const { task, call, declared, eventId } = output;
