@@ -14,9 +14,9 @@ export const MAX_BODY_LOG_BYTES = 16 * 1024 * 1024;
 /**
  * One MCP message of a call as debug mode records it: its body, redacted, or why no body was recorded. A call
  * records every line its tool-use id has, in log order (a runtime that re-sent the call has two requests), and a
- * direction with no line records one `unrecorded`. Bodies are read at a call's tool result, so a released call
- * whose result never arrives (its turn interrupted or its runtime gone mid-call) records none; the call itself
- * ends `unknown`.
+ * direction with no line records one `unrecorded`. Bodies are read at a call's tool result, or, for a released
+ * call whose result never arrives (its turn interrupted or its runtime gone mid-call), at its turn's end, where
+ * the call itself ends `unknown`.
  */
 export type McpBody = { direction: BodyDirection } & McpContent;
 
@@ -26,7 +26,7 @@ const DIRECTIONS: readonly BodyDirection[] = ["request", "response"];
 export const unrecordedBodies = (reason: string): McpBody[] =>
   DIRECTIONS.map((direction) => ({ direction, status: "unrecorded", reason }));
 
-/** What a tool result with tool-use id `toolUseId` records from its server's body log, read as `read`. */
+/** What a call with tool-use id `toolUseId` records from its server's body log, read as `read`. */
 export const mcpBodiesFrom = (read: RuntimeFileRead, toolUseId: string): McpBody[] =>
   match(read)
     .with({ status: "absent" }, () => unrecordedBodies("the body log does not exist"))

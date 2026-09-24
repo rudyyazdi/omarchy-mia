@@ -456,6 +456,27 @@ export const bindToolResult = <Call extends { status: ToolCallStatus }>(
   return call ? { kind: "bind", call } : { kind: "unmatched" };
 };
 
+/** The statuses only a tool result gives a call (`statusAfterResult`). */
+const TOOK_RESULT: ReadonlySet<ToolCallStatus> = new Set(["completed", "failed"]);
+
+/**
+ * The released calls whose tool result never arrived, at most one per runtime call id: for an id none of whose
+ * revisions took a result, the latest released revision, the one its result would have bound to
+ * (`bindToolResult`). In debug mode turn end reads these calls' MCP bodies, as their results would have. An id one
+ * revision of which took a result gets none, even with another revision released: that result already read the
+ * id's lines, and reading them again would record them twice.
+ */
+export const releasedWithoutResult = <Call extends { status: ToolCallStatus }>(
+  revisionsById: Iterable<readonly Call[]>,
+): Call[] =>
+  Iterator.from(revisionsById)
+    .flatMap((revisions) => {
+      if (revisions.some((revision) => TOOK_RESULT.has(revision.status))) return [];
+      const call = revisions.findLast((revision) => isReleased(revision.status));
+      return call ? [call] : [];
+    })
+    .toArray();
+
 /**
  * A result settles a released call; it never revives one already refused, invalidated, or settled, and never
  * completes one still held, which Mia never released.

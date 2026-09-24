@@ -12,6 +12,7 @@ import {
   decideInterruption,
   evaluatePermission,
   noteAfterTurn,
+  releasedWithoutResult,
   statusAfterResult,
   supersedeBinding,
   taskStatusAfterResolving,
@@ -480,6 +481,39 @@ describe("completion", () => {
       kind: "unmatched",
     });
     expect(bindToolResult([])).toEqual({ kind: "unmatched" });
+  });
+
+  it("finds, per runtime call id without a result, the latest released revision", () => {
+    const dispatched = call("dispatched", "a1");
+    const permitted = call("permitted", "b2");
+    expect(
+      releasedWithoutResult([
+        [dispatched, call("proposed", "a2")],
+        [call("permitted", "b1"), permitted, call("denied", "b3")],
+      ]),
+    ).toEqual([dispatched, permitted]);
+  });
+
+  it.each<ToolCallStatus>(["completed", "failed"])(
+    "finds nothing under a runtime call id one %s revision of which took a result",
+    (status) => {
+      expect(releasedWithoutResult([[call(status, "rev1"), call("permitted", "rev2")]])).toEqual(
+        [],
+      );
+      expect(releasedWithoutResult([[call("dispatched", "rev1"), call(status, "rev2")]])).toEqual(
+        [],
+      );
+    },
+  );
+
+  it("finds nothing under a runtime call id with no released revision", () => {
+    expect(
+      releasedWithoutResult([
+        [call("proposed", "a1"), call("awaiting_approval", "a2")],
+        [call("denied", "b1"), call("invalidated", "b2"), call("unknown", "b3")],
+        [],
+      ]),
+    ).toEqual([]);
   });
 
   it("classifies a released call without a result as unknown and a held one as never run", () => {

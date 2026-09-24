@@ -52,16 +52,10 @@ const READ_RESPONSE = {
 };
 
 /**
- * One conversation on a fresh server with debug mode on or off: a user command whose turn streams text and a
- * message, runs an allowed call, and has a forbidden call and an unlisted call rejected by policy. The d1 server
- * names a body log, as the controlled fixture's profile does, and the allowed call's lines are written to it before
- * its result arrives. With `bodyLog` "missing" none are written; with "expired" they are, but the result's read of
- * them outlives its deadline; with "unconfigured" the server names no body log.
+ * A fresh server with debug mode on or off whose d1 server names a body log in a fresh directory, as the controlled
+ * fixture's profile does (none with `bodyLog` "unconfigured"), and a user command whose turn has started.
  */
-const recordConversation = async (
-  debugMode: boolean,
-  bodyLog: "written" | "missing" | "expired" | "unconfigured" = "written",
-): Promise<Recorded> => {
+const startTurn = async (debugMode: boolean, bodyLog: "configured" | "unconfigured") => {
   const logDirectory = mkdtempSync(join(tmpdir(), "mia-body-log-"));
   directories.push(logDirectory);
   const bodyLogFile = join(logDirectory, "mcp-bodies.jsonl");
@@ -82,6 +76,42 @@ const recordConversation = async (
   const started = ackResult(await client.submitText("summarise my inbox"));
   const turn = await next;
   turn.init();
+  return { server, client, started, turn, bodyLogFile };
+};
+
+/** Writes body log lines as the fixture does: one JSON object per line. */
+const writeBodyLog = (path: string, lines: readonly unknown[]): void =>
+  writeFileSync(path, lines.map((line) => JSON.stringify(line) + "\n").join(""));
+
+/** The tables of the conversation `client` started, once its task has finished. */
+const finishedTables = async (
+  server: TestServer,
+  client: Awaited<ReturnType<TestServer["connect"]>>,
+): Promise<SnapshotTables> => {
+  await client.waitFor("task_finished");
+  const catalog = server.catalog();
+  try {
+    return snapshotConversation(catalog, must(client.conversationId, "conversation id")).tables;
+  } finally {
+    catalog.close();
+  }
+};
+
+/**
+ * One conversation on a fresh server with debug mode on or off: a user command whose turn streams text and a
+ * message, runs an allowed call, and has a forbidden call and an unlisted call rejected by policy. The d1 server
+ * names a body log, as the controlled fixture's profile does, and the allowed call's lines are written to it before
+ * its result arrives. With `bodyLog` "missing" none are written; with "expired" they are, but the result's read of
+ * them outlives its deadline; with "unconfigured" the server names no body log.
+ */
+const recordConversation = async (
+  debugMode: boolean,
+  bodyLog: "written" | "missing" | "expired" | "unconfigured" = "written",
+): Promise<Recorded> => {
+  const { server, client, started, turn, bodyLogFile } = await startTurn(
+    debugMode,
+    bodyLog === "unconfigured" ? "unconfigured" : "configured",
+  );
   turn.text("Looking at your inbox.");
   await turn.emit({
     type: "assistant_message",
@@ -91,16 +121,11 @@ const recordConversation = async (
   turn.propose("toolu_read", "mcp__d1__read", {});
   expect((await turn.request("mcp__d1__read", {}, "toolu_read")).behavior).toBe("allow");
   if (bodyLog !== "missing")
-    writeFileSync(
-      bodyLogFile,
-      [
-        { tool_use_id: "toolu_read", direction: "request", body: READ_REQUEST },
-        { tool_use_id: "toolu_other", direction: "request", body: {} },
-        { tool_use_id: "toolu_read", direction: "response", body: READ_RESPONSE },
-      ]
-        .map((line) => JSON.stringify(line) + "\n")
-        .join(""),
-    );
+    writeBodyLog(bodyLogFile, [
+      { tool_use_id: "toolu_read", direction: "request", body: READ_REQUEST },
+      { tool_use_id: "toolu_other", direction: "request", body: {} },
+      { tool_use_id: "toolu_read", direction: "response", body: READ_RESPONSE },
+    ]);
   const held = bodyLog === "expired" ? server.holdEvidenceRead(bodyLogFile) : null;
   const result = turn.toolResult("toolu_read", JSON.stringify({ unread: 3 }));
   if (held) {
@@ -112,19 +137,12 @@ const recordConversation = async (
   const mystery = await turn.request("mcp__d1__mystery", { query: "is:unread" }, "toolu_mystery");
   expect(mystery.behavior).toBe("deny");
   turn.end();
-  await client.waitFor("task_finished");
-  const conversationId = must(client.conversationId, "conversation id");
-  const catalog = server.catalog();
-  try {
-    return {
-      tables: snapshotConversation(catalog, conversationId).tables,
-      conversationId,
-      taskId: mustString(started.task_id, "task id"),
-      executionId: mustString(started.execution_id, "execution id"),
-    };
-  } finally {
-    catalog.close();
-  }
+  return {
+    tables: await finishedTables(server, client),
+    conversationId: must(client.conversationId, "conversation id"),
+    taskId: mustString(started.task_id, "task id"),
+    executionId: mustString(started.execution_id, "execution id"),
+  };
 };
 
 const eventsOf = (tables: SnapshotTables, type: JournalEventType) =>
@@ -313,6 +331,84 @@ describe("debug mode on: MCP bodies", () => {
   it("records no bodies for a call to a server that names no body log", async () => {
     const { tables } = await recordConversation(true, "unconfigured");
     expect(callOf(tables, "toolu_read").status).toBe("completed");
+    expect(mcpBodiesOf(tables)).toEqual([]);
+  });
+});
+
+/** The body log lines the fixture would write for a request with tool-use id `toolUseId`, and its response. */
+const bodyLinesFor = (toolUseId: string, id: number) => [
+  {
+    tool_use_id: toolUseId,
+    direction: "request",
+    body: {
+      ...READ_REQUEST,
+      id,
+      params: { ...READ_REQUEST.params, _meta: { [TOOL_USE_ID_META]: toolUseId } },
+    },
+  },
+  { tool_use_id: toolUseId, direction: "response", body: { ...READ_RESPONSE, id } },
+];
+
+/**
+ * One conversation on a fresh server whose turn is interrupted while two allowed calls to the body-logged d1 server
+ * are running, so neither gets a tool result. The log holds both calls' lines, written before the interruption.
+ */
+const recordInterruptedCalls = async (debugMode: boolean): Promise<SnapshotTables> => {
+  const { server, client, started, turn, bodyLogFile } = await startTurn(debugMode, "configured");
+  for (const runtimeCallId of ["toolu_first", "toolu_second"])
+    expect((await turn.request("mcp__d1__read", {}, runtimeCallId)).behavior).toBe("allow");
+  writeBodyLog(bodyLogFile, [
+    ...bodyLinesFor("toolu_first", 3),
+    ...bodyLinesFor("toolu_second", 4),
+  ]);
+  expect((await client.interrupt(mustString(started.task_id, "task id"))).disposition).toBe(
+    "accepted",
+  );
+  return finishedTables(server, client);
+};
+
+describe("debug mode on: MCP bodies of calls without a tool result", () => {
+  it("records, at turn end, the bodies of each released call whose result never arrived", async () => {
+    const tables = await recordInterruptedCalls(true);
+    const first = callOf(tables, "toolu_first");
+    const second = callOf(tables, "toolu_second");
+    expect([first.status, second.status]).toEqual(["unknown", "unknown"]);
+    const bodies = mcpBodiesOf(tables);
+    expect(bodies.map((event) => [event.type, payloadOf(event)])).toEqual(
+      [first, second].flatMap((call, index) => {
+        const runtimeCallId = String(call.runtime_call_id);
+        const [request, response] = bodyLinesFor(runtimeCallId, 3 + index);
+        return [
+          [
+            "mcp_request",
+            { tool_call_id: call.id, runtime_call_id: runtimeCallId, body: request?.body },
+          ],
+          [
+            "mcp_response",
+            {
+              tool_call_id: call.id,
+              runtime_call_id: runtimeCallId,
+              body: { ...response?.body, result: { ...READ_RESPONSE.result, api_key: REDACTED } },
+            },
+          ],
+        ];
+      }),
+    );
+    // Recorded with the turn's end, in its task and execution, before the task finished; no result caused them.
+    const outcome = must(eventsOf(tables, "interruption_outcome")[0], "interruption_outcome");
+    for (const event of bodies) {
+      expect(event).toMatchObject({
+        caused_by_event_id: null,
+        task_id: outcome.task_id,
+        execution_id: outcome.execution_id,
+      });
+      expect(event.sequence).toBeLessThan(outcome.sequence);
+    }
+  });
+
+  it("records no bodies for them with debug mode off", async () => {
+    const tables = await recordInterruptedCalls(false);
+    expect(callOf(tables, "toolu_first").status).toBe("unknown");
     expect(mcpBodiesOf(tables)).toEqual([]);
   });
 });
