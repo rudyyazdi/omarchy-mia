@@ -14,7 +14,7 @@ describe("mcpBodiesFrom", () => {
       { tool_use_id: "toolu_b", direction: "request", body: 2 },
       { tool_use_id: "toolu_a", direction: "response", body: { result: "sk-ant-abcdefghijk" } },
     );
-    expect(mcpBodiesFrom(read, "toolu_a")).toEqual([
+    expect(mcpBodiesFrom(read, "toolu_a", "tool_result")).toEqual([
       { direction: "request", status: "recorded", body: { params: { api_key: REDACTED } } },
       { direction: "response", status: "recorded", body: { result: REDACTED } },
     ]);
@@ -25,13 +25,25 @@ describe("mcpBodiesFrom", () => {
       { tool_use_id: "toolu_a", direction: "request", body: 1 },
       { tool_use_id: "toolu_a", direction: "request", body: 2 },
     );
-    expect(mcpBodiesFrom(read, "toolu_a")).toEqual([
+    expect(mcpBodiesFrom(read, "toolu_a", "tool_result")).toEqual([
       { direction: "request", status: "recorded", body: 1 },
       { direction: "request", status: "recorded", body: 2 },
       {
         direction: "response",
         status: "unrecorded",
         reason: "the body log has no response for this call",
+      },
+    ]);
+  });
+
+  it("says at turn end only that a missing line was not written yet, as the server may still be handling it", () => {
+    const read = logOf({ tool_use_id: "toolu_a", direction: "request", body: 1 });
+    expect(mcpBodiesFrom(read, "toolu_a", "turn_end")).toEqual([
+      { direction: "request", status: "recorded", body: 1 },
+      {
+        direction: "response",
+        status: "unrecorded",
+        reason: "the body log had no response for this call when its turn ended",
       },
     ]);
   });
@@ -44,7 +56,7 @@ describe("mcpBodiesFrom", () => {
     },
     { read: logOf(), reason: undefined },
   ])("records why both bodies are missing when the log is $read.status", ({ read, reason }) => {
-    const bodies = mcpBodiesFrom(read, "toolu_a");
+    const bodies = mcpBodiesFrom(read, "toolu_a", "tool_result");
     expect(bodies.map((body) => body.direction)).toEqual(["request", "response"]);
     for (const body of bodies)
       expect(body).toEqual({

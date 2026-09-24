@@ -55,7 +55,13 @@ import {
   type Retention,
 } from "./artifact-capture.ts";
 import type { ArtifactCollector } from "./artifact-collector.ts";
-import { MAX_BODY_LOG_BYTES, mcpBodiesFrom, unrecordedBodies, type McpBody } from "./mcp-bodies.ts";
+import {
+  MAX_BODY_LOG_BYTES,
+  mcpBodiesFrom,
+  unrecordedBodies,
+  type BodyReadPoint,
+  type McpBody,
+} from "./mcp-bodies.ts";
 import {
   linkConversationProvenance,
   nameProvenance,
@@ -1369,8 +1375,9 @@ export class Engine {
   /**
    * Handles one runtime event; it never rejects. A tool result that declares an output file is captured and
    * stored first, and in debug mode a released call's result first reads its server's body log (see
-   * `readMcpBodies`; turn end reads it for a released call whose result never arrives); both happen outside the transaction, because the reads and the write can take long. Every
-   * other event is recorded before this returns.
+   * `readMcpBodies`); both happen outside the transaction, because the reads and the write can take long. Every
+   * other event is recorded before this returns. A released call whose result never arrives has its body log read
+   * at turn end instead (`readUnresultedBodies`).
    * A failed result never completes its call, so the file it declares is not read.
    * The adapter hands over the next stdout event only once this settles, so events still commit in the order the
    * runtime wrote them. The turn ends before the reads and the store only when the adapter stops reading a runtime
@@ -1428,14 +1435,15 @@ export class Engine {
 
   /** Reads what a call's body log holds for it, before the transaction that records it (see `readBodyLog`). */
   private async readMcpBodies(path: string, runtimeCallId: string): Promise<McpBodyRecord[]> {
-    return this.bodiesFrom(await this.readBodyLog(path), runtimeCallId);
+    return this.bodiesFrom(await this.readBodyLog(path), runtimeCallId, "tool_result");
   }
 
   /**
    * In debug mode, what turn end records for each released call whose tool result never arrived (its turn
    * interrupted, or its runtime gone mid-call; see `releasedWithoutResult`) and whose server writes a body log: the
    * bodies that log holds for it, read before the transaction as its result would have read them. Each log is
-   * read once, however many such calls it serves.
+   * read once, however many such calls it serves. The read is a snapshot: the server may still be handling a call
+   * the runtime gave up on, so a line missing from it is recorded as not written yet (`BodyReadPoint`).
    */
   private async readUnresultedBodies(task: TaskState): Promise<UnresultedBodies[]> {
     if (!this.deps.debugMode) return [];
@@ -1450,7 +1458,7 @@ export class Engine {
           const read = await this.readBodyLog(path);
           return group.map(({ call }) => ({
             call,
-            bodies: this.bodiesFrom(read, call.runtimeCallId),
+            bodies: this.bodiesFrom(read, call.runtimeCallId, "turn_end"),
           }));
         }),
     );
@@ -1468,11 +1476,15 @@ export class Engine {
   }
 
   /** The bodies a body log `read` holds for one call, each with the id of the event that will record it. */
-  private bodiesFrom(read: RuntimeFileRead, runtimeCallId: string): McpBodyRecord[] {
+  private bodiesFrom(
+    read: RuntimeFileRead,
+    runtimeCallId: string,
+    readAt: BodyReadPoint,
+  ): McpBodyRecord[] {
     // Parsing and redacting can throw (a body nested past the stack), and this must not reject the result's event.
     const bodies = ((): McpBody[] => {
       try {
-        return mcpBodiesFrom(read, runtimeCallId);
+        return mcpBodiesFrom(read, runtimeCallId, readAt);
       } catch (error) {
         return unrecordedBodies(`the body log could not be parsed: ${errorMessage(error)}`);
       }

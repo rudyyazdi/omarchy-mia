@@ -336,8 +336,8 @@ describe("debug mode on: MCP bodies", () => {
 });
 
 /** The body log lines the fixture would write for a request with tool-use id `toolUseId`, and its response. */
-const bodyLinesFor = (toolUseId: string, id: number) => [
-  {
+const bodyLinesFor = (toolUseId: string, id: number) => ({
+  request: {
     tool_use_id: toolUseId,
     direction: "request",
     body: {
@@ -346,20 +346,35 @@ const bodyLinesFor = (toolUseId: string, id: number) => [
       params: { ...READ_REQUEST.params, _meta: { [TOOL_USE_ID_META]: toolUseId } },
     },
   },
-  { tool_use_id: toolUseId, direction: "response", body: { ...READ_RESPONSE, id } },
-];
+  response: { tool_use_id: toolUseId, direction: "response", body: { ...READ_RESPONSE, id } },
+});
+
+const REDACTED_RESULT = { ...READ_RESPONSE.result, api_key: REDACTED };
 
 /**
- * One conversation on a fresh server whose turn is interrupted while two allowed calls to the body-logged d1 server
- * are running, so neither gets a tool result. The log holds both calls' lines, written before the interruption.
+ * One conversation on a fresh server whose turn runs three allowed calls to the body-logged d1 server: toolu_done
+ * gets its result, and the turn is then interrupted while toolu_open and toolu_early are running, so neither gets
+ * one. The log holds both of toolu_done's and toolu_open's lines, and only toolu_early's request, as when the
+ * server is still handling it.
  */
 const recordInterruptedCalls = async (debugMode: boolean): Promise<SnapshotTables> => {
   const { server, client, started, turn, bodyLogFile } = await startTurn(debugMode, "configured");
-  for (const runtimeCallId of ["toolu_first", "toolu_second"])
+  const [done, open, early] = [
+    bodyLinesFor("toolu_done", 3),
+    bodyLinesFor("toolu_open", 4),
+    bodyLinesFor("toolu_early", 5),
+  ];
+  expect((await turn.request("mcp__d1__read", {}, "toolu_done")).behavior).toBe("allow");
+  writeBodyLog(bodyLogFile, [done.request, done.response]);
+  await turn.toolResult("toolu_done", JSON.stringify({ unread: 3 }));
+  for (const runtimeCallId of ["toolu_open", "toolu_early"])
     expect((await turn.request("mcp__d1__read", {}, runtimeCallId)).behavior).toBe("allow");
   writeBodyLog(bodyLogFile, [
-    ...bodyLinesFor("toolu_first", 3),
-    ...bodyLinesFor("toolu_second", 4),
+    done.request,
+    done.response,
+    open.request,
+    early.request,
+    open.response,
   ]);
   expect((await client.interrupt(mustString(started.task_id, "task id"))).disposition).toBe(
     "accepted",
@@ -367,48 +382,79 @@ const recordInterruptedCalls = async (debugMode: boolean): Promise<SnapshotTable
   return finishedTables(server, client);
 };
 
+/** The MCP body events recorded for the call with id `callId`, in order. */
+const bodyEventsOfCall = (tables: SnapshotTables, callId: unknown) =>
+  mcpBodiesOf(tables).filter((event) => {
+    const payload = payloadOf(event);
+    return isRecord(payload) && payload.tool_call_id === callId;
+  });
+
+/** The MCP body events recorded for the call with id `callId`, as [type, payload] pairs. */
+const bodiesOfCall = (tables: SnapshotTables, callId: unknown) =>
+  bodyEventsOfCall(tables, callId).map((event) => [event.type, payloadOf(event)]);
+
 describe("debug mode on: MCP bodies of calls without a tool result", () => {
   it("records, at turn end, the bodies of each released call whose result never arrived", async () => {
     const tables = await recordInterruptedCalls(true);
-    const first = callOf(tables, "toolu_first");
-    const second = callOf(tables, "toolu_second");
-    expect([first.status, second.status]).toEqual(["unknown", "unknown"]);
-    const bodies = mcpBodiesOf(tables);
-    expect(bodies.map((event) => [event.type, payloadOf(event)])).toEqual(
-      [first, second].flatMap((call, index) => {
-        const runtimeCallId = String(call.runtime_call_id);
-        const [request, response] = bodyLinesFor(runtimeCallId, 3 + index);
-        return [
-          [
-            "mcp_request",
-            { tool_call_id: call.id, runtime_call_id: runtimeCallId, body: request?.body },
-          ],
-          [
-            "mcp_response",
-            {
-              tool_call_id: call.id,
-              runtime_call_id: runtimeCallId,
-              body: { ...response?.body, result: { ...READ_RESPONSE.result, api_key: REDACTED } },
-            },
-          ],
-        ];
-      }),
-    );
+    const open = callOf(tables, "toolu_open");
+    const early = callOf(tables, "toolu_early");
+    expect([open.status, early.status]).toEqual(["unknown", "unknown"]);
+    const lines = { open: bodyLinesFor("toolu_open", 4), early: bodyLinesFor("toolu_early", 5) };
+    expect(bodiesOfCall(tables, open.id)).toEqual([
+      [
+        "mcp_request",
+        { tool_call_id: open.id, runtime_call_id: "toolu_open", body: lines.open.request.body },
+      ],
+      [
+        "mcp_response",
+        {
+          tool_call_id: open.id,
+          runtime_call_id: "toolu_open",
+          body: { ...lines.open.response.body, result: REDACTED_RESULT },
+        },
+      ],
+    ]);
+    // Only its request was logged: the server may still be handling it, so the response is only not written yet.
+    expect(bodiesOfCall(tables, early.id)).toEqual([
+      [
+        "mcp_request",
+        { tool_call_id: early.id, runtime_call_id: "toolu_early", body: lines.early.request.body },
+      ],
+      [
+        "mcp_response",
+        {
+          tool_call_id: early.id,
+          runtime_call_id: "toolu_early",
+          unrecorded: "the body log had no response for this call when its turn ended",
+        },
+      ],
+    ]);
     // Recorded with the turn's end, in its task and execution, before the task finished; no result caused them.
     const outcome = must(eventsOf(tables, "interruption_outcome")[0], "interruption_outcome");
-    for (const event of bodies) {
-      expect(event).toMatchObject({
-        caused_by_event_id: null,
-        task_id: outcome.task_id,
-        execution_id: outcome.execution_id,
-      });
+    const atTurnEnd = mcpBodiesOf(tables).filter((event) => event.caused_by_event_id === null);
+    expect(atTurnEnd).toHaveLength(4);
+    for (const event of atTurnEnd) {
+      expect(event).toMatchObject({ task_id: outcome.task_id, execution_id: outcome.execution_id });
       expect(event.sequence).toBeLessThan(outcome.sequence);
     }
   });
 
+  it("records a call that got its result once, with that result, not again at turn end", async () => {
+    const tables = await recordInterruptedCalls(true);
+    const done = callOf(tables, "toolu_done");
+    expect(done.status).toBe("completed");
+    const result = must(eventsOf(tables, "tool_result")[0], "tool_result");
+    expect(
+      bodyEventsOfCall(tables, done.id).map((event) => [event.type, event.caused_by_event_id]),
+    ).toEqual([
+      ["mcp_request", result.id],
+      ["mcp_response", result.id],
+    ]);
+  });
+
   it("records no bodies for them with debug mode off", async () => {
     const tables = await recordInterruptedCalls(false);
-    expect(callOf(tables, "toolu_first").status).toBe("unknown");
+    expect(callOf(tables, "toolu_open").status).toBe("unknown");
     expect(mcpBodiesOf(tables)).toEqual([]);
   });
 });

@@ -456,8 +456,11 @@ export const bindToolResult = <Call extends { status: ToolCallStatus }>(
   return call ? { kind: "bind", call } : { kind: "unmatched" };
 };
 
+/** The status a tool result gives a released call. */
+const resultStatus = (isError: boolean): ToolCallStatus => (isError ? "failed" : "completed");
+
 /** The statuses only a tool result gives a call (`statusAfterResult`). */
-const TOOK_RESULT: ReadonlySet<ToolCallStatus> = new Set(["completed", "failed"]);
+const TOOK_RESULT: ReadonlySet<ToolCallStatus> = new Set([resultStatus(false), resultStatus(true)]);
 
 /**
  * The released calls whose tool result never arrived, at most one per runtime call id: for an id none of whose
@@ -483,7 +486,7 @@ export const releasedWithoutResult = <Call extends { status: ToolCallStatus }>(
  */
 export const statusAfterResult = (status: ToolCallStatus, isError: boolean): ToolCallStatus => {
   if (TERMINAL.has(status) || isHeld(status)) return status;
-  return isError ? "failed" : "completed";
+  return resultStatus(isError);
 };
 
 /** Final status of every call: released-without-result is unknown; anything still held can never run. */
