@@ -1077,6 +1077,39 @@ describe("approval path", () => {
     await client.waitFor("task_finished");
   });
 
+  it("answers a refused request with its own denial even when the refusal cannot be recorded", async () => {
+    const { turn } = await submit("no id");
+    turn.init();
+    failNextCommit();
+    expect(await turn.request("mcp__d1__change", { delta: 1 }, undefined)).toEqual({
+      behavior: "deny",
+      message: "Mia cannot bind this call to a runtime call id; rejected.",
+    });
+    expect(rows("SELECT id FROM tool_calls")).toHaveLength(0);
+    turn.end();
+    await client.waitFor("task_finished");
+  });
+
+  it("holds a prompt whose approval request committed even when delivering it to the client fails", async () => {
+    const { turn, taskId } = await submit("change");
+    turn.init();
+    failDelivery("approval_requested");
+    const awaiting = client.waitFor(
+      "tool_call",
+      (event) => event.payload.status === "awaiting_approval",
+    );
+    const held = turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
+    await awaiting;
+    const approvalId = must(rows<{ id: string }>("SELECT id FROM approvals")[0], "approval").id;
+    expect(await decide(taskId, approvalId, "approve")).toMatchObject({
+      disposition: "accepted",
+      result: { released: true },
+    });
+    expect((await held).behavior).toBe("allow");
+    turn.end();
+    await client.waitFor("task_finished");
+  });
+
   it("keeps the earlier approval pending when a changed binding cannot be recorded", async () => {
     const { turn, taskId, held, requested } = await submitHeldCall("change");
     failNextCommit();

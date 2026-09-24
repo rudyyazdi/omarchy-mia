@@ -1,28 +1,54 @@
 import { match } from "ts-pattern";
+import type { PermissionDecision, RuntimeEvent } from "@mia/agent-adapter";
 import type { Decide, Decision as MachineDecision } from "@mia/kernel";
-import type { Decision, TaskStatus } from "@mia/protocol";
+import {
+  canonicalDigest,
+  redactValue,
+  type Decision,
+  type TaskStatus,
+  type ToolCallPolicy,
+} from "@mia/protocol";
+import { mcpPayload } from "@mia/records";
+import { captureFields, type DeclaredArtifact, type Retention } from "./artifact-capture.ts";
 import {
   callById,
   callsOf,
   otherPending,
   pendingCall,
   withCall,
+  withPending,
+  withRevision,
   withTask,
   withoutPending,
+  type CallState,
   type ConversationState,
+  type TaskState,
 } from "./conversation-state.ts";
-import type { EngineEffect } from "./engine-effects.ts";
+import type { EngineEffect, PermissionAnswer } from "./engine-effects.ts";
 import type { EngineRecord } from "./engine-records.ts";
+import { MCP_BODY_EVENT, type McpBodyRecord } from "./mcp-bodies.ts";
 import { TransitionDraft, taskLinks, type Origin } from "./transition-draft.ts";
-import { decideAbandonment, decideApproval, decideInterruption } from "./transitions.ts";
+import {
+  bindPermissionRequest,
+  bindStreamProposal,
+  bindToolResult,
+  decideAbandonment,
+  decideApproval,
+  decideInterruption,
+  evaluatePermission,
+  statusAfterResult,
+  supersedeBinding,
+  type CallChange,
+  type PermissionRule,
+} from "./transitions.ts";
 
 /**
  * The conversation machine: what a command or runtime callback does to the conversation, as a pure `decide` over its
  * state (see `ConversationState`). Each transition composes the rules of ./transitions.ts into the records to commit,
  * the effects to perform once they have, and the next state, and every id it may record comes in with its event,
  * drawn at the boundary. It reads nothing else and changes nothing, so the engine commits what it returns and a
- * test checks it directly. So far it covers how approvals end: a user's decision, an interruption, and the runtime
- * abandoning a held prompt.
+ * test checks it directly. So far it covers how approvals end (a user's decision, an interruption, and the runtime
+ * abandoning a held prompt), the runtime's permission requests, and the events the runtime reports.
  */
 
 /** A user's decision on a pending approval, from `deciderClientId`. */
@@ -59,7 +85,114 @@ export interface PromptAbandonedEvent {
   ids: { resolved: string };
 }
 
-export type ConversationEvent = ApprovalDecisionEvent | InterruptTaskEvent | PromptAbandonedEvent;
+/**
+ * The ids a permission request may record, drawn before it is decided: the approval_resolved event of the approval
+ * the superseded binding held, the proposal and revision of a new binding, the policy evaluation, the event recording
+ * what the rule decided (the configuration error of an unlisted tool, the dispatch, or the approval request), and the
+ * approval a request that asks creates.
+ */
+export interface PermissionIds {
+  resolved: string;
+  proposal: string;
+  call: string;
+  evaluation: string;
+  outcome: string;
+  approval: string;
+}
+
+/** The runtime asks whether it may run a tool call; see `permissionRequestTransition`. */
+export interface PermissionRequestEvent {
+  kind: "permission_request";
+  origin: Origin;
+  taskId: string;
+  /** The runtime call id the runtime gave (null when it gave none), the tool it asks for, and its arguments. */
+  request: { runtimeCallId: string | null; toolIdentity: string; input: unknown };
+  /**
+   * What the profile says for the tool, read at the boundary. Policy is exactly what the profile says: after an
+   * interruption the next turn's Mia note tells the model which effects are unknown, and deciding whether a repeat
+   * is safe is the model's job, not a reason to re-prompt an allowed tool.
+   */
+  policy: ToolCallPolicy;
+  /** The server already holds as many prompts as it can (see `Holds.full`), read at the boundary. */
+  promptsFull: boolean;
+  ids: PermissionIds;
+}
+
+/** A refused permission request (see `PermissionRejection`), recorded as an error the client is told of. */
+export interface PermissionRefusedEvent {
+  kind: "permission_refused";
+  origin: Origin;
+  taskId: string;
+  detail: string;
+  ids: { event: string };
+}
+
+/**
+ * The ids a runtime event may record, drawn before it is decided. Every event records `event`; a complete proposal
+ * may also resolve the approval of the binding it supersedes (`resolved`) and propose a revision (`call`); a result
+ * that binds no call records `unmatched`. A declared output's rows take the ids drawn with its capture, and each MCP
+ * body the id drawn with its read.
+ */
+export interface RuntimeEventIds {
+  event: string;
+  resolved: string;
+  call: string;
+  unmatched: string;
+}
+
+/**
+ * The ids of the rows a declared tool output records: its artifact, its links to the call and (retained) to the
+ * task, and (retained) its artifact_registered event.
+ */
+export interface OutputIds {
+  artifact: string;
+  resultLink: string;
+  outputLink: string;
+  registered: string;
+}
+
+/**
+ * A tool output a tool result declared, what reading and storing it produced (both done at the boundary, before the
+ * result is decided, because they can take long), and the ids of the rows recording it.
+ */
+export interface CapturedOutput {
+  ids: OutputIds;
+  declared: DeclaredArtifact;
+  retention: Retention;
+}
+
+type RuntimeEventOf<Type extends RuntimeEvent["type"]> = Extract<RuntimeEvent, { type: Type }>;
+
+/**
+ * A runtime event with what the boundary read for it before it was decided. A tool proposal carries the policy the
+ * profile gives its tool. A tool result carries its declared output, captured and stored, and its MCP bodies, each
+ * null when it read none. Every other event reads nothing.
+ */
+export type RuntimeReport =
+  | { event: RuntimeEventOf<"tool_proposed">; policy: ToolCallPolicy }
+  | {
+      event: RuntimeEventOf<"tool_result">;
+      output: CapturedOutput | null;
+      bodies: readonly McpBodyRecord[] | null;
+    }
+  | { event: Exclude<RuntimeEvent, { type: "tool_proposed" | "tool_result" }> };
+
+/** One event the runtime running the task's turn reported. */
+export interface RuntimeEventReceived {
+  kind: "runtime_event";
+  origin: Origin;
+  taskId: string;
+  report: RuntimeReport;
+  ids: RuntimeEventIds;
+}
+
+export type ConversationEvent =
+  | ApprovalDecisionEvent
+  | InterruptTaskEvent
+  | PromptAbandonedEvent
+  | PermissionRequestEvent
+  | PermissionRefusedEvent
+  | RuntimeEventReceived;
 
 /** The event names a task that is not the conversation's: a command or callback of a task that has ended. */
 type NoTask = { kind: "no_task" };
@@ -79,8 +212,27 @@ export type InterruptionRejection =
  */
 export type AbandonmentRejection = NoTask | { kind: "no_call" } | { kind: "not_pending" };
 
+/**
+ * `refused`: the request binds to no new call, because it names no runtime call id or repeats a call already awaiting
+ * approval, so nothing is proposed or approved. The runtime gets `answer` whatever else happens, and the boundary
+ * records `detail` as a follow-up event (`permissionRefusedTransition`) whose failure leaves the answer as it is.
+ */
+export type PermissionRejection =
+  NoTask | { kind: "refused"; detail: string; answer: PermissionDecision };
+
+/**
+ * `runtime_ended`: the task's runtime has ended and its turn is being recorded, so the event is dropped. The runtime
+ * hands over its exit before the turn ends, so only an event left pending when a stuck runtime was abandoned gets
+ * here, and the turn is recorded without it.
+ */
+export type RuntimeEventRejection = NoTask | { kind: "runtime_ended" };
+
 export type ConversationRejection =
-  ApprovalDecisionRejection | InterruptionRejection | AbandonmentRejection;
+  | ApprovalDecisionRejection
+  | InterruptionRejection
+  | AbandonmentRejection
+  | PermissionRejection
+  | RuntimeEventRejection;
 
 /** What one transition decides: a refusal, which commits nothing, or the next state with its records and effects. */
 export type ConversationDecision<Rejection = ConversationRejection> = MachineDecision<
@@ -282,6 +434,561 @@ export const abandonmentTransition: ConversationTransition<
   return draft.accepted();
 };
 
+/** A new binding revision to propose, with the ids drawn for it. */
+interface NewCall {
+  id: string;
+  runtimeCallId: string;
+  toolIdentity: string;
+  digest: string;
+  args: unknown;
+  policy: ToolCallPolicy;
+  proposalEventId: string | null;
+}
+
+/** Record a new binding revision of `task`, the latest of its runtime call id in the draft. */
+const proposeCall = (draft: TransitionDraft, task: TaskState, input: NewCall): CallState => {
+  const { id, runtimeCallId, toolIdentity, digest, policy, proposalEventId } = input;
+  const revision = (task.calls.get(runtimeCallId)?.at(-1)?.revision ?? 0) + 1;
+  const redactedArguments = redactValue(input.args);
+  draft.write({
+    kind: "create_tool_call",
+    input: {
+      id,
+      createdAt: draft.at,
+      conversationId: draft.draft.id,
+      taskId: task.id,
+      executionId: task.executionId,
+      runtimeCallId,
+      bindingRevision: revision,
+      toolIdentity,
+      argumentDigest: digest,
+      redactedArguments,
+      policy,
+      status: "proposed",
+      proposalEventId,
+    },
+  });
+  const call: CallState = {
+    id,
+    runtimeCallId,
+    revision,
+    toolIdentity,
+    digest,
+    redactedArguments,
+    policy,
+    status: "proposed",
+    approvalId: null,
+  };
+  draft.advanceTask(task.id, (next) => withRevision(next, call));
+  return call;
+};
+
+/**
+ * Invalidate a held earlier binding of `task` and any pending approval it carries, recorded by the approval_resolved
+ * event `resolvedEventId` names. An earlier binding already released or refused is left as it is.
+ */
+const supersede = (
+  draft: TransitionDraft,
+  task: TaskState,
+  input: {
+    last: CallState;
+    next: { toolIdentity: string; digest: string };
+    resolvedEventId: string;
+  },
+): void => {
+  const { last, next, resolvedEventId } = input;
+  const superseded = supersedeBinding({
+    call: last,
+    next,
+    task: { status: task.status, otherPending: otherPending(task, last.approvalId) },
+    resolvedEventId,
+  });
+  if (!superseded) return;
+  const { approval, call, taskStatus } = superseded;
+  if (approval) {
+    draft.recordApprovalChange(task, approval);
+    draft.advanceTask(task.id, (pending) => withoutPending(pending, approval.approvalId));
+  }
+  draft.recordCallChange(call);
+  draft.commitCallChange(task, call);
+  draft.recordTaskStatus(task, taskStatus);
+};
+
+const describeAction = (toolIdentity: string, args: unknown): string => {
+  const parsed = /^mcp__(.+?)__(.+)$/.exec(toolIdentity);
+  const argText = JSON.stringify(args ?? {});
+  const server = parsed?.[1];
+  const tool = parsed?.[2];
+  if (server !== undefined && tool !== undefined)
+    return `Call tool "${tool}" on MCP server "${server}" with arguments ${argText}`;
+  return `Call ${toolIdentity} with arguments ${argText}`;
+};
+
+/**
+ * Record what the permission rule decided for a bound call, and move the draft to the status the call takes: what
+ * that answers the runtime.
+ */
+const recordPermission = (
+  draft: TransitionDraft,
+  input: {
+    task: TaskState;
+    call: CallState;
+    rule: PermissionRule;
+    ids: Pick<PermissionIds, "evaluation" | "outcome" | "approval">;
+  },
+): PermissionAnswer => {
+  const { task, call, rule, ids } = input;
+  const opts = { ...taskLinks(task), id: ids.outcome };
+  return match(rule)
+    .with({ kind: "deny" }, (denial): PermissionAnswer => {
+      if (denial.unlisted)
+        draft.emit(
+          {
+            type: "error",
+            payload: {
+              code: "configuration_error",
+              message: `tool ${call.toolIdentity} is not listed in toolPolicy; call denied`,
+              conversation_id: draft.draft.id,
+              task_id: task.id,
+            },
+          },
+          opts,
+        );
+      const change: CallChange = {
+        callId: call.id,
+        status: denial.status,
+        detail: denial.detail,
+        settle: null,
+      };
+      draft.recordCallChange(change);
+      draft.commitCallChange(task, change);
+      const { message } = denial;
+      return {
+        kind: "answer",
+        decision: denial.interrupt
+          ? { behavior: "deny", message, interrupt: true }
+          : { behavior: "deny", message },
+      };
+    })
+    .with({ kind: "dispatch" }, (): PermissionAnswer => {
+      draft.recordDispatch(task, call, {
+        id: ids.outcome,
+        via: "policy",
+        causedBy: ids.evaluation,
+      });
+      draft.advanceTask(task.id, (next) => withCall(next, call.id, { status: "dispatched" }));
+      return { kind: "answer", decision: { behavior: "allow" } };
+    })
+    .with({ kind: "ask" }, (): PermissionAnswer => {
+      const approvalId = ids.approval;
+      draft.emit(
+        {
+          type: "approval_requested",
+          payload: {
+            conversation_id: draft.draft.id,
+            task_id: task.id,
+            approval_id: approvalId,
+            tool_call_id: call.id,
+            runtime_call_id: call.runtimeCallId,
+            binding_revision: call.revision,
+            execution_epoch: task.epoch,
+            tool_identity: call.toolIdentity,
+            intended_action: describeAction(call.toolIdentity, call.redactedArguments),
+            redacted_arguments: call.redactedArguments,
+            argument_digest: call.digest,
+            explainable: true,
+          },
+        },
+        opts,
+      );
+      // Durable pending approval bound to (conversation, task, runtime call, revision, tool, digest, epoch), and
+      // to the event that asked for it: its id was chosen first, so the event could name it before it existed.
+      draft.write(
+        {
+          kind: "create_approval",
+          input: {
+            id: approvalId,
+            requestedAt: draft.at,
+            toolCallId: call.id,
+            executionEpoch: task.epoch,
+            requestingEventId: ids.outcome,
+          },
+        },
+        {
+          kind: "update_tool_call",
+          id: call.id,
+          fields: { updatedAt: draft.at, status: "awaiting_approval" },
+        },
+      );
+      draft.advanceTask(task.id, (next) =>
+        withPending(
+          withCall(next, call.id, { status: "awaiting_approval", approvalId }),
+          approvalId,
+          call.id,
+        ),
+      );
+      draft.recordTaskStatus(task, "awaiting_approval");
+      return { kind: "hold", approvalId, callId: call.id };
+    })
+    .exhaustive();
+};
+
+/**
+ * The runtime asks whether it may run a tool call. The request binds to its runtime call id: it reuses a revision
+ * the stream only proposed, or supersedes a changed one and proposes a new revision. Then the permission rule
+ * (policy, the action gate, the held prompts' cap) decides, and its evaluation and outcome are recorded. The
+ * runtime's answer is the one `answer_permission` effect, queued last: a denial or a release at once, or a hold
+ * under the approval requested, which the boundary places only once the request has committed.
+ */
+export const permissionRequestTransition: ConversationTransition<
+  PermissionRequestEvent,
+  PermissionRejection
+> = ({ state, event, now }) => {
+  const { task } = state;
+  if (task?.id !== event.taskId) return rejected({ kind: "no_task" });
+  const { request, policy, ids } = event;
+  const { runtimeCallId, toolIdentity } = request;
+  // An empty id binds to nothing either: the bridge accepts one.
+  if (!runtimeCallId)
+    return rejected({
+      kind: "refused",
+      detail: `permission request for ${toolIdentity} carried no runtime call id; rejected`,
+      answer: {
+        behavior: "deny",
+        message: "Mia cannot bind this call to a runtime call id; rejected.",
+      },
+    });
+  const digest = canonicalDigest(request.input);
+  const last = task.calls.get(runtimeCallId)?.at(-1);
+  const binding = bindPermissionRequest(last, { toolIdentity, digest });
+  if (binding.kind === "duplicate")
+    return rejected({
+      kind: "refused",
+      detail: `permission request for ${toolIdentity} (${runtimeCallId}) ${binding.detail}; denied`,
+      answer: binding.settle,
+    });
+  const rule = evaluatePermission({
+    policy,
+    gateOpen: task.gateOpen,
+    toolIdentity,
+    promptsFull: event.promptsFull,
+  });
+  const draft = new TransitionDraft({ state, now, origin: event.origin });
+  const opts = taskLinks(task);
+  const proposeBinding = (): CallState => {
+    if (last)
+      supersede(draft, task, {
+        last,
+        next: { toolIdentity, digest },
+        resolvedEventId: ids.resolved,
+      });
+    draft.record(
+      "tool_proposed",
+      {
+        runtime_call_id: runtimeCallId,
+        tool_identity: toolIdentity,
+        redacted_arguments: redactValue(request.input),
+        argument_digest: digest,
+        source: "permission_request",
+      },
+      { ...opts, id: ids.proposal },
+    );
+    return proposeCall(draft, task, {
+      id: ids.call,
+      runtimeCallId,
+      toolIdentity,
+      digest,
+      args: request.input,
+      policy,
+      proposalEventId: ids.proposal,
+    });
+  };
+  const bound = binding.kind === "reuse" ? binding.call : proposeBinding();
+  draft.record(
+    "policy_evaluated",
+    {
+      tool_call_id: bound.id,
+      tool_identity: bound.toolIdentity,
+      policy,
+      gate_open: task.gateOpen,
+      execution_epoch: task.epoch,
+      binding_revision: bound.revision,
+    },
+    { ...opts, id: ids.evaluation },
+  );
+  const answer = recordPermission(draft, { task, call: bound, rule, ids });
+  draft.notifyCall(task.id, bound.id);
+  draft.effect({ kind: "answer_permission", answer });
+  return draft.accepted();
+};
+
+/** Tell the client of a refused permission request: a runtime failure, recorded under the task. */
+export const permissionRefusedTransition: ConversationTransition<
+  PermissionRefusedEvent,
+  NoTask
+> = ({ state, event, now }) => {
+  const { task } = state;
+  if (task?.id !== event.taskId) return rejected({ kind: "no_task" });
+  const draft = new TransitionDraft({ state, now, origin: event.origin });
+  draft.emit(
+    {
+      type: "error",
+      payload: {
+        code: "runtime_failure",
+        message: event.detail,
+        conversation_id: state.id,
+        task_id: task.id,
+      },
+    },
+    { ...taskLinks(task), id: event.ids.event },
+  );
+  return draft.accepted();
+};
+
+/**
+ * Record a declared tool output whatever its capture status, with the tool result `eventId` that declared it.
+ * Retention was decided at the boundary, so these rows only record that outcome. Only a retained tool output
+ * becomes a task output and gets an artifact_registered event.
+ */
+const registerToolOutput = (
+  draft: TransitionDraft,
+  input: { output: CapturedOutput; task: TaskState; call: CallState; eventId: string },
+): void => {
+  const { output, task, call, eventId } = input;
+  const { ids, declared, retention } = output;
+  const conversationId = draft.draft.id;
+  const artifactId = ids.artifact;
+  draft.write(
+    {
+      kind: "register_artifact",
+      input: {
+        id: artifactId,
+        createdAt: draft.at,
+        kind: "tool_output",
+        logicalName: declared.name ?? declared.path,
+        mimeType: declared.mimeType ?? "application/octet-stream",
+        producerExecutionId: task.executionId,
+        producerEventId: eventId,
+        originalPath: declared.path,
+        externalLocator: retention.status === "retained" ? null : declared.path,
+        ...captureFields(retention),
+      },
+    },
+    {
+      kind: "link_artifact",
+      input: {
+        id: ids.resultLink,
+        conversationId,
+        artifactId,
+        relation: "tool_result",
+        toolCallId: call.id,
+        taskId: task.id,
+      },
+    },
+  );
+  if (retention.status === "retained") {
+    const { stored } = retention;
+    draft.write({
+      kind: "link_artifact",
+      input: {
+        id: ids.outputLink,
+        conversationId,
+        artifactId,
+        relation: "task_output",
+        taskId: task.id,
+      },
+    });
+    draft.record(
+      "artifact_registered",
+      {
+        artifact_id: artifactId,
+        tool_call_id: call.id,
+        digest: stored.digest,
+        size: stored.byteCount,
+        original_path: declared.path,
+      },
+      { id: ids.registered, taskId: task.id, executionId: task.executionId, causedBy: eventId },
+    );
+  }
+};
+
+/**
+ * Record one event the runtime reported, against the task as it is now. Most are evidence only. An init names the
+ * reported model and marks the session started; a complete proposal attaches to the revision it announces or
+ * supersedes the held one and proposes a new revision; a tool result completes or fails the call it binds to, with
+ * its declared output and MCP bodies as the boundary read them.
+ */
+export const runtimeEventTransition: ConversationTransition<
+  RuntimeEventReceived,
+  RuntimeEventRejection
+> = ({ state, event: received, now }) => {
+  const { task } = state;
+  if (task?.id !== received.taskId) return rejected({ kind: "no_task" });
+  if (task.runtimeEnded) return rejected({ kind: "runtime_ended" });
+  const { ids } = received;
+  const draft = new TransitionDraft({ state, now, origin: received.origin });
+  const links = taskLinks(task);
+  const opts = { ...links, id: ids.event };
+  match(received.report)
+    .with({ event: { type: "runtime_started" } }, ({ event: started }) => {
+      draft.record("runtime_started", { pid: started.pid, launch: started.launch }, opts);
+    })
+    .with({ event: { type: "runtime_init" } }, ({ event: { init } }) => {
+      draft.record("runtime_init", init.evidence, opts);
+      draft.write({
+        kind: "update_execution",
+        id: task.executionId,
+        fields: { reportedModel: init.model },
+      });
+      draft.advance({ ...draft.draft, sessionStarted: true });
+      draft.advanceTask(task.id, (next) => ({ ...next, reportedModel: init.model }));
+    })
+    .with({ event: { type: "text_delta" } }, ({ event: delta }) => {
+      draft.emit(
+        {
+          type: "text_delta",
+          payload: {
+            conversation_id: state.id,
+            task_id: task.id,
+            execution_id: task.executionId,
+            text: delta.text,
+          },
+        },
+        opts,
+      );
+    })
+    .with({ event: { type: "tool_proposed" } }, ({ event: proposed, policy }) => {
+      if (!proposed.complete) {
+        draft.record(
+          "tool_proposal_started",
+          { runtime_call_id: proposed.runtimeCallId, tool_identity: proposed.toolIdentity },
+          opts,
+        );
+        return;
+      }
+      const digest = canonicalDigest(proposed.arguments);
+      draft.record(
+        "tool_proposed",
+        {
+          runtime_call_id: proposed.runtimeCallId,
+          tool_identity: proposed.toolIdentity,
+          redacted_arguments: redactValue(proposed.arguments),
+          argument_digest: digest,
+        },
+        opts,
+      );
+      const revisions = task.calls.get(proposed.runtimeCallId) ?? [];
+      const binding = bindStreamProposal(revisions, {
+        toolIdentity: proposed.toolIdentity,
+        digest,
+      });
+      if (binding.kind === "attach") {
+        draft.write({
+          kind: "update_tool_call",
+          id: binding.call.id,
+          fields: { updatedAt: draft.at, proposalEventId: ids.event },
+        });
+        return;
+      }
+      const last = revisions.at(-1);
+      if (last)
+        supersede(draft, task, {
+          last,
+          next: { toolIdentity: proposed.toolIdentity, digest },
+          resolvedEventId: ids.resolved,
+        });
+      const call = proposeCall(draft, task, {
+        id: ids.call,
+        runtimeCallId: proposed.runtimeCallId,
+        toolIdentity: proposed.toolIdentity,
+        digest,
+        args: proposed.arguments,
+        policy,
+        proposalEventId: ids.event,
+      });
+      draft.notifyCall(task.id, call.id);
+    })
+    .with({ event: { type: "assistant_message" } }, ({ event: message }) => {
+      draft.record("assistant_message", message.message, opts);
+    })
+    .with({ event: { type: "tool_result" } }, ({ event: toolResult, output, bodies }) => {
+      draft.record(
+        "tool_result",
+        {
+          runtime_call_id: toolResult.runtimeCallId,
+          is_error: toolResult.isError,
+          content: toolResult.content,
+          raw: toolResult.raw,
+        },
+        opts,
+      );
+      const binding = bindToolResult(task.calls.get(toolResult.runtimeCallId) ?? []);
+      if (binding.kind === "unmatched") {
+        draft.record(
+          "tool_result_unmatched",
+          { runtime_call_id: toolResult.runtimeCallId },
+          { ...links, id: ids.unmatched },
+        );
+        return;
+      }
+      const { call } = binding;
+      const status = statusAfterResult(call.status, toolResult.isError);
+      draft.write({
+        kind: "update_tool_call",
+        id: call.id,
+        fields: { updatedAt: draft.at, status, resultEventId: ids.event },
+      });
+      if (status === "completed" && output)
+        registerToolOutput(draft, { output, task, call, eventId: ids.event });
+      for (const body of bodies ?? [])
+        draft.record(
+          MCP_BODY_EVENT[body.direction],
+          mcpPayload({ toolCallId: call.id, runtimeCallId: call.runtimeCallId }, body),
+          { ...links, id: body.eventId, causedBy: ids.event },
+        );
+      draft.advanceTask(task.id, (next) => withCall(next, call.id, { status }));
+      draft.notifyCall(task.id, call.id);
+    })
+    .with({ event: { type: "turn_result" } }, ({ event: { summary } }) => {
+      draft.record("runtime_result", summary.evidence, opts);
+      draft.write({
+        kind: "update_execution",
+        id: task.executionId,
+        fields: {
+          usage: {
+            usage: summary.usage,
+            totalCostUsd: summary.totalCostUsd,
+            durationMs: summary.durationMs,
+            durationApiMs: summary.durationApiMs,
+            numTurns: summary.numTurns,
+          },
+        },
+      });
+    })
+    .with({ event: { type: "runtime_stderr" } }, ({ event: stderr }) => {
+      draft.record("runtime_stderr", { text: stderr.text }, opts);
+    })
+    .with({ event: { type: "malformed_event" } }, ({ event: malformed }) => {
+      draft.emit(
+        {
+          type: "error",
+          payload: {
+            code: "runtime_failure",
+            message: `malformed runtime event: ${malformed.error}`,
+            conversation_id: state.id,
+            task_id: task.id,
+          },
+        },
+        opts,
+      );
+    })
+    .with({ event: { type: "runtime_exit" } }, ({ event: exit }) => {
+      draft.record("runtime_exit", { code: exit.code, signal: exit.signal }, opts);
+    })
+    .exhaustive();
+  return draft.accepted();
+};
+
 /** Every transition of the conversation, as one kernel machine's `decide`. */
 export const decideConversation: Decide<
   ConversationState,
@@ -299,5 +1006,14 @@ export const decideConversation: Decide<
     )
     .with({ kind: "prompt_abandoned" }, (abandoned): ConversationDecision =>
       abandonmentTransition({ state, event: abandoned, now }),
+    )
+    .with({ kind: "permission_request" }, (request): ConversationDecision =>
+      permissionRequestTransition({ state, event: request, now }),
+    )
+    .with({ kind: "permission_refused" }, (refused): ConversationDecision =>
+      permissionRefusedTransition({ state, event: refused, now }),
+    )
+    .with({ kind: "runtime_event" }, (received): ConversationDecision =>
+      runtimeEventTransition({ state, event: received, now }),
     )
     .exhaustive();
