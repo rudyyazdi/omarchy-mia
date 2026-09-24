@@ -1,7 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach } from "vitest";
 import {
   readRuntimeFile,
@@ -312,5 +311,3 @@ export const useScriptedSession = (
   afterEach(closeCurrent);
   return start;
 };
-
-export const tick = () => sleep(20);

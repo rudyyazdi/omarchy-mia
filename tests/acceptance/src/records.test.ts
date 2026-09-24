@@ -15,14 +15,7 @@ import {
 } from "@mia/records";
 import type { MiaClient } from "@mia/text-client";
 import type { ScriptedRuntime } from "./scripted-runtime.ts";
-import {
-  ackResult,
-  must,
-  mustString,
-  tick,
-  useScriptedSession,
-  type TestServer,
-} from "./harness.ts";
+import { ackResult, must, mustString, useScriptedSession, type TestServer } from "./harness.ts";
 
 /** When the rows these tests write say they were recorded. */
 const AT = "2026-01-01T00:00:00.000Z";
@@ -204,15 +197,17 @@ describe("records, report and export", () => {
     const ack = await client.submitText("stream");
     const turn = await next;
     turn.init();
+    const delivered = (text: string) =>
+      client.waitFor("text_delta", (event) => event.payload.text === text);
     turn.text("a");
-    await tick();
+    await delivered("a");
     const catalog = ts.catalog();
     const conversationId = must(client.conversationId, "conversation id");
     const before = snapshotConversation(catalog, conversationId).cutoff_sequence;
     // Write more events while exporting: the export must stop at its own cutoff.
     turn.text("b");
     turn.text("c");
-    await tick();
+    await delivered("c");
     const exportDir = join(ts.dir, "export-2");
     const result = exportConversationSync(catalog, conversationId, exportDir);
     catalog.close();
