@@ -1,13 +1,9 @@
-import { existsSync, mkdtempDisposableSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempDisposableSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, onTestFinished } from "vitest";
-import { Catalog, defaultStateDir, newId } from "./catalog.ts";
-import { RecordWriter } from "./writer.ts";
-import { SCHEMA_VERSION, type JournalEventType } from "./schema.ts";
-
-/** When the rows these tests write say they were recorded. */
-const AT = "2026-01-01T00:00:00.000Z";
+import { describe, expect, it } from "vitest";
+import { Catalog, defaultStateDir } from "./catalog.ts";
+import { SCHEMA_VERSION } from "./schema.ts";
 
 describe("defaultStateDir", () => {
   it("resolves from the environment it is given, not the process's", () => {
@@ -52,73 +48,5 @@ describe("read-only catalog", () => {
     expect(() => Catalog.openSync(directory.path)).toThrow("does not match");
     // SQLite removes the write-ahead log when the last connection closes; a leaked connection keeps it.
     expect(existsSync(join(directory.path, "catalog.sqlite-wal"))).toBe(false);
-  });
-});
-
-describe("savepoint", () => {
-  /** A catalog with one conversation to append events to, closed and removed when the test finishes. */
-  const openCatalog = () => {
-    const path = mkdtempSync(join(tmpdir(), "mia-catalog-"));
-    const catalog = Catalog.openSync(path);
-    onTestFinished(() => {
-      catalog.close();
-      rmSync(path, { recursive: true, force: true });
-    });
-    const writer = new RecordWriter(catalog);
-    writer.createProvenanceSet({ id: "prov-1", createdAt: AT, description: "test" });
-    writer.createConversation({
-      id: "conv-1",
-      startedAt: AT,
-      provenanceSetId: "prov-1",
-      runtimeConversationId: "rt-1",
-    });
-    const append = (type: JournalEventType) =>
-      writer.appendEvent({
-        id: newId("evt"),
-        receivedAt: AT,
-        conversationId: "conv-1",
-        type,
-        payload: {},
-      });
-    const eventTypes = () =>
-      catalog
-        .all<{ type: JournalEventType }>("SELECT type FROM events ORDER BY sequence")
-        .map((row) => row.type);
-    return { catalog, append, eventTypes };
-  };
-
-  it("undoes only a failed savepoint's writes and commits the rest of the transaction", () => {
-    const { catalog, append, eventTypes } = openCatalog();
-    catalog.transaction(() => {
-      append("task_submitted");
-      const undone = catalog.savepoint(() => {
-        append("tool_dispatched");
-        throw new Error("simulated write failure");
-      });
-      expect(undone).toMatchObject({ ok: false, error: new Error("simulated write failure") });
-      expect(catalog.savepoint(() => append("runtime_exit")).ok).toBe(true);
-    });
-    expect(eventTypes()).toEqual(["task_submitted", "runtime_exit"]);
-  });
-
-  it("refuses to run outside a transaction", () => {
-    const { catalog } = openCatalog();
-    expect(() => catalog.savepoint(() => undefined)).toThrow("savepoint needs an open transaction");
-  });
-
-  it("throws when its failure ended the whole transaction, since nothing is left to commit", () => {
-    const { catalog, append, eventTypes } = openCatalog();
-    expect(() =>
-      catalog.transaction(() => {
-        append("task_submitted");
-        catalog.savepoint(() => {
-          // SQLite ends the transaction itself on some I/O errors; ROLLBACK stands in for one.
-          catalog.db.exec("ROLLBACK");
-          throw new Error("simulated disk I/O error");
-        });
-      }),
-    ).toThrow("simulated disk I/O error");
-    expect(catalog.db.isTransaction).toBe(false);
-    expect(eventTypes()).toEqual([]);
   });
 });

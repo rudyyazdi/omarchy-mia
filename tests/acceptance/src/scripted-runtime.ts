@@ -152,13 +152,15 @@ export class ScriptedTurn {
     return join(this.options.runtimeDir, `turn-${this.options.turnIndex}.hooks.jsonl`);
   }
 
+  /** Where this turn's transcript belongs: one file per turn, written when the turn ends. */
+  get streamLogPath(): string {
+    return join(this.options.runtimeDir, `turn-${this.options.turnIndex}.stream.jsonl`);
+  }
+
   end(status: "completed" | "failed" = "completed", error: string | null = null): void {
     if (this.ended) return;
     this.ended = true;
-    const streamLogPath = join(
-      this.options.runtimeDir,
-      `turn-${this.options.turnIndex}.stream.jsonl`,
-    );
+    const { streamLogPath } = this;
     match(this.transcriptAs)
       .with("file", () =>
         writeFileSync(

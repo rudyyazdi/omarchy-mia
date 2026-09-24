@@ -608,32 +608,26 @@ describe("streaming and commands", () => {
     ]);
   });
 
-  it("undoes a transcript's partial rows when its retention fails midway, and records it failed", async () => {
-    let objectsBefore = 0;
-    const transcripts = await finishLosingTranscript(() => {
-      failArtifactLinks(
-        "runtime_transcript",
-        "(SELECT capture_status FROM artifacts WHERE id = NEW.artifact_id) = 'retained'",
-      );
-      objectsBefore = countRows("objects");
-    });
-    expect(transcripts).toEqual([
-      {
-        capture_status: "failed",
-        capture_reason: expect.stringContaining("not retained: simulated link failure"),
-        object_digest: null,
-      },
-    ]);
-    expect(countRows("objects")).toBe(objectsBefore);
-    expect(rows("SELECT 1 FROM artifacts WHERE kind = 'runtime_transcript'")).toHaveLength(1);
-  });
-
-  it("records a turn finished when not even its failed transcript can be recorded", async () => {
-    const transcripts = await finishLosingTranscript(() =>
-      failArtifactLinks("runtime_transcript", "1"),
+  it("records nothing of a turn's end when its transcript's rows cannot be written", async () => {
+    const { turn, taskId } = await submit("hello");
+    turn.init();
+    // Retention was decided before the turn-end transaction opened; the rows that record it commit with the
+    // turn's end or not at all, so a failed link undoes the object row written before it, and the finish too.
+    failArtifactLinks("runtime_transcript", "1");
+    const statusBefore = taskStatus(taskId);
+    const failed = ts.waitForLog((line) =>
+      line.includes("finishTurn record failure: Error: simulated link failure"),
     );
-    expect(transcripts).toEqual([]);
+    turn.end();
+    await failed;
+    // Stored before the transaction, and referenced by no row once it rolled back.
+    const digest = ObjectStore.digestOf(readFileSync(turn.streamLogPath));
+    expect(objectStored(digest)).toBe(true);
+    expect(rows("SELECT 1 FROM objects WHERE digest = ?", digest)).toHaveLength(0);
+    expect(transcriptArtifacts(taskId)).toEqual([]);
     expect(rows("SELECT 1 FROM artifacts WHERE kind = 'runtime_transcript'")).toHaveLength(0);
+    expect(taskStatus(taskId)).toBe(statusBefore);
+    expect(rows("SELECT 1 FROM events WHERE type = 'task_finished'")).toHaveLength(0);
   });
 });
 
@@ -2098,24 +2092,37 @@ describe("configuration and provenance", () => {
     await client.waitFor("task_finished");
   });
 
-  it("leaves the call as it was, and no row pointing at the stored output, when the tool result cannot commit", async () => {
-    const { file, turn, taskId } = await approvedArtifactCall();
-    const statusBefore = rows("SELECT status FROM tool_calls");
-    const digest = ObjectStore.digestOf(Buffer.from("D1"));
-    failNextCommit();
-    await declareOutput(turn, file);
-    expect(ts.logs).toContain("failed to record tool_result: simulated commit failure");
-    // Stored before the transaction, and referenced by no row once it rolled back.
-    expect(objectStored(digest)).toBe(true);
-    expect(rows("SELECT 1 FROM objects WHERE digest = ?", digest)).toHaveLength(0);
-    expect(rows("SELECT 1 FROM artifacts WHERE kind = 'tool_output'")).toHaveLength(0);
-    expect(rows("SELECT status FROM tool_calls")).toEqual(statusBefore);
-    turn.end();
-    const finished = await client.waitFor("task_finished");
-    // In memory the call never completed either, so the turn cannot say what it did.
-    expect(finished.payload.status).toBe("outcome_unknown");
-    expect(taskStatus(taskId)).toBe("outcome_unknown");
-  });
+  // The rows that record a retained output commit with the tool result or not at all: retention was decided
+  // before the transaction opened, so no failed write inside it falls back to recording a failed capture.
+  it.each<[failure: string, fail: () => void, error: string]>([
+    ["the tool result cannot commit", failNextCommit, "simulated commit failure"],
+    [
+      "the output rows cannot be written",
+      () => failArtifactLinks("tool_result", "1"),
+      "simulated link failure",
+    ],
+  ])(
+    "leaves the call as it was, and no row pointing at the stored output, when %s",
+    async (_failure, fail, error) => {
+      const { file, turn, taskId } = await approvedArtifactCall();
+      const statusBefore = rows("SELECT status FROM tool_calls");
+      const digest = ObjectStore.digestOf(Buffer.from("D1"));
+      fail();
+      await declareOutput(turn, file);
+      expect(ts.logs).toContain(`failed to record tool_result: ${error}`);
+      // Stored before the transaction, and referenced by no row once it rolled back.
+      expect(objectStored(digest)).toBe(true);
+      expect(rows("SELECT 1 FROM objects WHERE digest = ?", digest)).toHaveLength(0);
+      expect(rows("SELECT 1 FROM artifacts WHERE kind = 'tool_output'")).toHaveLength(0);
+      expect(rows("SELECT 1 FROM events WHERE type = 'tool_result'")).toHaveLength(0);
+      expect(rows("SELECT status FROM tool_calls")).toEqual(statusBefore);
+      turn.end();
+      const finished = await client.waitFor("task_finished");
+      // In memory the call never completed either, so the turn cannot say what it did.
+      expect(finished.payload.status).toBe("outcome_unknown");
+      expect(taskStatus(taskId)).toBe("outcome_unknown");
+    },
+  );
 
   it("records a tool result, and why its output is missing, when the output cannot be stored", async () => {
     const { file, artifacts } = await completeLosingToolOutput(failObjectWrites);
@@ -2132,33 +2139,5 @@ describe("configuration and provenance", () => {
         "SELECT l.relation FROM artifact_links l JOIN artifacts a ON a.id = l.artifact_id WHERE a.kind = 'tool_output'",
       ),
     ).toEqual([{ relation: "tool_result" }]);
-  });
-
-  it("undoes a tool output's partial rows when its retention fails midway, and records it failed", async () => {
-    const { file, digest, artifacts } = await completeLosingToolOutput(() =>
-      failArtifactLinks(
-        "task_output",
-        "(SELECT kind FROM artifacts WHERE id = NEW.artifact_id) = 'tool_output'",
-      ),
-    );
-    expect(artifacts).toEqual([
-      {
-        capture_status: "failed",
-        capture_reason: expect.stringContaining("not retained: simulated link failure"),
-        object_digest: null,
-        external_locator: file,
-      },
-    ]);
-    expect(rows("SELECT 1 FROM objects WHERE digest = ?", digest)).toHaveLength(0);
-  });
-
-  it("records a tool result when not even its failed output can be recorded", async () => {
-    const { file, artifacts } = await completeLosingToolOutput(() =>
-      failArtifactLinks("tool_result", "1"),
-    );
-    expect(artifacts).toEqual([]);
-    expect(ts.logs).toContain(
-      `tool output ${file} lost, not retained: simulated link failure; not recorded: simulated link failure`,
-    );
   });
 });
