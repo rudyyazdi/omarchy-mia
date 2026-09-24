@@ -76,7 +76,7 @@ import {
   type RuntimeReport,
   type UnresultedBodies,
 } from "./decide-conversation.ts";
-import type { EngineEffect, OutgoingEvent, PermissionAnswer } from "./engine-effects.ts";
+import type { EngineEffect, OutgoingEvent, PermissionAnswer, TurnStart } from "./engine-effects.ts";
 import { commitRecords, eventSequence, type CommittedChange } from "./engine-records.ts";
 import {
   nameProvenance,
@@ -161,7 +161,7 @@ interface Asking {
 
 /** The task submission being committed, and the turn its `start_turn` effect gave, once performed. */
 interface Submitting {
-  turn: { taskId: string; prompt: string } | null;
+  turn: TurnStart | null;
 }
 
 /**
@@ -263,9 +263,10 @@ interface ActiveTurn {
 /**
  * Conversation/task coordinator plus approval and interruption controller. One conversation, one task,
  * one active client. The rules live in ./transitions.ts, and ./decide-conversation.ts composes them into pure
- * transitions for every change to a started conversation; the engine commits what they decide, replaces its state
- * with the next one only after the commit, then performs the effects (see `commit`). Only the conversation start,
- * which has no conversation to decide from yet, the engine still builds itself, through the same draft (see `tx`).
+ * transitions for every recorded change to a started conversation; the engine commits what they decide, replaces its
+ * state with the next one only after the commit, then performs the effects (see `commit`). Only the conversation
+ * start, which has no conversation to decide from yet, the engine still builds itself, through the same draft (see
+ * `tx`). A few memory-only changes, which record nothing, replace the state directly (see `current`).
  */
 export class Engine {
   activeConnectionId: string | null = null;
@@ -299,7 +300,7 @@ export class Engine {
   private open: TransitionDraft | null = null;
   /**
    * The runtime's permission prompts waiting for the user's decision, keyed by approval id. Each is answered once:
-   * by an `answer_prompt` effect after a commit, by its abandonment, or once its turn has ended (submitText).
+   * by an `answer_prompt` effect after a commit, by its abandonment, or once its turn has ended (startTurn).
    */
   private readonly prompts = new Holds<PermissionDecision>(MAX_HELD_PROMPTS);
   /**
@@ -367,9 +368,9 @@ export class Engine {
   // ---------------------------------------------------------------- event plumbing
 
   /**
-   * Run the one transition the engine still builds itself, the conversation start: `build` queues its records without touching the catalog and moves
-   * the draft state (see `TransitionDraft`), then `commit` commits what it built. A build that throws commits
-   * nothing, keeps the state it started from and performs no queued effect.
+   * Run the one transition the engine still builds itself, the conversation start: `build` queues its records without
+   * touching the catalog and moves the draft state (see `TransitionDraft`), then `commit` commits what it built. A
+   * build that throws commits nothing, keeps the state it started from and performs no queued effect.
    */
   private tx<T>(build: () => T): T {
     // A transition inside another would commit the outer one's half-built records.
@@ -443,10 +444,10 @@ export class Engine {
         if (this.asking.answer) throw new Error("a permission request is answered once");
         this.asking.answer = answer;
       })
-      .with({ kind: "start_turn" }, ({ taskId, prompt }) => {
+      .with({ kind: "start_turn" }, ({ turn }) => {
         if (!this.submitting) throw new Error("no task submission is being committed");
         if (this.submitting.turn) throw new Error("a task submission starts one turn");
-        this.submitting.turn = { taskId, prompt };
+        this.submitting.turn = turn;
       })
       .with({ kind: "interrupt_runtime" }, ({ taskId }) => {
         const turn = this.running;
@@ -708,7 +709,7 @@ export class Engine {
           : "wait for it to finish or interrupt it";
       return fail("busy", `task ${taskId} is ${status}; ${hint}`);
     }
-    // Restored, not cleared, as `asking` is.
+    // Restored, not cleared, so a commit nested inside this one's effects could not take the outer submission's slot.
     const previous = this.submitting;
     const submitting: Submitting = { turn: null };
     this.submitting = submitting;
@@ -729,10 +730,7 @@ export class Engine {
    * from the conversation as that commit left it. An adapter that throws here fails the command; the task it recorded
    * stays the active one, with no runtime to end it.
    */
-  private startTurn(
-    conversation: ConversationState,
-    turn: { taskId: string; prompt: string },
-  ): CommandResult {
+  private startTurn(conversation: ConversationState, turn: TurnStart): CommandResult {
     const { taskId, prompt } = turn;
     const task = conversation.task;
     // Unreachable: the submission that queued this turn made its task the conversation's.
@@ -1355,7 +1353,7 @@ export class Engine {
   private abandon(taskId: string, callId: string): PermissionDecision {
     const task = this.taskOf(taskId);
     const call = task ? callById(task, callId) : undefined;
-    // Unreachable while the turn's end answers every prompt still held before its task is cleared (submitText).
+    // Unreachable while the turn's end answers every prompt still held before its task is cleared (startTurn).
     if (!task || !call) return TURN_ENDED;
     const decision = this.decide(abandonmentTransition, {
       kind: "prompt_abandoned",
@@ -1386,7 +1384,7 @@ export class Engine {
   private async finishTurn(taskId: string, result: TurnResult): Promise<void> {
     const ended = this.taskOf(taskId);
     const current = this.current;
-    // Unreachable: only the turn's end clears its task, once this has returned (submitText).
+    // Unreachable: only the turn's end clears its task, once this has returned (startTurn).
     if (!ended || !current) {
       this.deps.log(`turn of task ${taskId} ended after its task was cleared; not recorded`);
       return;

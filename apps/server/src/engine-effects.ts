@@ -14,6 +14,12 @@ export type PermissionAnswer =
   | { kind: "answer"; decision: PermissionDecision }
   | { kind: "hold"; approvalId: string; callId: string };
 
+/** The turn a task submission starts: its task's, with the runtime prompt the submission composed. */
+export interface TurnStart {
+  taskId: string;
+  prompt: string;
+}
+
 /**
  * One thing the engine does once a transition's records have committed and its state has moved on, as data: what a
  * transition decides can then be returned by a pure `decide` and performed by the kernel. When and in what order
@@ -41,4 +47,4 @@ export type EngineEffect =
   | { kind: "answer_prompt"; approvalId: string; decision: PermissionDecision }
   | { kind: "answer_permission"; answer: PermissionAnswer }
   | { kind: "interrupt_runtime"; taskId: string }
-  | { kind: "start_turn"; taskId: string; prompt: string };
+  | { kind: "start_turn"; turn: TurnStart };

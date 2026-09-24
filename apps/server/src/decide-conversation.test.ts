@@ -121,7 +121,7 @@ const effectLabels = (effects: readonly EngineEffect[]): string[] =>
           .exhaustive(),
       )
       .with({ kind: "interrupt_runtime" }, ({ taskId }) => `interrupt ${taskId}`)
-      .with({ kind: "start_turn" }, ({ taskId }) => `start ${taskId}`)
+      .with({ kind: "start_turn" }, ({ turn }) => `start ${turn.taskId}`)
       .exhaustive(),
   );
 
@@ -842,8 +842,7 @@ describe("task submission", () => {
     expect(effectLabels(effects)).toEqual(["deliver task_started", "start task_new"]);
     expect(effects.at(-1)).toEqual({
       kind: "start_turn",
-      taskId: "task_new",
-      prompt: "[Mia note] earlier\n\nhello",
+      turn: { taskId: "task_new", prompt: "[Mia note] earlier\n\nhello" },
     });
     expect(next).toMatchObject({ epoch: 3, turnCount: 3, pendingNote: null });
     expect(next.task).toMatchObject({
@@ -863,7 +862,7 @@ describe("task submission", () => {
     expect(records[2]).toMatchObject({
       input: { payload: { runtime_prompt: "hello", mia_note: null } },
     });
-    expect(effects.at(-1)).toMatchObject({ prompt: "hello" });
+    expect(effects.at(-1)).toMatchObject({ turn: { prompt: "hello" } });
   });
 
   it("refuses a submission while a task runs, naming its pending approvals in request order", () => {

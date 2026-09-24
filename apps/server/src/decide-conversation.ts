@@ -1193,7 +1193,7 @@ export const taskSubmissionTransition: ConversationTransition<
       reportedModel: null,
     },
   });
-  draft.effect({ kind: "start_turn", taskId: ids.task, prompt });
+  draft.effect({ kind: "start_turn", turn: { taskId: ids.task, prompt } });
   return draft.accepted();
 };
 

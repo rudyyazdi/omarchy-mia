@@ -631,6 +631,35 @@ describe("streaming and commands", () => {
   });
 });
 
+describe("diagnostics", () => {
+  it("records a report about no conversation, or another one, as its row alone, under the active task", async () => {
+    const { taskId } = await submit("hello");
+    const before = rows("SELECT id FROM events WHERE type = 'client_diagnostics'");
+    for (const conversationId of [null, "conv_other"])
+      expect(
+        (
+          await client.send("diagnostic_snapshot", {
+            conversation_id: conversationId,
+            diagnostics: client.diagnostics(),
+          })
+        ).disposition,
+      ).toBe("accepted");
+    expect(rows("SELECT id FROM events WHERE type = 'client_diagnostics'")).toEqual(before);
+    expect(
+      rows(
+        "SELECT conversation_id, event_id, task_id, client_id FROM diagnostics WHERE task_id IS NOT NULL",
+      ),
+    ).toEqual(
+      Array(2).fill({
+        conversation_id: null,
+        event_id: null,
+        task_id: taskId,
+        client_id: client.clientId,
+      }),
+    );
+  });
+});
+
 describe("approval path", () => {
   it("holds a call until approval, releases exactly once, and never releases a rejected call", async () => {
     const { turn, taskId } = await submit("change once");
@@ -1740,6 +1769,22 @@ describe("runtime session", () => {
     const turn = await next;
     expect(runtime.turns).toHaveLength(1);
     expect(turn.options).toMatchObject({ text: "recorded", turnIndex: 1, firstTurn: true });
+  });
+
+  it("fails a submission whose turn the adapter cannot start, once its task is recorded", async () => {
+    const original = runtime.submitTurn.bind(runtime);
+    runtime.submitTurn = () => {
+      runtime.submitTurn = original;
+      throw new Error("simulated launch failure");
+    };
+    const ack = await client.submitText("unlaunched");
+    // Not answered ok, as it would be if the turn were started as an effect whose throw is only logged.
+    expect(ack.disposition).toBe("failed");
+    expect(ackError(ack).code).toBe("internal");
+    expect(runtime.turns).toHaveLength(0);
+    expect(rows("SELECT text, status FROM tasks")).toEqual([
+      { text: "unlaunched", status: "running" },
+    ]);
   });
 
   it("creates the session again on the turn after one whose runtime never started", async () => {
