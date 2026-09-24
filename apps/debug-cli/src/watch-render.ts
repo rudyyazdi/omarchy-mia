@@ -88,7 +88,7 @@ const STOPPED_CALLS: ReadonlySet<ToolCallStatus> = new Set([
 
 /**
  * What only debug mode records, marked where it would appear in a conversation captured with debug mode off, so
- * the page never shows a silent gap (issue #6). Every tool call is an MCP call, since the runtime config refuses built-in tools.
+ * the page never shows a silent gap (issue #6). Every tool call is an MCP call: the runtime is launched with no built-in tools.
  */
 const NOT_RECORDED = `<p class="not-recorded">MCP request and response: not recorded (debug mode off)</p>`;
 

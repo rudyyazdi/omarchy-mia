@@ -140,6 +140,7 @@ describe("messagesAfter", () => {
         .map((message) => JSON.stringify(message).includes("not recorded (debug mode off)"));
     expect(marked(conversation())).toEqual([true]);
     const debug = conversation();
+    // The engine records the flag right after conversation_started; its position does not matter to the view.
     debug.events.push(eventRow({ sequence: 4, type: "captured_in_debug_mode" }));
     expect(marked(debug)).toEqual([false]);
   });
