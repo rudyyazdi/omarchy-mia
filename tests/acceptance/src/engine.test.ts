@@ -1969,6 +1969,24 @@ describe("conversation start", () => {
     expect(writtenInside()).toBe(false);
   });
 
+  it("leaves the conversation its client's when another client's start fails to commit", async () => {
+    const current = must(client.conversationId, "conversation id");
+    client.close();
+    await tick();
+    await tick();
+    const other = await ts.connect("client-B");
+    failNextCommit();
+    expect(ackError(await other.send("start_conversation", {})).code).toBe("record_failure");
+    // A task-scoped command passes the ownership guard only for the conversation's client, and then finds no task.
+    const address = { conversation_id: current, task_id: "task_none" };
+    expect(ackError(await other.send("interrupt_task", address))).toEqual({
+      code: "busy",
+      message: "the conversation belongs to another client",
+    });
+    const again = await ts.connect("client-A");
+    expect(ackError(await again.send("interrupt_task", address)).code).toBe("not_found");
+  });
+
   it("refuses a start whose prompt is a FIFO or too large, without waiting on it", async () => {
     const promptFile = ts.profile.runtime.agentPromptFile;
     rmSync(promptFile);

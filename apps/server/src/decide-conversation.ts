@@ -15,7 +15,12 @@ import {
   type TaskStatus,
   type ToolCallPolicy,
 } from "@mia/protocol";
-import { mcpPayload, type ArtifactKind, type LinkRelation } from "@mia/records";
+import {
+  conversationDirectory,
+  mcpPayload,
+  type ArtifactKind,
+  type LinkRelation,
+} from "@mia/records";
 import { captureFields, type DeclaredArtifact, type Retention } from "./artifact-capture.ts";
 import {
   callById,
@@ -35,7 +40,13 @@ import {
 import type { EngineEffect, PermissionAnswer } from "./engine-effects.ts";
 import type { EngineRecord } from "./engine-records.ts";
 import { MCP_BODY_EVENT, type McpBodyRecord } from "./mcp-bodies.ts";
-import { TransitionDraft, taskLinks, type Origin } from "./transition-draft.ts";
+import { provenanceLinks, provenanceRecords, type NamedProvenancePlan } from "./provenance.ts";
+import {
+  TransitionDraft,
+  taskLinks,
+  type BuiltTransition,
+  type Origin,
+} from "./transition-draft.ts";
 import {
   bindPermissionRequest,
   bindStreamProposal,
@@ -59,10 +70,13 @@ import {
  * state (see `ConversationState`). Each transition composes the rules of ./transitions.ts into the records to commit,
  * the effects to perform once they have, and the next state, and every id it may record comes in with its event,
  * drawn at the boundary. It reads nothing else and changes nothing, so the engine commits what it returns and a
- * test checks it directly. It covers every transition of a started conversation: task submission, how approvals end
- * (a user's decision, an interruption, and the runtime abandoning a held prompt), the runtime's permission requests,
- * the events the runtime reports, the turn's end, and the client's diagnostics and disconnect. Only the conversation
- * start, which has no conversation to decide from yet, is still built by the engine.
+ * test checks it directly. It covers every transition of a conversation: its start, task submission, how approvals
+ * end (a user's decision, an interruption, and the runtime abandoning a held prompt), the runtime's permission
+ * requests, the events the runtime reports, the turn's end, and the client's diagnostics and disconnect.
+ *
+ * Its state is `ConversationState | null`: one machine per conversation, null until that conversation's start
+ * commits. The start is the one transition decided from null, and every other needs a started conversation. The
+ * conversation a start closes is the previous machine's, so the start names it by id rather than deciding from it.
  */
 
 /** A user's decision on a pending approval, from `deciderClientId`. */
@@ -285,7 +299,49 @@ export interface ClientDisconnectedEvent {
   ids: { event: string };
 }
 
+/**
+ * The ids a conversation start records: the conversation, the id the runtime's session takes, and its
+ * provenance_recorded, conversation_started and (in debug mode) captured_in_debug_mode events. Its provenance rows
+ * take the ids named with the stored plan (`NamedProvenancePlan`).
+ */
+export interface StartIds {
+  conversation: string;
+  runtimeConversation: string;
+  provenanceRecorded: string;
+  started: string;
+  captured: string;
+}
+
+/**
+ * A client starts a conversation. The boundary has read the files that shape it and stored and named its provenance
+ * before this is decided, because reads and stores can take long, and has checked that nothing forbids the start (a
+ * running task, another client, shutdown), which only the previous conversation's state can tell.
+ */
+export interface ConversationStartEvent {
+  kind: "start_conversation";
+  /**
+   * The client starting the conversation, and the connection it is reached through: the one that asked, or, when that
+   * one closed while the start awaited its I/O, whichever its client has adopted since, or none.
+   */
+  origin: Origin;
+  /** The conversation active until now, which the start's commit closes; null for the server's first. */
+  closes: string | null;
+  provenance: NamedProvenancePlan;
+  /**
+   * Where the agent prompt the provenance retains is stored (see `agentPromptObject`), or null when the prompt file
+   * was missing. Every turn appends those very bytes: the runtime reads the retained object itself, so no second read
+   * of the prompt file or copy of it can drift from the record.
+   */
+  promptFile: string | null;
+  /** The catalog's root for conversation directories, under which the conversation's own is named. */
+  conversationsRoot: string;
+  /** Debug mode, chosen once per server start (see `EngineDeps.debugMode`). */
+  debugMode: boolean;
+  ids: StartIds;
+}
+
 export type ConversationEvent =
+  | ConversationStartEvent
   | TaskSubmittedEvent
   | TurnEndedEvent
   | DiagnosticsReportedEvent
@@ -299,6 +355,12 @@ export type ConversationEvent =
 
 /** The event names a task that is not the conversation's: a command or callback of a task that has ended. */
 type NoTask = { kind: "no_task" };
+
+/** A start of a conversation that has already started: each conversation starts once. */
+export type StartRejection = { kind: "already_started" };
+
+/** An event of a conversation whose start has not committed: only a start can come first. */
+type NotStarted = { kind: "not_started" };
 
 export type ApprovalDecisionRejection = NoTask | { kind: "not_owner" } | { kind: "not_pending" };
 
@@ -339,6 +401,8 @@ export type SubmissionRejection = {
 };
 
 export type ConversationRejection =
+  | StartRejection
+  | NotStarted
   | SubmissionRejection
   | NoTask
   | ApprovalDecisionRejection
@@ -1475,43 +1539,139 @@ export const disconnectTransition: ConversationTransition<ClientDisconnectedEven
   return draft.accepted();
 };
 
-/** Every transition of the conversation, as one kernel machine's `decide`. */
+/**
+ * Start the conversation: its provenance rows, the conversation that names them and its links to them, the close of
+ * the conversation it replaces, then its provenance_recorded and conversation_started events, and in debug mode
+ * captured_in_debug_mode, all in one commit. Built from no conversation, so it is never refused; the machine refuses
+ * a start of one already started (`conversationStartTransition`).
+ */
+export const conversationStart = (input: {
+  event: ConversationStartEvent;
+  now: Date;
+}): BuiltTransition => {
+  const { event, now } = input;
+  const { ids, provenance: plan } = event;
+  const draft = new TransitionDraft({ state: null, now, origin: event.origin });
+  const startedAt = draft.at;
+  const { records: provenanceRows, summary: provenance } = provenanceRecords(plan, startedAt);
+  const conversationId = ids.conversation;
+  draft.write(...provenanceRows, {
+    kind: "create_conversation",
+    input: {
+      id: conversationId,
+      startedAt,
+      provenanceSetId: provenance.provenance_set_id,
+      runtimeConversationId: ids.runtimeConversation,
+    },
+  });
+  draft.write(...provenanceLinks({ conversationId, plan }));
+  if (event.closes !== null)
+    draft.write({ kind: "update_conversation", id: event.closes, fields: { status: "closed" } });
+  draft.advance({
+    id: conversationId,
+    runtimeConversationId: ids.runtimeConversation,
+    provenanceSetId: provenance.provenance_set_id,
+    directory: conversationDirectory({
+      root: event.conversationsRoot,
+      id: conversationId,
+      startedAt,
+    }),
+    promptFile: event.promptFile,
+    turnCount: 0,
+    sessionStarted: false,
+    epoch: 0,
+    pendingNote: null,
+    task: null,
+  });
+  draft.record("provenance_recorded", provenance, { id: ids.provenanceRecorded });
+  draft.emit(
+    {
+      type: "conversation_started",
+      payload: {
+        conversation_id: conversationId,
+        started_at: startedAt,
+        provenance_set_id: provenance.provenance_set_id,
+      },
+    },
+    { id: ids.started },
+  );
+  // After conversation_started, so that event keeps the sequence it has with debug mode off.
+  if (event.debugMode) draft.record("captured_in_debug_mode", {}, { id: ids.captured });
+  return draft.accepted();
+};
+
+/** A start decided by the conversation's machine: from no conversation (null) only, as each starts once. */
+export const conversationStartTransition = (input: {
+  state: ConversationState | null;
+  event: ConversationStartEvent;
+  now: Date;
+}): ConversationDecision<StartRejection> =>
+  input.state === null ? conversationStart(input) : rejected({ kind: "already_started" });
+
+/** Decide with `transition` over a started conversation; before its start commits, nothing but a start is decided. */
+const whenStarted = (
+  state: ConversationState | null,
+  transition: (started: ConversationState) => ConversationDecision,
+): ConversationDecision => (state === null ? rejected({ kind: "not_started" }) : transition(state));
+
+/** Every transition of one conversation, as its kernel machine's `decide`, from before its start (null). */
 export const decideConversation: Decide<
-  ConversationState,
+  ConversationState | null,
   ConversationEvent,
   ConversationRejection,
   EngineRecord,
   EngineEffect
 > = ({ state, event, now }) =>
   match(event)
-    .with({ kind: "submit_task" }, (submitted): ConversationDecision =>
-      taskSubmissionTransition({ state, event: submitted, now }),
+    .with({ kind: "start_conversation" }, (start): ConversationDecision =>
+      conversationStartTransition({ state, event: start, now }),
     )
-    .with({ kind: "turn_ended" }, (ended): ConversationDecision =>
-      turnEndTransition({ state, event: ended, now }),
+    .with({ kind: "submit_task" }, (submitted) =>
+      whenStarted(state, (started) =>
+        taskSubmissionTransition({ state: started, event: submitted, now }),
+      ),
     )
-    .with({ kind: "client_diagnostics" }, (reported): ConversationDecision =>
-      diagnosticsTransition({ state, event: reported, now }),
+    .with({ kind: "turn_ended" }, (ended) =>
+      whenStarted(state, (started) => turnEndTransition({ state: started, event: ended, now })),
     )
-    .with({ kind: "client_disconnected" }, (disconnected): ConversationDecision =>
-      disconnectTransition({ state, event: disconnected, now }),
+    .with({ kind: "client_diagnostics" }, (reported) =>
+      whenStarted(state, (started) =>
+        diagnosticsTransition({ state: started, event: reported, now }),
+      ),
     )
-    .with({ kind: "approval_decision" }, (decision): ConversationDecision =>
-      approvalDecisionTransition({ state, event: decision, now }),
+    .with({ kind: "client_disconnected" }, (disconnected) =>
+      whenStarted(state, (started) =>
+        disconnectTransition({ state: started, event: disconnected, now }),
+      ),
     )
-    .with({ kind: "interrupt_task" }, (interruption): ConversationDecision =>
-      interruptionTransition({ state, event: interruption, now }),
+    .with({ kind: "approval_decision" }, (decision) =>
+      whenStarted(state, (started) =>
+        approvalDecisionTransition({ state: started, event: decision, now }),
+      ),
     )
-    .with({ kind: "prompt_abandoned" }, (abandoned): ConversationDecision =>
-      abandonmentTransition({ state, event: abandoned, now }),
+    .with({ kind: "interrupt_task" }, (interruption) =>
+      whenStarted(state, (started) =>
+        interruptionTransition({ state: started, event: interruption, now }),
+      ),
     )
-    .with({ kind: "permission_request" }, (request): ConversationDecision =>
-      permissionRequestTransition({ state, event: request, now }),
+    .with({ kind: "prompt_abandoned" }, (abandoned) =>
+      whenStarted(state, (started) =>
+        abandonmentTransition({ state: started, event: abandoned, now }),
+      ),
     )
-    .with({ kind: "permission_refused" }, (refused): ConversationDecision =>
-      permissionRefusedTransition({ state, event: refused, now }),
+    .with({ kind: "permission_request" }, (request) =>
+      whenStarted(state, (started) =>
+        permissionRequestTransition({ state: started, event: request, now }),
+      ),
     )
-    .with({ kind: "runtime_event" }, (received): ConversationDecision =>
-      runtimeEventTransition({ state, event: received, now }),
+    .with({ kind: "permission_refused" }, (refused) =>
+      whenStarted(state, (started) =>
+        permissionRefusedTransition({ state: started, event: refused, now }),
+      ),
+    )
+    .with({ kind: "runtime_event" }, (received) =>
+      whenStarted(state, (started) =>
+        runtimeEventTransition({ state: started, event: received, now }),
+      ),
     )
     .exhaustive();

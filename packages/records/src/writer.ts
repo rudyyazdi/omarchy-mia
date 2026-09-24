@@ -157,6 +157,16 @@ export interface ExecutionUsage {
 }
 
 /**
+ * The directory a conversation recorded with this id and start time owns, under `root` (a catalog's
+ * `paths.conversations`). A pure path, so a caller can name it before the conversation's transaction commits.
+ */
+export const conversationDirectory = (input: {
+  root: string;
+  id: string;
+  startedAt: string;
+}): string => join(input.root, `${input.startedAt.replace(/[:.]/g, "-")}_${input.id}`);
+
+/**
  * All writes to the private catalog go through here. Payloads are redacted before persistence.
  * Callers wrap related writes in catalog.transaction so events and state rows commit together.
  *
@@ -380,19 +390,8 @@ export class RecordWriter {
   // ---- conversations, tasks, executions ----
 
   /**
-   * The directory a conversation recorded with this id and start time owns. A pure path, so a caller can name it
-   * before the conversation's transaction commits.
-   */
-  conversationDirectory(input: { id: string; startedAt: string }): string {
-    return join(
-      this.catalog.paths.conversations,
-      `${input.startedAt.replace(/[:.]/g, "-")}_${input.id}`,
-    );
-  }
-
-  /**
-   * Records a conversation and names its directory (`conversationDirectory`) without creating it, so recording one
-   * does no file I/O; whoever first writes into the directory creates it.
+   * Records a conversation and names its directory (`conversationDirectory`, under the catalog's conversations root)
+   * without creating it, so recording one does no file I/O; whoever first writes into the directory creates it.
    */
   createConversation(input: {
     id: string;
@@ -401,7 +400,11 @@ export class RecordWriter {
     runtimeConversationId: string;
   }): { directory: string } {
     const { id, startedAt } = input;
-    const directory = this.conversationDirectory({ id, startedAt });
+    const directory = conversationDirectory({
+      root: this.catalog.paths.conversations,
+      id,
+      startedAt,
+    });
     this.catalog.insert("conversations", {
       id,
       started_at: startedAt,

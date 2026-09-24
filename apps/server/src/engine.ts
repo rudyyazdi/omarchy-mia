@@ -26,13 +26,7 @@ import {
   type ErrorCode,
   type ServerEvent,
 } from "@mia/protocol";
-import {
-  type Catalog,
-  type IdPrefix,
-  type NewId,
-  type RecordWriter,
-  type StoredObject,
-} from "@mia/records";
+import { type Catalog, type NewId, type RecordWriter, type StoredObject } from "@mia/records";
 import {
   extractDeclaredArtifact,
   type Capture,
@@ -59,6 +53,7 @@ import {
 import {
   abandonmentTransition,
   approvalDecisionTransition,
+  conversationStart,
   diagnosticsTransition,
   disconnectTransition,
   interruptionTransition,
@@ -71,6 +66,7 @@ import {
   turnNote,
   type CapturedOutput,
   type ConversationDecision,
+  type ConversationStartEvent,
   type ConversationTransition,
   type OutputIds,
   type RuntimeReport,
@@ -79,16 +75,15 @@ import {
 import type { EngineEffect, OutgoingEvent, PermissionAnswer, TurnStart } from "./engine-effects.ts";
 import { commitRecords, eventSequence, type CommittedChange } from "./engine-records.ts";
 import {
+  agentPromptObject,
   nameProvenance,
   planConversationProvenance,
-  provenanceLinks,
-  provenanceRecords,
   readConversationFiles,
   storeProvenance,
   type ProvenancePlan,
   type ServerIdentity,
 } from "./provenance.ts";
-import { TransitionDraft, type BuiltTransition, type Origin } from "./transition-draft.ts";
+import type { BuiltTransition, Origin } from "./transition-draft.ts";
 import {
   abandonedPromptDenial,
   bindToolResult,
@@ -199,9 +194,9 @@ export interface EngineDeps {
   /**
    * Names the conversations, tasks, executions, tool calls, approvals, events, provenance sets and entries, artifacts,
    * artifact links and diagnostics the engine records (see RecordWriter), and every event it sends: `newId`. Injected
-   * randomness, so a transition's ids are chosen before its records are written and can refer to each other. A
-   * transition draws every id it may record before its transaction opens, as a kernel dispatch will hand a pure
-   * `decide` its ids with the event; one whose outcome records fewer leaves the rest unused.
+   * randomness, so a transition's ids are chosen before its records are written and can refer to each other. The
+   * engine draws every id a transition may record before deciding it and hands them in with its event, since the
+   * pure transitions have no way to draw one; one whose outcome records fewer leaves the rest unused.
    */
   newId: NewId;
   /**
@@ -263,10 +258,9 @@ interface ActiveTurn {
 /**
  * Conversation/task coordinator plus approval and interruption controller. One conversation, one task,
  * one active client. The rules live in ./transitions.ts, and ./decide-conversation.ts composes them into pure
- * transitions for every recorded change to a started conversation; the engine commits what they decide, replaces its
- * state with the next one only after the commit, then performs the effects (see `commit`). Only the conversation
- * start, which has no conversation to decide from yet, the engine still builds itself, through the same draft (see
- * `tx`). A few memory-only changes, which record nothing, replace the state directly (see `current`).
+ * transitions for every recorded change to a conversation, its start included; the engine commits what they decide,
+ * replaces its state with the next one only after the commit, then performs the effects (see `commit`). A few
+ * memory-only changes, which record nothing, replace the state directly (see `current`).
  */
 export class Engine {
   activeConnectionId: string | null = null;
@@ -292,12 +286,6 @@ export class Engine {
    * so at most one command holds the gateway's reply across an await.
    */
   private starting: PendingStart | null = null;
-  /**
-   * The transition the engine is building (see `tx`), or null outside one. Its time is read once, as a kernel
-   * dispatch hands its `decide` one `now`, so the transition rows of one commit (see `EngineDeps.now`) agree on when
-   * it happened.
-   */
-  private open: TransitionDraft | null = null;
   /**
    * The runtime's permission prompts waiting for the user's decision, keyed by approval id. Each is answered once:
    * by an `answer_prompt` effect after a commit, by its abandonment, or once its turn has ended (startTurn).
@@ -337,26 +325,9 @@ export class Engine {
     return task?.id === taskId ? task : null;
   }
 
-  /** The transition in progress (inside tx). */
-  private get transition(): TransitionDraft {
-    if (this.open === null) throw new Error("engine records only inside a transaction");
-    return this.open;
-  }
-
   /** The client and connection a transition decided now records its events under. */
   private get origin(): Origin {
     return { clientId: this.activeClientId, connectionId: this.activeConnectionId };
-  }
-
-  /**
-   * Draws a fresh id (see `EngineDeps.newId`). Only outside a transaction: a transition draws every id it records
-   * before its transaction opens and hands them in, as a kernel dispatch will hand a pure `decide` its ids with the
-   * event, so a draw inside one is a bug and throws, which fails that commit.
-   */
-  private newId(prefix: IdPrefix): string {
-    if (this.open !== null)
-      throw new Error("ids are drawn before a transaction opens, never inside one");
-    return this.deps.newId(prefix);
   }
 
   /** The conversation every guarded command and runtime callback operates on; callers check for one first. */
@@ -368,38 +339,14 @@ export class Engine {
   // ---------------------------------------------------------------- event plumbing
 
   /**
-   * Run the one transition the engine still builds itself, the conversation start: `build` queues its records without
-   * touching the catalog and moves the draft state (see `TransitionDraft`), then `commit` commits what it built. A
-   * build that throws commits nothing, keeps the state it started from and performs no queued effect.
-   */
-  private tx<T>(build: () => T): T {
-    // A transition inside another would commit the outer one's half-built records.
-    if (this.open !== null) throw new Error("transitions do not nest");
-    const draft = new TransitionDraft({
-      state: this.current,
-      now: this.deps.now(),
-      origin: this.origin,
-    });
-    this.open = draft;
-    let result: T;
-    try {
-      result = build();
-    } finally {
-      this.open = null;
-    }
-    this.commit(draft.built());
-    return result;
-  }
-
-  /**
    * Decide one transition of the active conversation with the pure machine (see ./decide-conversation.ts), reading
-   * the clock once for it; an accepted decision is committed with `commit`.
+   * the clock once for it, as a kernel dispatch hands its `decide` one `now`, so the transition rows of one commit
+   * (see `EngineDeps.now`) agree on when it happened; an accepted decision is committed with `commit`.
    */
   private decide<Event, Rejection>(
     transition: ConversationTransition<Event, Rejection>,
     event: Event,
   ): ConversationDecision<Rejection> {
-    if (this.open !== null) throw new Error("transitions do not nest");
     return transition({ state: this.activeConversation, event, now: this.deps.now() });
   }
 
@@ -411,7 +358,6 @@ export class Engine {
    * stand.
    */
   private commit(built: BuiltTransition): void {
-    if (this.open !== null) throw new Error("transitions do not nest");
     const changes = commitRecords(this.deps.writer, built.records);
     this.current = built.next;
     for (const effect of built.effects) {
@@ -434,7 +380,10 @@ export class Engine {
         this.deliver(event, { id: eventId, sequence: eventSequence(changes, eventId) }),
       )
       .with({ kind: "notify_tool_call" }, ({ payload }) =>
-        this.deliver({ type: "tool_call", payload }, { id: this.newId("evt"), sequence: null }),
+        this.deliver(
+          { type: "tool_call", payload },
+          { id: this.deps.newId("evt"), sequence: null },
+        ),
       )
       .with({ kind: "answer_prompt" }, ({ approvalId, decision }) =>
         this.prompts.reply(approvalId, decision),
@@ -585,92 +534,46 @@ export class Engine {
     connected: boolean;
   }): CommandResult {
     const { ctx, plan, connected } = input;
-    const { writer } = this.deps;
-    const ids = {
-      provenance: nameProvenance(plan, (prefix) => this.newId(prefix)),
-      conversation: this.newId("conv"),
-      runtimeConversation: randomUUID(),
-      provenanceRecorded: this.newId("evt"),
-      started: this.newId("evt"),
-      debugMode: this.newId("evt"),
+    const provenance = nameProvenance(plan, this.deps.newId);
+    const prompt = agentPromptObject(provenance);
+    const event: ConversationStartEvent = {
+      kind: "start_conversation",
+      // Disconnected, the active connection is none or one of this client's (refuseStart), so it stays.
+      origin: {
+        clientId: ctx.clientId,
+        connectionId: connected ? ctx.connectionId : this.activeConnectionId,
+      },
+      closes: this.current?.id ?? null,
+      provenance,
+      promptFile: prompt === null ? null : this.deps.writer.objects.pathFor(prompt.digest),
+      conversationsRoot: this.deps.catalog.paths.conversations,
+      debugMode: this.deps.debugMode,
+      ids: {
+        conversation: this.deps.newId("conv"),
+        runtimeConversation: randomUUID(),
+        provenanceRecorded: this.deps.newId("evt"),
+        started: this.deps.newId("evt"),
+        captured: this.deps.newId("evt"),
+      },
     };
-    const previous = {
-      conversation: this.current,
-      connection: this.activeConnectionId,
-      client: this.activeClientId,
-    };
+    const previous = { connection: this.activeConnectionId, client: this.activeClientId };
     try {
-      // Unlike the conversation, which moves with the draft, this sets the active connection and client before the
-      // transition opens, because its events are recorded under them (`origin`); the catch below restores them if the
-      // build or commit throws. Disconnected, the active connection is none or one of this client's (refuseStart), so
-      // it stays.
-      if (connected) this.activeConnectionId = ctx.connectionId;
-      this.activeClientId = ctx.clientId;
-      return this.tx(() => {
-        const startedAt = this.transition.at;
-        const { records: provenanceRows, summary: provenance } = provenanceRecords(
-          ids.provenance,
-          startedAt,
-        );
-        const runtimeConversationId = ids.runtimeConversation;
-        const conversationId = ids.conversation;
-        this.transition.write(...provenanceRows, {
-          kind: "create_conversation",
-          input: {
-            id: conversationId,
-            startedAt,
-            provenanceSetId: provenance.provenance_set_id,
-            runtimeConversationId,
-          },
-        });
-        this.transition.write(...provenanceLinks({ conversationId, plan: ids.provenance }));
-        if (previous.conversation)
-          this.transition.write({
-            kind: "update_conversation",
-            id: previous.conversation.id,
-            fields: { status: "closed" },
-          });
-        // Every turn of this conversation appends the prompt bytes recorded in provenance: the runtime reads the
-        // retained object itself, so no second read of the prompt file or copy of it can drift from the record.
-        const promptFile =
-          provenance.agent_prompt_digest === null
-            ? null
-            : writer.objects.pathFor(provenance.agent_prompt_digest);
-        this.transition.advance({
-          id: conversationId,
-          runtimeConversationId,
-          provenanceSetId: provenance.provenance_set_id,
-          directory: writer.conversationDirectory({ id: conversationId, startedAt }),
-          promptFile,
-          turnCount: 0,
-          sessionStarted: false,
-          epoch: 0,
-          pendingNote: null,
-          task: null,
-        });
-        this.transition.record("provenance_recorded", provenance, { id: ids.provenanceRecorded });
-        this.transition.emit(
-          {
-            type: "conversation_started",
-            payload: {
-              conversation_id: conversationId,
-              started_at: startedAt,
-              provenance_set_id: provenance.provenance_set_id,
-            },
-          },
-          { id: ids.started },
-        );
-        // After conversation_started, so that event keeps the sequence it has with debug mode off.
-        if (this.deps.debugMode)
-          this.transition.record("captured_in_debug_mode", {}, { id: ids.debugMode });
-        return {
-          ok: true,
-          result: {
-            conversation_id: conversationId,
-            provenance_set_id: provenance.provenance_set_id,
-          },
-        };
-      });
+      // Built from no state: the conversation starting has none until its start commits, and the one it closes is
+      // named by id (see ./decide-conversation.ts).
+      const decision = conversationStart({ event, now: this.deps.now() });
+      // Unlike the conversation, which moves with the commit, the active connection and client are set before it,
+      // because the start's effects deliver conversation_started to the connection active when they run; the catch
+      // below restores them if the commit throws.
+      this.activeConnectionId = event.origin.connectionId;
+      this.activeClientId = event.origin.clientId;
+      this.commit(decision);
+      return {
+        ok: true,
+        result: {
+          conversation_id: decision.next.id,
+          provenance_set_id: decision.next.provenanceSetId,
+        },
+      };
     } catch (error) {
       this.activeConnectionId = previous.connection;
       this.activeClientId = previous.client;
@@ -695,10 +598,10 @@ export class Engine {
         effort: this.deps.profile.runtime.effort,
       },
       ids: {
-        task: this.newId("task"),
-        execution: this.newId("exec"),
-        submitted: this.newId("evt"),
-        started: this.newId("evt"),
+        task: this.deps.newId("task"),
+        execution: this.deps.newId("exec"),
+        submitted: this.deps.newId("evt"),
+        started: this.deps.newId("evt"),
       },
     });
     if (decision.kind === "rejected") {
@@ -799,7 +702,7 @@ export class Engine {
       approvalId,
       decision: payload.decision,
       deciderClientId: ctx.clientId,
-      ids: { resolved: this.newId("evt"), dispatched: this.newId("evt") },
+      ids: { resolved: this.deps.newId("evt"), dispatched: this.deps.newId("evt") },
     });
     if (decision.kind === "rejected")
       return match(decision.rejection)
@@ -865,7 +768,7 @@ export class Engine {
    * `interruptionTransition`).
    */
   private interrupt(task: TaskState): CommandResult {
-    const requested = this.newId("evt");
+    const requested = this.deps.newId("evt");
     const decision = this.decide(interruptionTransition, {
       kind: "interrupt_task",
       origin: this.origin,
@@ -873,7 +776,7 @@ export class Engine {
       ids: {
         requested,
         resolved: new Map(
-          task.pendingApprovals.keys().map((approvalId) => [approvalId, this.newId("evt")]),
+          task.pendingApprovals.keys().map((approvalId) => [approvalId, this.deps.newId("evt")]),
         ),
       },
     });
@@ -911,7 +814,7 @@ export class Engine {
     const about = Boolean(
       payload.conversation_id && this.conversation?.id === payload.conversation_id,
     );
-    const ids = { event: this.newId("evt"), diagnostics: this.newId("diag") };
+    const ids = { event: this.deps.newId("evt"), diagnostics: this.deps.newId("diag") };
     try {
       if (about) {
         const decision = this.decide(diagnosticsTransition, {
@@ -952,7 +855,7 @@ export class Engine {
           ? payload.conversation_id
           : null;
       this.deps.writer.recordDiagnostics({
-        id: this.newId("diag"),
+        id: this.deps.newId("diag"),
         receivedAt: this.deps.now().toISOString(),
         conversationId,
         clientId: ctx.clientId,
@@ -977,7 +880,7 @@ export class Engine {
           kind: "client_disconnected",
           origin: this.origin,
           connectionId,
-          ids: { event: this.newId("evt") },
+          ids: { event: this.deps.newId("evt") },
         });
         // Never rejected: a disconnect of the conversation's connection is always recorded.
         if (decision.kind === "accepted") this.commit(decision);
@@ -1088,10 +991,10 @@ export class Engine {
       }));
     const retention = await this.store(capture, this.stopping.signal);
     const ids: OutputIds = {
-      artifact: this.newId("art"),
-      resultLink: this.newId("link"),
-      outputLink: this.newId("link"),
-      registered: this.newId("evt"),
+      artifact: this.deps.newId("art"),
+      resultLink: this.deps.newId("link"),
+      outputLink: this.deps.newId("link"),
+      registered: this.deps.newId("evt"),
     };
     return { ids, declared, retention };
   }
@@ -1165,7 +1068,7 @@ export class Engine {
         return unrecordedBodies(`the body log could not be parsed: ${errorMessage(error)}`);
       }
     })();
-    return bodies.map((body) => ({ ...body, eventId: this.newId("evt") }));
+    return bodies.map((body) => ({ ...body, eventId: this.deps.newId("evt") }));
   }
 
   /**
@@ -1199,10 +1102,10 @@ export class Engine {
         taskId,
         report,
         ids: {
-          event: this.newId("evt"),
-          resolved: this.newId("evt"),
-          call: this.newId("call"),
-          unmatched: this.newId("evt"),
+          event: this.deps.newId("evt"),
+          resolved: this.deps.newId("evt"),
+          call: this.deps.newId("call"),
+          unmatched: this.deps.newId("evt"),
         },
       });
       if (decision.kind === "rejected") {
@@ -1264,12 +1167,12 @@ export class Engine {
       policy: policyFor(this.deps.profile.runtime, req.toolName),
       promptsFull: this.prompts.full,
       ids: {
-        resolved: this.newId("evt"),
-        proposal: this.newId("evt"),
-        call: this.newId("call"),
-        evaluation: this.newId("evt"),
-        outcome: this.newId("evt"),
-        approval: this.newId("appr"),
+        resolved: this.deps.newId("evt"),
+        proposal: this.deps.newId("evt"),
+        call: this.deps.newId("call"),
+        evaluation: this.deps.newId("evt"),
+        outcome: this.deps.newId("evt"),
+        approval: this.deps.newId("appr"),
       },
     });
     if (decision.kind === "rejected")
@@ -1337,7 +1240,7 @@ export class Engine {
         origin: this.origin,
         taskId,
         detail,
-        ids: { event: this.newId("evt") },
+        ids: { event: this.deps.newId("evt") },
       });
       // Rejected, the task ended; unreachable, as the refusal was decided against it just before.
       if (decision.kind === "accepted") this.commit(decision);
@@ -1360,7 +1263,7 @@ export class Engine {
       origin: this.origin,
       taskId,
       callId,
-      ids: { resolved: this.newId("evt") },
+      ids: { resolved: this.deps.newId("evt") },
     });
     // Rejected, the approval was no longer pending (or the call is gone), so there is nothing to expire.
     if (decision.kind === "accepted") {
@@ -1431,11 +1334,11 @@ export class Engine {
       return;
     }
     const ids = {
-      transcript: { artifact: this.newId("art"), link: this.newId("link") },
-      hooks: { artifact: this.newId("art"), link: this.newId("link") },
-      outcome: this.newId("evt"),
-      finished: this.newId("evt"),
-      error: this.newId("evt"),
+      transcript: { artifact: this.deps.newId("art"), link: this.deps.newId("link") },
+      hooks: { artifact: this.deps.newId("art"), link: this.deps.newId("link") },
+      outcome: this.deps.newId("evt"),
+      finished: this.deps.newId("evt"),
+      error: this.deps.newId("evt"),
     };
     try {
       // Every approval the records still hold pending (see `TurnEndedEvent.stillPending`). Read just before the

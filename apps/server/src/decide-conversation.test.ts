@@ -16,8 +16,8 @@ import {
   releasedBy,
   type ApprovalDecisionEvent,
   type CapturedOutput,
-  type ConversationDecision,
   type ClientDisconnectedEvent,
+  type ConversationStartEvent,
   type ConversationEvent,
   type DiagnosticsReportedEvent,
   type InterruptTaskEvent,
@@ -33,6 +33,8 @@ import {
 import type { EngineEffect } from "./engine-effects.ts";
 import type { EngineRecord } from "./engine-records.ts";
 import type { McpBodyRecord } from "./mcp-bodies.ts";
+import type { NamedProvenancePlan } from "./provenance.ts";
+import type { BuiltTransition } from "./transition-draft.ts";
 
 const NOW = new Date("2026-09-24T12:00:00.000Z");
 const AT = NOW.toISOString();
@@ -89,12 +91,18 @@ const expectStillAwaiting = (state: ConversationState): void => {
   expect(state.task && callById(state.task, "call_1")?.status).toBe("awaiting_approval");
 };
 
-const decide = (state: ConversationState, event: ConversationEvent): ConversationDecision =>
+/** What the conversation's machine decides, from a started conversation or from none (null). */
+type Decided = ReturnType<typeof decideConversation>;
+
+const decide = (state: ConversationState | null, event: ConversationEvent): Decided =>
   decideConversation({ state, event, now: NOW });
 
-const accepted = (decision: ConversationDecision) => {
+/** An accepted decision, whose next state is always a started conversation. */
+const accepted = (decision: Decided): BuiltTransition => {
   if (decision.kind !== "accepted") throw new Error(`rejected: ${decision.rejection.kind}`);
-  return decision;
+  const { next } = decision;
+  if (next === null) throw new Error("accepted without a conversation");
+  return { ...decision, next };
 };
 
 /** Each record as its event type, or its writer operation. */
@@ -1201,5 +1209,178 @@ describe("disconnect", () => {
     expect(accepted(decide(idle(), disconnect())).records).toMatchObject([
       { input: { payload: { pending_approvals: [] }, taskId: null } },
     ]);
+  });
+});
+
+/** A stored, named provenance plan: the agent prompt retained, the architecture document unavailable. */
+const startPlan: NamedProvenancePlan = {
+  setId: "prov_new",
+  description: "test",
+  items: [
+    {
+      availability: "retained",
+      role: "agent_prompt",
+      content: { digest: "digest_prompt", byteCount: 1, storageKey: "key_prompt" },
+      version: "v1",
+      mime: "text/markdown",
+      logicalName: "agent_prompt",
+      entryId: "pe_prompt",
+      artifactId: "art_prompt",
+      linkId: "link_prompt",
+    },
+    {
+      availability: "unavailable",
+      role: "architecture",
+      reason: "missing",
+      entryId: "pe_architecture",
+    },
+  ],
+  summary: {
+    agent_prompt_version: "v1",
+    configuration_digest: "config",
+    architecture_revision: null,
+    server_build: {
+      name: "mia",
+      version: "0",
+      commit: null,
+      dirty: null,
+      local_changes_digest: null,
+      source_root: "/",
+    },
+    runtime_version: null,
+  },
+};
+
+const start = (overrides: Partial<ConversationStartEvent> = {}): ConversationStartEvent => ({
+  kind: "start_conversation",
+  origin: ORIGIN,
+  closes: "conv_1",
+  provenance: startPlan,
+  promptFile: "/tmp/objects/digest_prompt",
+  conversationsRoot: "/tmp/conversations",
+  debugMode: false,
+  ids: {
+    conversation: "conv_new",
+    runtimeConversation: "runtime_conv_new",
+    provenanceRecorded: "evt_provenance",
+    started: "evt_started",
+    captured: "evt_debug",
+  },
+  ...overrides,
+});
+
+describe("conversation start", () => {
+  it("records the provenance, the conversation and the close of the one it replaces, then tells the client", () => {
+    const { next, records, effects } = accepted(decide(null, start()));
+    expect(labels(records)).toEqual([
+      "create_provenance_set",
+      "register_artifact",
+      "add_provenance_entry",
+      "add_provenance_entry",
+      "create_conversation",
+      "link_artifact",
+      "update_conversation",
+      "provenance_recorded",
+      "conversation_started",
+    ]);
+    expect(records).toContainEqual({
+      kind: "create_conversation",
+      input: {
+        id: "conv_new",
+        startedAt: AT,
+        provenanceSetId: "prov_new",
+        runtimeConversationId: "runtime_conv_new",
+      },
+    });
+    expect(records).toContainEqual({
+      kind: "link_artifact",
+      input: {
+        id: "link_prompt",
+        conversationId: "conv_new",
+        artifactId: "art_prompt",
+        relation: "provenance",
+        provenanceSetId: "prov_new",
+      },
+    });
+    expect(records).toContainEqual({
+      kind: "update_conversation",
+      id: "conv_1",
+      fields: { status: "closed" },
+    });
+    // Both events belong to the new conversation, under the client and connection that started it.
+    expect(records.filter((record) => record.kind === "append_event")).toMatchObject([
+      {
+        input: {
+          id: "evt_provenance",
+          conversationId: "conv_new",
+          payload: { provenance_set_id: "prov_new", agent_prompt_digest: "digest_prompt" },
+          clientId: ORIGIN.clientId,
+          clientConnectionId: ORIGIN.connectionId,
+          taskId: null,
+        },
+      },
+      {
+        input: {
+          id: "evt_started",
+          conversationId: "conv_new",
+          payload: {
+            conversation_id: "conv_new",
+            started_at: AT,
+            provenance_set_id: "prov_new",
+          },
+        },
+      },
+    ]);
+    expect(effects).toMatchObject([
+      { kind: "deliver_event", eventId: "evt_started", event: { type: "conversation_started" } },
+    ]);
+    expect(next).toEqual({
+      id: "conv_new",
+      runtimeConversationId: "runtime_conv_new",
+      provenanceSetId: "prov_new",
+      directory: `/tmp/conversations/${AT.replace(/[:.]/g, "-")}_conv_new`,
+      promptFile: "/tmp/objects/digest_prompt",
+      turnCount: 0,
+      sessionStarted: false,
+      epoch: 0,
+      pendingNote: null,
+      task: null,
+    });
+  });
+
+  it("closes nothing for the server's first conversation, and records debug mode after conversation_started", () => {
+    const { records } = accepted(decide(null, start({ closes: null, debugMode: true })));
+    expect(labels(records)).not.toContain("update_conversation");
+    expect(labels(records).slice(-3)).toEqual([
+      "provenance_recorded",
+      "conversation_started",
+      "captured_in_debug_mode",
+    ]);
+    expect(records.at(-1)).toEqual({
+      kind: "append_event",
+      input: {
+        id: "evt_debug",
+        receivedAt: AT,
+        conversationId: "conv_new",
+        type: "captured_in_debug_mode",
+        payload: {},
+        taskId: null,
+        executionId: null,
+        clientId: ORIGIN.clientId,
+        clientConnectionId: ORIGIN.connectionId,
+        causedByEventId: null,
+      },
+    });
+  });
+
+  it("refuses a second start of a started conversation, and anything but a start before one", () => {
+    expect(decide(awaiting([]), start())).toEqual({
+      kind: "rejected",
+      rejection: { kind: "already_started" },
+    });
+    expect(decide(null, disconnect())).toEqual({
+      kind: "rejected",
+      rejection: { kind: "not_started" },
+    });
   });
 });

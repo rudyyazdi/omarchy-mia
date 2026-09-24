@@ -189,9 +189,9 @@ export const startTestServer = async (
     return collectArtifact(declared, outputDirectories);
   };
   let clock = () => new Date();
-  // Every id the engine records is drawn before its transaction opens (#132). The engine refuses a draw while a
-  // transition builds its records; this refuses one while the catalog commits them, where only writer calls run. Set
-  // once the server's catalog is open.
+  // Every id the engine records is drawn before its transaction opens (#132). The transitions are pure and cannot draw
+  // one; this refuses a draw while the catalog commits their records, where only writer calls run. Set once the
+  // server's catalog is open.
   let inTransaction = (): boolean => false;
   const drawOutsideTransactions = (prefix: Parameters<typeof newId>[0]): string => {
     if (inTransaction()) throw new Error(`id "${prefix}" drawn inside a transaction`);
