@@ -2089,6 +2089,38 @@ describe("conversation start", () => {
     expect(ackError(await again.send("interrupt_task", address)).code).toBe("not_found");
   });
 
+  it("makes another client's started conversation the active one, its own, before telling it", async () => {
+    const previous = must(client.conversationId, "conversation id");
+    client.close();
+    await tick();
+    await tick();
+    const { engine, gateway } = ts.server;
+    const told: {
+      to: string;
+      active: string | null;
+      client: string | null;
+      connection: string | null;
+    }[] = [];
+    engine.attachDelivery((connectionId, event) => {
+      if (event.type === "conversation_started")
+        told.push({
+          to: connectionId,
+          active: engine.conversation?.id ?? null,
+          client: engine.activeClientId,
+          connection: engine.activeConnectionId,
+        });
+      gateway.send(connectionId, event);
+    });
+    const other = await ts.connect("client-B");
+    const started = mustString(
+      ackResult(await other.send("start_conversation", {})).conversation_id,
+      "conversation id",
+    );
+    expect(started).not.toBe(previous);
+    const to = must(told[0], "conversation_started delivery").to;
+    expect(told).toEqual([{ to, active: started, client: "client-B", connection: to }]);
+  });
+
   it("refuses a start whose prompt is a FIFO or too large, without waiting on it", async () => {
     const promptFile = ts.profile.runtime.agentPromptFile;
     rmSync(promptFile);

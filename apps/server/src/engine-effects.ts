@@ -7,6 +7,16 @@ export type OutgoingEvent = {
 }[ServerEventType];
 
 /**
+ * The client and the connection a transition's events are recorded under: the conversation's active ones when the
+ * transition was decided. They are not part of the conversation's state (they belong with the client lifecycle), so
+ * the boundary reads them and hands them in with the event, as it does the ids.
+ */
+export interface Origin {
+  clientId: string | null;
+  connectionId: string | null;
+}
+
+/**
  * What a recorded permission request answers the runtime: at once, or by holding its prompt, under the approval the
  * request recorded for call `callId`, until the user decides.
  */
@@ -25,6 +35,11 @@ export interface TurnStart {
  * transition decides can then be returned by a pure `decide` and performed by the kernel. When and in what order
  * they are performed, and what a throwing one leaves standing, is the kernel's to say (see `createKernel`).
  *
+ * - `activate_conversation`: make the conversation just started the active one, owned by the client and reached
+ *   through the connection of `origin`. Only a conversation start's transition queues one, exactly one, as its first
+ *   effect: the engine's active conversation, client and connection then change together, only once the start has
+ *   committed (a start that does not commit leaves all three as they were, with nothing to restore), and before the
+ *   start's delivery of conversation_started, which goes to the connection this makes active.
  * - `deliver_event`: send a recorded event to the active connection. It carries the id the event was recorded
  *   under, and finds the sequence the catalog gave it among the commit's changes by that id.
  * - `notify_tool_call`: send a tool call's progress, which is never recorded (the durable evidence is the events
@@ -44,6 +59,7 @@ export interface TurnStart {
  *   nothing, and an adapter that throws as it starts the turn fails the command, not a delivery.
  */
 export type EngineEffect =
+  | { kind: "activate_conversation"; origin: Origin }
   | { kind: "deliver_event"; eventId: string; event: OutgoingEvent }
   | { kind: "notify_tool_call"; payload: EventPayload<"tool_call"> }
   | { kind: "answer_prompt"; approvalId: string; decision: PermissionDecision }

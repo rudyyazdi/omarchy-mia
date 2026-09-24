@@ -61,7 +61,13 @@ import {
   type RuntimeReport,
   type UnresultedBodies,
 } from "./decide-conversation.ts";
-import type { EngineEffect, OutgoingEvent, PermissionAnswer, TurnStart } from "./engine-effects.ts";
+import type {
+  EngineEffect,
+  Origin,
+  OutgoingEvent,
+  PermissionAnswer,
+  TurnStart,
+} from "./engine-effects.ts";
 import {
   commitEvents,
   committedEvents,
@@ -78,7 +84,6 @@ import {
   type ProvenancePlan,
   type ServerIdentity,
 } from "./provenance.ts";
-import type { Origin } from "./transition-draft.ts";
 import {
   abandonedPromptDenial,
   bindToolResult,
@@ -273,6 +278,10 @@ interface PendingStart {
   abandon: AbortController;
 }
 
+/** The answer to a start that recorded nothing, because `error` stopped it. */
+const notCreated = (error: unknown): CommandResult =>
+  fail("record_failure", `could not create conversation: ${errorMessage(error)}`);
+
 /** The answer to a start whose I/O shutdown abandoned, or null while it was not. */
 const abandonedStart = (pending: PendingStart): CommandResult | null =>
   pending.abandon.signal.aborted
@@ -301,11 +310,17 @@ interface ActiveTurn {
  * machine's state on, then performs the effects, so the engine never changes a conversation's state itself.
  */
 export class Engine {
+  /**
+   * The connection the active conversation's events are delivered to, and the client that owns the conversation. A
+   * start sets both with its conversation (`activate_conversation`); a disconnect clears the connection, and a
+   * reconnecting client adopts a new one (`adoptConnection`).
+   */
   activeConnectionId: string | null = null;
   activeClientId: string | null = null;
   /**
    * The active conversation's machine, null before the first start. Its state moves only through its dispatches (see
-   * `dispatch`), and is never null: a machine replaces this one only once its start has committed.
+   * `dispatch`), and is never null: a machine replaces this one only once its start has committed, as that start's
+   * first effect (`activate_conversation`).
    */
   private machine: ConversationMachine | null = null;
   /** The runtime running the active task's turn, if one has started (see ActiveTurn). */
@@ -337,7 +352,9 @@ export class Engine {
   private asking: Asking | null = null;
   /**
    * The task submission `submitText` is committing, or null outside that commit. The submission's `start_turn` effect
-   * writes its turn here, and `submitText` starts it once the commit has returned; at most one is ever set.
+   * writes its turn here, and `submitText` starts it once the commit has returned; at most one is ever set. The turn is
+   * started after the dispatch, not while the effect is performed, because the kernel logs an effect that throws as a
+   * delivery failure and moves on, whereas an adapter that cannot start the turn must fail the submission's command.
    */
   private submitting: Submitting | null = null;
 
@@ -393,14 +410,16 @@ export class Engine {
   private openConversation(conversationId: string): ConversationMachine {
     const kernel = createKernel<EngineRecord, EventChange, EngineEffect>({
       commit: (records) => commitEvents(this.deps.writer, records),
-      perform: (effect, changes) => this.perform(effect, { conversationId, changes }),
+      // Performed only from inside a dispatch into `machine`, so never before it is assigned below.
+      perform: (effect, changes) => this.perform(effect, { machine, conversationId, changes }),
       reportEffectFailure: (error) =>
         this.deps.log(`delivery failed after commit; records stand: ${errorMessage(error)}`),
       replay: committedEvents(this.deps.catalog, conversationId),
       now: () => this.deps.now(),
       limits: CONVERSATION_FEED_LIMITS,
     });
-    return kernel.machine(decideConversation, null);
+    const machine: ConversationMachine = kernel.machine(decideConversation, null);
+    return machine;
   }
 
   /** Dispatch one event into the active conversation's machine; callers check for a conversation first. */
@@ -431,16 +450,25 @@ export class Engine {
   }
 
   /**
-   * Perform one effect of a committed transition of conversation `conversationId`, once its machine's state has moved
-   * on. It reads the connection, the held prompts and the active turn as they are now, not as they were when the
-   * effect was queued.
+   * Perform one effect of a committed transition of conversation `conversationId`, whose machine is `machine`, once
+   * that machine's state has moved on. It reads the connection, the held prompts and the active turn as they are now,
+   * not as they were when the effect was queued.
    */
   private perform(
     effect: EngineEffect,
-    committed: { conversationId: string; changes: readonly EventChange[] },
+    committed: {
+      machine: ConversationMachine;
+      conversationId: string;
+      changes: readonly EventChange[];
+    },
   ): void {
-    const { conversationId, changes } = committed;
+    const { machine, conversationId, changes } = committed;
     match(effect)
+      .with({ kind: "activate_conversation" }, ({ origin }) => {
+        this.machine = machine;
+        this.activeConnectionId = origin.connectionId;
+        this.activeClientId = origin.clientId;
+      })
       .with({ kind: "deliver_event" }, ({ eventId, event }) =>
         this.deliver(event, {
           id: eventId,
@@ -582,10 +610,7 @@ export class Engine {
           { objects: this.deps.writer.objects, signal },
         );
       } catch (error) {
-        return (
-          abandonedStart(pending) ??
-          fail("record_failure", `could not create conversation: ${errorMessage(error)}`)
-        );
+        return abandonedStart(pending) ?? notCreated(error);
       }
       return (
         abandonedStart(pending) ??
@@ -630,42 +655,30 @@ export class Engine {
         captured: this.deps.newId("evt"),
       },
     };
-    const previous = { connection: this.activeConnectionId, client: this.activeClientId };
-    // Unlike the conversation, which becomes the active one only once its start commits, the active connection and
-    // client are set before the dispatch, because the start's effects deliver conversation_started to the connection
-    // active when they run; they are restored below if the start does not commit.
-    this.activeConnectionId = event.origin.connectionId;
-    this.activeClientId = event.origin.clientId;
     // The conversation starting has a machine of its own, from no state (see ./decide-conversation.ts); the one it
-    // closes is named by id. A start that does not commit drops the new machine, and the previous one stays active.
-    // The start's effects run inside its dispatch, before the new machine is the active one, so they read no engine
-    // state: its one effect delivers conversation_started under the id its own kernel carries (see `perform`).
+    // closes is named by id. Its start's first effect makes it the active one, with the start's client and connection
+    // (`activate_conversation`), so a start that does not commit drops the new machine and changes nothing else.
     const machine = this.openConversation(event.ids.conversation);
-    let error: unknown;
+    let dispatched: Dispatched<ConversationRejection, EventChange>;
     try {
-      const dispatched = machine.dispatch(event);
-      if (dispatched.kind === "committed") {
-        this.machine = machine;
-        const conversation = this.activeConversation;
-        return {
-          ok: true,
-          result: {
-            conversation_id: conversation.id,
-            provenance_set_id: conversation.provenanceSetId,
-          },
-        };
-      }
-      error =
-        dispatched.kind === "failed"
-          ? dispatched.error
-          : // Unreachable: a machine at null decides a start.
-            new Error(`start refused: ${dispatched.rejection.kind}`);
-    } catch (thrown) {
-      error = thrown;
+      dispatched = machine.dispatch(event);
+    } catch (error) {
+      return notCreated(error);
     }
-    this.activeConnectionId = previous.connection;
-    this.activeClientId = previous.client;
-    return fail("record_failure", `could not create conversation: ${errorMessage(error)}`);
+    if (dispatched.kind === "failed") return notCreated(dispatched.error);
+    // Unreachable: a machine at null decides a start.
+    if (dispatched.kind === "rejected")
+      return notCreated(new Error(`start refused: ${dispatched.rejection.kind}`));
+    const conversation = machine.state;
+    // Unreachable: a committed start leaves its conversation as its machine's state.
+    if (!conversation) throw new Error("a conversation start committed without its conversation");
+    return {
+      ok: true,
+      result: {
+        conversation_id: conversation.id,
+        provenance_set_id: conversation.provenanceSetId,
+      },
+    };
   }
 
   submitText(

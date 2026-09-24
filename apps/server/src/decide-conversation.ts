@@ -37,16 +37,11 @@ import {
   type ConversationState,
   type TaskState,
 } from "./conversation-state.ts";
-import type { EngineEffect, PermissionAnswer } from "./engine-effects.ts";
+import type { EngineEffect, Origin, PermissionAnswer } from "./engine-effects.ts";
 import type { EngineRecord } from "./engine-records.ts";
 import { MCP_BODY_EVENT, type McpBodyRecord } from "./mcp-bodies.ts";
 import { provenanceLinks, provenanceRecords, type NamedProvenancePlan } from "./provenance.ts";
-import {
-  TransitionDraft,
-  taskLinks,
-  type BuiltTransition,
-  type Origin,
-} from "./transition-draft.ts";
+import { TransitionDraft, taskLinks, type BuiltTransition } from "./transition-draft.ts";
 import {
   bindPermissionRequest,
   bindStreamProposal,
@@ -1660,8 +1655,9 @@ const disconnectTransition: ConversationTransition<ClientDisconnectedEvent, neve
 /**
  * Start the conversation: its provenance rows, the conversation that names them and its links to them, the close of
  * the conversation it replaces, then its provenance_recorded and conversation_started events, and in debug mode
- * captured_in_debug_mode, all in one commit. Built from no conversation, so it is never refused; the machine refuses
- * a start of one already started (`conversationStartTransition`).
+ * captured_in_debug_mode, all in one commit. Once it commits, the conversation becomes the active one, then its client
+ * is told it started. Built from no conversation, so it is never refused; the machine refuses a start of one already
+ * started (`conversationStartTransition`).
  */
 const conversationStart = (input: {
   event: ConversationStartEvent;
@@ -1701,6 +1697,7 @@ const conversationStart = (input: {
     pendingNote: null,
     task: null,
   });
+  draft.effect({ kind: "activate_conversation", origin: event.origin });
   draft.record("provenance_recorded", provenance, { id: ids.provenanceRecorded });
   draft.emit(
     {
