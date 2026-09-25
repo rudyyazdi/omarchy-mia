@@ -216,7 +216,7 @@ sqlite3 .mia-state/fixture-test/catalog.sqlite "select role, availability, versi
 | Put `"builtinTools": ["Bash"]` in a profile | server (and client) refuse to start with the reason | `config.ts` → `validateRuntimeConfig` |
 | Add a tool to `mcpServers` but not to `toolPolicy`, then ask for it | bridge denies, client gets `configuration_error` | `handlePermission`, `policy === "unlisted"` |
 | Kill the server while an approval is pending | runtime's held call times out or aborts; nothing committed | bridge handler abandoned → `abandon()` |
-| Close the client while an approval is pending, reopen it | approval still pending and decidable | `onDisconnect`, `adoptConnection` |
+| Close the client while an approval is pending, reopen it | approval still pending; the text client can't adopt the conversation, so it gets `busy` until the server restarts (#193) | `onDisconnect`, `adoptConnection` |
 | Run a second client while a task runs | `busy` | `guard()` |
 | Send `protocol_version: 2` (node one-liner with `ws`) | `unsupported_protocol_version` with an actionable message | `gateway.ts` |
 
