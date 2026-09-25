@@ -1,8 +1,8 @@
-# Mia: voice assistant for Omarchy
+# Mia: voice and text assistant for Omarchy
 
 ## Outcome and scope
 
-An open-source client/server voice assistant controlling a user-configured Omarchy host through configured agent runtimes. Desktop and phone clients share one conversation, with optional interactive visuals, explicit device handoff, parallel tasks where tools allow it, and past-conversation retrieval. Remote operation requires the configured host to be awake and online.
+An open-source client/server voice and text assistant controlling a user-configured Omarchy host through configured agent runtimes. Desktop, phone, and terminal clients share one conversation, used through one active client at a time. Every client takes typed input; desktop and phone clients also take speech and show interactive views. Mia offers explicit device handoff, parallel tasks where tools allow it, and past-conversation retrieval. Remote operation requires the configured host to be awake and online.
 
 Implement the eight testable deliverables below. Client/server separation is foundational from deliverable 1. Each milestone needs a user acceptance demo, relevant automated checks, and an acceptance checkpoint before expanding scope. This is an implementation plan; the planning task does not authorize implementation. Run agents through user-installed Codex, Claude Code, or OpenCode CLIs, reusing their authentication; document prerequisites and detect missing setup rather than assuming a particular developer's environment. Users need only configure the agent runtimes they intend to use.
 
@@ -21,11 +21,14 @@ The project must be usable without the original author's accounts, paths, device
 | Mia | The assistant as a whole. |
 | Host | The user's configured Omarchy computer, where agents and computer actions run. |
 | Server | Mia's persistent host process managing conversation, tasks, and clients. |
-| Client | Desktop or phone app providing voice and optional visuals. |
+| Client | Desktop, phone, or terminal (TUI) app through which the user takes part in the conversation. |
+| TUI | Terminal client with typed input and text replies only. |
 | Conversation | A stored dialogue and its context, resumable across devices and disconnects. Only one conversation is active at a time. |
-| Active client | Client currently handling conversational input, voice playback, and optional visuals together on one device. |
-| Device handoff | Explicit transfer of the conversation, voice, and visual state together to another client. |
-| Voice model | GPT-Live, responsible for spoken interaction and delegation. |
+| Active client | Client currently handling conversational input, replies, and views together on one device. |
+| Device handoff | Explicit transfer of the conversation and its view state together to another client, on another device or the same one. |
+| Voice model | GPT-Live, responsible for typed and spoken interaction and delegation. |
+| Microphone mode | Whether and how a client listens: off, hold-to-speak, or hands-free. Typing is always available. |
+| Reply mode | Whether Mia delivers replies as text or voice. |
 | Active agent | Agent owning substantive answers and task coordination, running through a configured agent runtime. |
 | Worker agent | Agent assigned a delegated task by the active agent. |
 | Agent runtime | Installed software running an agent, such as Codex, Claude Code, or OpenCode. |
@@ -44,50 +47,53 @@ The project must be usable without the original author's accounts, paths, device
 | Approval policy | Rules determining whether a tool call requires explicit user approval. |
 | Approval request | Pending request for the user to authorize a specific tool call. |
 | Approval decision | The user's approve or reject response to an approval request. |
-| View | Visual content shown by the client, such as a chart or test report. |
+| View | Visual content Mia chooses to show on a client that supports views, such as a chart or test report. |
 | UI event | An interaction with a view that may become input to Mia. |
-| Hide view | Dismiss visuals while leaving voice and tasks running. |
+| Hide view | Ask Mia to dismiss views while the conversation and tasks keep running. |
 | Close | Close the client while the server and tasks keep running; task completion notifies the user to reopen the client. |
 | Quit | Fully stop Mia's server and clients cleanly, excluding external services. |
 
-Avoid unqualified “session”: distinguish conversation, voice connection, and agent session.
+Avoid unqualified “session”: distinguish conversation, voice-model connection, and agent session.
 
 ## Agreed requirements
 
 ### Conversation and execution
 
-- GPT-Live handles conversation, clarification, and delivery; client delegation sends substantive questions and tasks to the active agent. All task tools belong to that agent or its worker agents. Microphone and playback controls belong to the client; the server coordinates interruption of agent work.
-- One conversation controls the host. Opening another client offers device handoff rather than starting a second conversation or agent. Voice and optional visuals stay together on the active device, either desktop or phone; split-device voice/display use is not required. Device handoff transfers both together.
+- GPT-Live handles conversation, clarification, and delivery for typed and spoken input alike; client delegation sends substantive questions and tasks to the active agent. No input path bypasses GPT-Live; it is required even for text-only use, with no fallback when it is unavailable. All task tools belong to that agent or its worker agents. Microphone and playback controls belong to the client; the server coordinates interruption of agent work.
+- One conversation controls the host. Opening another client, the TUI included, offers device handoff rather than starting a second conversation or agent. Only one client is active; a newly opened client can only offer handoff, and closes if the user declines, leaving the active client in control. Input, replies, and views stay together on the active client; split-device use is not required. Device handoff transfers them together. View state stays with the conversation: the TUI does not display it, and a later handoff to a client with views restores the current views.
 - Configuration selects an agent runtime and model for each of the default and big-gun roles. Preserve configured identifiers; examples include Opus 5, Codex 5.6 Sol, DeepSeek 4.1, Codex Astra, and Claude Fable. Config changes apply to a new conversation.
 - Explicit escalation replaces the active agent until switched back or a fresh conversation starts. Never escalate automatically. Independent running tasks retain their assigned model; task transfers preserve context and have one execution owner.
 - Concurrency follows tool and external-service constraints: searches can overlap; computer-use actions cannot. Independent agents/tasks must not contend over shared browser, desktop, or file state.
-- Hold to speak, release to submit; optional hands-free conversation mode. Interrupting stops playback and blocks new consequential actions while listening. Handle in-flight actions according to actual cancellation support; never imply completed actions were undone.
+- Every client accepts typed input at any time; desktop and phone clients also have a microphone mode (hold to speak and release to submit, or hands-free conversation). The TUI has no microphone and replies only in text. Reply mode (text or voice) is independent of microphone mode. Each client remembers its own microphone and reply mode; device handoff does not carry them. A remembered mode never acts on its own: the microphone opens only after an explicit user action on that client since it was opened or received the handoff, and Mia does not start speaking on opening, reopening from a notification, or handoff.
+- The server makes reply transcripts available to the client. Whether and when to show them is a client display decision expected to change; initially voice replies show no live transcript, and switching reply mode to text may show the transcripts of earlier voice replies.
+- Speaking interrupts: it stops playback and blocks new consequential actions while listening. Submitting typed input is not itself an interruption; GPT-Live decides whether to stop speaking. Interrupting agent work takes speech or the explicit interrupt control. Every client, the TUI included, has an explicit interrupt control with the guarantees of a spoken interruption. Handle in-flight actions according to actual cancellation support; never imply completed actions were undone.
+- Mia's agents know the active client's capabilities (views, workspace control) and its current microphone and reply mode, and are told when either changes, including mid-task after a handoff. They shape replies accordingly; for example, they answer the TUI in text instead of offering a view.
 - Reuse existing permissions, with configurable approval policy per tool where the agent runtime or tool integration supports enforcement, including requiring explicit approval on every call (for example, all tools of a configured password-manager MCP). Task instructions do not override an approval policy requiring confirmation on every call. Configure payment/booking approval rules through the relevant approval policy rather than a hard-coded fee rule. Surface unsupported enforcement before enabling that policy; never silently downgrade it.
 - The active agent proposes tool calls; Mia's server and the applicable agent adapter or tool adapter enforce approval before execution. The active client presents the tool, intended action, and relevant non-secret arguments with explicit approve/reject controls. Approval is bound to the exact pending call; changed arguments require renewed approval. Neither model may grant approval on the user's behalf. Pending approval requests survive device handoff/reconnect; no response or a disconnected client is not consent. GPT-Live may explain the request, but does not own enforcement.
 - Access includes all host browsers/tabs and signed-in sessions where supported; phone use controls the host, not the phone's own apps. Authorized monitoring notifications need no repeated approval unless their approval policy requires it. Verify uncertain outcomes before retrying consequential actions. Configurable approvals are in scope; comprehensive isolation from inherited CLI capabilities remains deferred.
 
 ### Lifecycle
 
-- Close shuts the client's voice/UI while the server and tasks continue. Task completion pings the user with a notification to reopen the client and resume; failure or required input also triggers notification. Do not automatically reopen the microphone or start speaking. Notification delivery mechanism is a solution-design decision.
+- Close shuts the client (its microphone, playback, and views) while the server and tasks continue. Task completion pings the user with a notification to reopen the client and resume; failure or required input also triggers notification. Reopening follows the remembered-mode rule under Conversation and execution. Notification delivery mechanism is a solution-design decision.
 - A task notification offers resumption of its originating conversation. Ordinary opening offers Continue or New conversation when context exists. Only one conversation is active; resuming another requires an explicit switch. Starting fresh does not cancel running tasks.
 - Fresh conversations do not automatically inherit past conversation context. The active agent can search/retrieve past conversations through tools with source references, whether using the default or big-gun model.
 - Quit fully stops Mia's server and clients cleanly and handles Mia-owned active tasks, preserving logs and reporting anything that cannot be cancelled.
 - Remote access assumes an awake, online host. Unavailability is visible; consequential commands are not silently queued for later execution.
 
-### Visuals and adapters
+### Views and adapters
 
 - Start with [A2UI](https://a2ui.org/) behind a replaceable UI adapter. Keep conversation/task behavior, content meaning, and UI-event handling independent of that choice. Replacement must not require rewriting core orchestration. Demonstrate the boundary with a minimal alternative/test UI adapter.
 - Require compact, rich, versioned display messages, incremental updates, and references to large data. Cover text, metrics, charts, tables, test results, code and diffs, image choices, and simple layouts. Ordinary output must not require generated HTML. Display messages are layered: structured components, declarative chart specifications (data plus encoding, Vega-Lite style), and later sandboxed custom rendering code. The agent uses the highest level that expresses the result and drops to a lower level only when a higher one cannot; lower levels never gain access beyond the sandbox.
-- Provide an optional app-style singleton desktop window and phone visuals. The active agent can open useful views and use a configured Hyprland MCP integration to move/fullscreen the host window. Hide view dismisses visuals without stopping voice or tasks; “close the view” has the same meaning. Close Mia shuts the client. When asked to show an already visible view, report that it is visible rather than creating another window. If it is on another workspace, offer to switch when Hyprland MCP or equivalent window control is available; otherwise explain the limitation.
+- Provide an app-style singleton desktop window and phone app, each holding the typed input, text replies, and any views. Mia decides when to open, update, or remove a view; the user changes which views exist only by asking Mia, apart from direct manipulation of existing content and window geometry below. The active agent can use a configured Hyprland MCP integration to move/fullscreen the host window. Hide view removes views and leaves typed input and text replies in place, without stopping the conversation or tasks; “close the view” has the same meaning. Close Mia shuts the client. When asked to show an already visible view, report that it is visible rather than creating another window. If it is on another workspace, offer to switch when Hyprland MCP or equivalent window control is available; otherwise explain the limitation.
 - Mia receives each view's current dimensions and changes. Existing content remains usable during resize; the agent decides whether context warrants a content change. More space may prompt an offer of additional detail, not automatic new analysis on every resize.
-- Zooming, sorting, and expanding existing content work directly. Meaningful clicks, such as choosing a PNG, can reach Mia as conversational input equivalent to a spoken choice. Requests for new data, analysis, or external actions go through the agent and existing permissions.
+- Zooming, sorting, and expanding existing content work directly. Meaningful clicks, such as choosing a PNG, can reach Mia as conversational input equivalent to a spoken or typed choice. Requests for new data, analysis, or external actions go through the agent and existing permissions.
 
 ### Logs and tuning
 
-- Keep audio, transcripts, exposed agent/tool events, results, errors, approvals, interruptions, and available usage data indefinitely outside Git. Organize by conversation start timestamp plus unique identifiers, linking tasks and job runs. Redact credentials; do not promise hidden model-provider reasoning or undisclosed prompts.
+- Keep audio, transcripts, typed input, whether each turn was typed or spoken and its reply mode, exposed agent/tool events, results, errors, approvals, interruptions, and available usage data indefinitely outside Git. Organize by conversation start timestamp plus unique identifiers, linking tasks and job runs. Redact credentials; do not promise hidden model-provider reasoning or undisclosed prompts.
 - Snapshot effective app prompts, exposed agent instructions, configuration, model identities, tool/display contracts, adapter versions, and relevant software versions. Each conversation references immutable prompt versions/content hashes, the architecture version and its design-document revision, and the running client/server build versions (including source commit and any local-change identifier). Retain the referenced snapshots so future edits do not erase debugging context. Linked tasks and job runs record their actual versions if different, including after a restart or device handoff. Distinguish generated speech from audio actually played.
 - Start simple: no fixed latency thresholds yet. Record interruption, voice-model/active-agent response, rendering/update timing, and display-message size for later investigation. Separate local, model, and network delays where observable.
-- Clients send diagnostic state snapshots on errors, reconnects, device handoffs, and significant state changes, plus a lightweight periodic heartbeat while running. Capture active view/dimensions, client/UI version, connection/microphone/playback state, recent interaction events, errors, and timing. Link records by client, conversation, task, and view identifiers with capture/receipt timestamps; avoid repeatedly sending unchanged detail.
+- Clients send diagnostic state snapshots on errors, reconnects, device handoffs, and significant state changes, plus a lightweight periodic heartbeat while running. Capture active view/dimensions, client/UI version, connection/microphone/playback state, microphone and reply mode, recent interaction events, errors, and timing. Link records by client, conversation, task, and view identifiers with capture/receipt timestamps; avoid repeatedly sending unchanged detail.
 - Store client diagnostics with server logs under the same retention policy. Expose relevant records through an agent diagnostic tool, rather than injecting them into every model request. Exclude credentials and sensitive approval content. Screenshots are optional and separately configurable; routine snapshots are structured state, not continuous screen recording. Missing or stale diagnostics must be apparent, including after disconnection or Close.
 
 ## Delivery approach
@@ -104,37 +110,37 @@ Outcome, scope, exclusions, C4 diagrams and implementation sequence: [D1 impleme
 
 **Pass:** No execution before required approval. New consequential actions are blocked during interruption; in-flight actions that cannot stop are reported honestly. Failures are visible, and unsupported approval policies are not silently weakened. Logs identify the actual agent, prompts, and builds; retained snapshots survive later edits. Use controlled fixtures for consequential tests.
 
-## Deliverable 2 — Add desktop voice
+## Deliverable 2 — Add desktop voice and text
 
-Add the voice model (GPT-Live), hold-to-speak/release-to-submit, hands-free conversation, and concise spoken results to the proven agent path.
+Add the voice model (GPT-Live) as the conversational owner of typed and spoken input, and a desktop client with typing, hold-to-speak/release-to-submit, hands-free conversation, text/voice reply mode, concise spoken results, and an explicit interrupt control. Promote the D1 text client to the TUI, a product client whose input also goes through GPT-Live. Until D3 adds handoff, opening a second client is refused with an explanation.
 
-**User acceptance test:** Ask a substantive question and follow-up, approve/reject a tool request through the client, interrupt speech while work is running, and switch to hands-free mode.
+**User acceptance test:** Ask a substantive question by voice and a follow-up by typing, approve/reject a tool request through the client, interrupt speech while work is running, and switch to hands-free mode. Switch reply mode from voice to text and back; send typed input while Mia is speaking, then use the explicit interrupt. Repeat the question, approval, and interrupt through the TUI.
 
-**Pass:** Substantive questions reach the active agent. No stale playback after interruption and no microphone transmission outside the chosen listening mode. Verify no new consequential action starts while a correction is being heard. Record audio, transcripts, actual playback, and observable timing without credentials or sensitive approval content.
+**Pass:** Substantive questions reach the active agent whether typed or spoken, in one conversation. Text reply mode produces no speech; each client's microphone and reply mode persist across client restarts, and after a restart the microphone stays closed and Mia silent until the user acts. Typed input during speech is not itself an interruption, and the record shows GPT-Live handled every typed turn. The explicit interrupt, in the desktop client and the TUI, gives the guarantees of a spoken interruption. Opening a second client is refused with an explanation, and never makes two clients active. No stale playback after interruption and no microphone transmission outside the chosen listening mode. Verify no new consequential action starts while a correction is being heard. Record audio, transcripts, actual playback, and observable timing without credentials or sensitive approval content.
 
 ## Deliverable 3 — Complete the task lifecycle
 
-Implement Close, reconnect, Continue/New conversation, basic task notifications, and Quit independently of the job service.
+Implement Close, reconnect, Continue/New conversation, basic task notifications, Quit, and device handoff between the TUI and the desktop client, independently of the job service.
 
-**User acceptance test:** Start a long task, Close, receive its completion notification, reopen and continue. Repeat with a failure and a pending approval request. Start a fresh conversation while prior work remains active. Disconnect unexpectedly, then test Quit and restart.
+**User acceptance test:** Start a long task, Close, receive its completion notification, reopen and continue. Repeat with a failure and a pending approval request. Start a fresh conversation while prior work remains active. Open the TUI while the desktop client is active, decline then accept device handoff, approve a pending call from the TUI, and hand back. Repeat with the desktop client opened while the TUI is active. Disconnect unexpectedly, then test Quit and restart.
 
-**Pass:** Close preserves server-side work; notifications offer resumption of the originating conversation without activating the microphone or speaking automatically. Pending approvals survive reconnect and are re-presented with the same tool, action, and arguments (including any code or diff content once D7 adds it), and silence is never consent. Starting fresh does not inherit past context or cancel tasks. No duplicate execution after reconnection or uncertain outcomes. Quit stops Mia's server/clients, preserves records, and reports uncancellable work. Diagnostics distinguish unavailable clients from stale state.
+**Pass:** Close preserves server-side work; notifications offer resumption of the originating conversation without activating the microphone or speaking automatically. Pending approvals survive reconnect and are re-presented with the same tool, action, and arguments (including any code or diff content once D7 adds it), and silence is never consent. Starting fresh does not inherit past context or cancel tasks. No duplicate execution after reconnection or uncertain outcomes. Quit stops Mia's server/clients, preserves records, and reports uncancellable work. Only one client is active; declining closes the new client; after handoff, microphone and reply mode are the receiving client's own, and no microphone opens and no speech starts unchosen. Diagnostics distinguish unavailable clients from stale state.
 
 ## Deliverable 4 — Add one interactive view
 
 Introduce the replaceable UI adapter for A2UI with a small chart or image-choice view, incremental updates, UI events, dimension reporting, and desktop view/window control.
 
-**User acceptance test:** Ask Mia to show a view, select an image by click and by voice, and Hide view while continuing to talk. Ask to show it when it is already visible, then when its window is on another workspace. Resize, move, and fullscreen it where supported.
+**User acceptance test:** Ask Mia to show a view, select an image by click, by voice, and by typing, and Hide view while continuing to talk. Ask for the same view from the TUI, then hand off back to the desktop client. Ask to show it when it is already visible, then when its window is on another workspace. Resize, move, and fullscreen it where supported.
 
-**Pass:** One desktop window; if already visible on the current workspace, Mia says so without creating another. If on another workspace, Mia offers to switch when Hyprland MCP or an equivalent integration is available. Missing window visibility/control support is explained; no claimed action without evidence. “Close the view” means Hide view, while Close Mia closes the client. Dimensions reach Mia and existing content remains usable; the agent decides whether to offer more detail. A meaningful selection reaches the correct conversation/task once. A minimal substitute UI adapter preserves content/event behavior without core changes. Invalid display content cannot execute arbitrary local actions. Capture display errors, message sizes, and render timing.
+**Pass:** One desktop window; if already visible on the current workspace, Mia says so without creating another. If on another workspace, Mia offers to switch when Hyprland MCP or an equivalent integration is available. Missing window visibility/control support is explained; no claimed action without evidence. “Close the view” means Hide view, while Close Mia closes the client. Dimensions reach Mia and existing content remains usable; the agent decides whether to offer more detail. A meaningful selection reaches the correct conversation/task once. The TUI gets a text answer, not a view, and views that existed before a handoff to the TUI are restored on handoff back. A minimal substitute UI adapter preserves content/event behavior without core changes. Invalid display content cannot execute arbitrary local actions. Capture display errors, message sizes, and render timing.
 
 ## Deliverable 5 — Take the journey to the phone
 
-Extend the working voice, view, approval, and task-notification journey to a phone client, with explicit bidirectional device handoff.
+Extend the working voice, text, view, approval, and task-notification journey to a phone client, extending D3's device handoff to phone↔desktop and phone↔TUI.
 
-**User acceptance test:** Start on desktop, open phone, decline then accept device handoff, continue with voice and visuals, and transfer back. Approve/reject a pending call after handoff. Close during a task and reopen from a phone notification. Exercise connection loss and host unavailability.
+**User acceptance test:** Start on desktop, open phone, decline then accept device handoff, continue by voice and by typing with views, and transfer back. Start a view-producing task on the phone, hand off to the TUI before it finishes, receive the result as text, and hand back to the phone. Approve/reject a pending call after handoff. Close during a task and reopen from a phone notification. Exercise connection loss and host unavailability.
 
-**Pass:** One active conversation and client, with voice and visuals moving together and no duplicate agents/actions. Only authorized clients can connect; no unsolicited microphone activation or silently queued consequential commands. Conversation, visual state, and pending approvals remain correctly associated. Phone supports showing/hiding views; workspace controls apply to desktop only.
+**Pass:** One active conversation and client, with input, replies, and views moving together and no duplicate agents/actions; the phone keeps its own microphone and reply mode and gets back the views the TUI could not show. Agents learn of each handoff and shape results to the receiving client. Only authorized clients can connect; no unsolicited microphone activation or silently queued consequential commands. Conversation, view state, and pending approvals remain correctly associated. Phone supports showing/hiding views; workspace controls apply to desktop only.
 
 ## Deliverable 6 — Expand agents and concurrency
 
@@ -160,11 +166,11 @@ Connect the separate job service for deterministic schedules and intelligent mon
 
 **User acceptance test:** Schedule a daily 10 am vacuum action without model involvement per job run. Create an intelligent X-news monitor for company breaking news that notifies a configured Slack destination. Inspect/cancel both through Mia and directly through the job-service CLI. Close Mia's client and verify notifications still offer the correct conversation on return.
 
-**Pass:** Jobs persist independently and execute/notify within authorized criteria without duplicates. Results remain retrievable if notification delivery is delayed. State actual monitoring access/latency limits. Use a contract substitute while the separate service is unavailable, but mark live job acceptance blocked until the real service and integrations pass. Repeat relevant earlier journeys to verify integration preserves voice, approvals, views, and lifecycle behavior.
+**Pass:** Jobs persist independently and execute/notify within authorized criteria without duplicates. Results remain retrievable if notification delivery is delayed. State actual monitoring access/latency limits. Use a contract substitute while the separate service is unavailable, but mark live job acceptance blocked until the real service and integrations pass. Repeat relevant earlier journeys to verify integration preserves voice, text, approvals, views, and lifecycle behavior.
 
 ## Prompt budget and implementation guidance
 
-Start with two versioned templates: voice-model instructions and shared agent instructions. Agents using the default or big-gun model initially share the agent template. Add summary/specialist prompts only when justified; aim for two to four app-owned templates. Version tool and display definitions alongside them.
+Start with two versioned templates: voice-model instructions (covering typed and spoken turns and each reply mode) and shared agent instructions. Agents using the default or big-gun model initially share the agent template. Add summary/specialist prompts only when justified; aim for two to four app-owned templates. Version tool and display definitions alongside them.
 
 Evaluate task success, transcription/delegation errors, interruption correctness, duplicate actions, latency, message size, spoken brevity, and available cost. Compare saved examples without replaying real-world side effects. Tuning means prompt iteration.
 
