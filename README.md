@@ -1,10 +1,9 @@
 # Mia
 
-Mia is an open-source voice assistant for an Omarchy host. This repository currently implements **Deliverable 1 (D1)**: a
+Mia is an open-source voice and text assistant for an Omarchy host. This repository currently implements **Deliverable 1 (D1)**: a
 text client, a persistent server, and one agent adapter (Claude Code) with enforced per-call tool approval, interruption
-with honest outcomes, and a private, exportable conversation record. From D2 the text client becomes the TUI, a
-text-only product client alongside voice-and-text desktop and phone clients. Voice, views, phone clients and later
-deliverables are described in [`docs/PLAN.md`](docs/PLAN.md) and are not implemented yet.
+with honest outcomes, and a private, exportable conversation record. Later deliverables, including the TUI, voice, views and
+phone clients, are described in [`docs/PLAN.md`](docs/PLAN.md) and are not implemented yet.
 
 Read first: [D1 plan](docs/D1/PLAN.md), [capability record](docs/D1/CAPABILITY-RECORD.md), [acceptance record](docs/D1/ACCEPTANCE-RECORD.md).
 
