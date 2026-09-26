@@ -2,7 +2,7 @@
   "name": "mia",
   "version": "0.1.0",
   "private": true,
-  "description": "Mia: voice and text assistant for Omarchy. D1 slice: text client, server, one agent adapter.",
+  "description": "Mia: voice and text assistant. D1 slice: text client, server, one agent adapter.",
   "license": "MIT",
   "type": "module",
   "engines": {

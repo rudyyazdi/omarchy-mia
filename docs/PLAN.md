@@ -1,8 +1,8 @@
-# Mia: voice and text assistant for Omarchy
+# Mia: voice and text assistant
 
 ## Outcome and scope
 
-An open-source client/server voice and text assistant controlling a user-configured Omarchy host through configured agent runtimes. Desktop, phone, and terminal clients share one conversation, used through one active client at a time. Every client takes typed input; desktop and phone clients also take speech and show interactive views. Mia offers explicit device handoff, parallel tasks where tools allow it, and past-conversation retrieval. Remote operation requires the configured host to be awake and online.
+An open-source client/server voice and text assistant controlling a user-configured host computer through configured agent runtimes. Desktop, phone, and terminal clients share one conversation, used through one active client at a time. Every client takes typed input; desktop and phone clients also take speech and show interactive views. Mia offers explicit device handoff, parallel tasks where tools allow it, and past-conversation retrieval. Remote operation requires the configured host to be awake and online.
 
 Implement the eight testable deliverables below. Client/server separation is foundational from deliverable 1. Each milestone needs a user acceptance demo, relevant automated checks, and an acceptance checkpoint before expanding scope. This is an implementation plan; the planning task does not authorize implementation. Run agents through user-installed Codex, Claude Code, or OpenCode CLIs, reusing their authentication; document prerequisites and detect missing setup rather than assuming a particular developer's environment. Users need only configure the agent runtimes they intend to use.
 
@@ -19,7 +19,7 @@ The project must be usable without the original author's accounts, paths, device
 | Term | Meaning |
 | --- | --- |
 | Mia | The assistant as a whole. |
-| Host | The user's configured Omarchy computer, where agents and computer actions run. |
+| Host | The user's configured computer, where agents and computer actions run. |
 | Server | Mia's persistent host process managing conversation, tasks, and clients. |
 | Client | Desktop, phone, or terminal (TUI) app through which the user takes part in the conversation. |
 | TUI | Terminal client with typed input and text replies only. |

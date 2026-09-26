@@ -1,6 +1,6 @@
 # Mia
 
-Mia is an open-source voice and text assistant for an Omarchy host. This repository currently implements **Deliverable 1 (D1)**: a
+Mia is an open-source voice and text assistant for your own computer. This repository currently implements **Deliverable 1 (D1)**: a
 text client, a persistent server, and one agent adapter (Claude Code) with enforced per-call tool approval, interruption
 with honest outcomes, and a private, exportable conversation record. Later deliverables, including promoting the text client to the TUI, voice, views and
 phone clients, are described in [`docs/PLAN.md`](docs/PLAN.md) and are not implemented yet.
