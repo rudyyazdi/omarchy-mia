@@ -18,10 +18,9 @@ import { watchAddress } from "./watch-address.ts";
 import { messagesAfter, NOTHING_SENT, sseRecord, type Sent } from "./watch-feed.ts";
 
 /**
- * The live web view of one conversation (issue #6): an HTTP server, on loopback unless told another address, that
- * serves a static page under a secret path and streams the conversation to it over Server-Sent Events. Each page
- * polls the catalog on its own, so it only ever shows committed rows, and it works the same on a finished
- * conversation.
+ * The live web view of one conversation (issue #6): an HTTP server, on the address it is told, that serves a
+ * static page under a secret path and streams the conversation to it over Server-Sent Events. Each page polls the
+ * catalog on its own, so it only ever shows committed rows, and it works the same on a finished conversation.
  */
 
 /** When to poll again, and how long to wait on a page in two cases; each rejects once `signal` aborts. */
@@ -54,7 +53,10 @@ export type WatchEnd =
   { kind: "interrupted" } | { kind: "page_closed" } | { kind: "failed"; error: unknown };
 
 export interface Watch {
+  /** The page's address on this machine. */
   url: string;
+  /** Its addresses for another device on the network, if the watch listens on one. */
+  networkUrls: readonly string[];
   /** Settles once the server is closed and no page reads the catalog any more, so the caller may close it. */
   ended: Promise<WatchEnd>;
 }
@@ -75,6 +77,8 @@ export interface WatchOptions {
   conversationId: string;
   /** The IP address to listen on (see `isListenableHost`); the port is any free one. */
   host: string;
+  /** This machine's addresses (`machineAddresses`), where a wildcard `host` is reached. */
+  addresses: readonly string[];
   /**
    * The secret every path starts with, since any device that reaches `host` could otherwise read the conversation.
    * The page's own references are relative, so they carry it without knowing it.
@@ -269,7 +273,7 @@ export const startWatch = async (options: WatchOptions): Promise<WatchStart> => 
     server.close();
     throw new Error("the watch server is not listening on a TCP port");
   }
-  const reached = watchAddress(options.host, address.port);
+  const reached = watchAddress({ ...options, port: address.port });
   ownHosts = reached.ownHosts;
   const interrupted = () => halt({ kind: "interrupted" });
   if (options.signal.aborted) interrupted();
@@ -292,5 +296,9 @@ export const startWatch = async (options: WatchOptions): Promise<WatchStart> => 
     await closing;
     return outcome ?? { kind: "interrupted" };
   })();
-  return { kind: "watching", watch: { url: `${reached.origin}/${token}/`, ended } };
+  const url = (origin: string) => `${origin}/${token}/`;
+  return {
+    kind: "watching",
+    watch: { url: url(reached.local), networkUrls: reached.network.map(url), ended },
+  };
 };

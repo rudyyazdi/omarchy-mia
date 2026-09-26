@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { networkInterfaces } from "node:os";
 import { resolve } from "node:path";
 import type { Command } from "commander";
 import { match } from "ts-pattern";
@@ -25,7 +26,7 @@ import {
   formatUnresolved,
 } from "./format.ts";
 import { openInBrowser } from "./browser.ts";
-import { isListenableHost, LOOPBACK_HOST } from "./watch-address.ts";
+import { ANY_HOST, isListenableHost, machineAddresses } from "./watch-address.ts";
 import { startWatch, WATCH_TIMERS } from "./watch-server.ts";
 
 /**
@@ -131,8 +132,8 @@ export const withWatchOptions = (command: Command): Command =>
     .option("--no-open", "print the page's address without opening a browser")
     .option(
       "--host <address>",
-      "IP address to listen on; this machine's LAN address lets another device open the page",
-      LOOPBACK_HOST,
+      "IP address to listen on (default: every IPv4 one); 127.0.0.1 keeps the page to this machine",
+      ANY_HOST,
     );
 
 /**
@@ -154,6 +155,7 @@ export const watch = async (
       catalog,
       conversationId,
       host: run.host,
+      addresses: machineAddresses(networkInterfaces()),
       token: randomBytes(18).toString("base64url"),
       signal: run.signal,
       timers: WATCH_TIMERS,
@@ -174,6 +176,7 @@ export const watch = async (
         })
         .exhaustive();
     out(`watching ${conversationId} at ${started.watch.url} (Ctrl-C to stop)`);
+    for (const url of started.watch.networkUrls) out(`  from another device: ${url}`);
     if (run.open) openInBrowser(started.watch.url);
     return match(await started.watch.ended)
       .with({ kind: "interrupted" }, () => {

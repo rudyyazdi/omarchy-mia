@@ -176,6 +176,7 @@ let watching: Watching | null = null;
 const watchConversation = async (
   conversationId: string,
   catalog: Catalog = ts.catalog(),
+  host = "127.0.0.1",
 ): Promise<Watching> => {
   const poll = manualTimer();
   const grace = manualTimer();
@@ -190,7 +191,8 @@ const watchConversation = async (
     const started = await startWatch({
       catalog,
       conversationId,
-      host: "127.0.0.1",
+      host,
+      addresses: ["127.0.0.1"],
       token: TOKEN,
       signal: interrupt.signal,
       timers,
@@ -552,6 +554,7 @@ describe("mia debug watch", () => {
         catalog,
         conversationId: id,
         host: options.host,
+        addresses: [],
         token: TOKEN,
         signal: interrupt.signal,
         timers: {
@@ -621,6 +624,12 @@ describe("mia debug watch", () => {
     expect(await get(watch.url, { host: "rebound.example" })).toBe(403);
     expect(await get(watch.url, { host, "sec-fetch-site": "cross-site" })).toBe(403);
     expect(await get(watch.url, { host, origin: "http://elsewhere.example" })).toBe(403);
+  });
+
+  it("on every address, is still opened on loopback", async () => {
+    const { watch } = await watchConversation(conversationId(), ts.catalog(), "0.0.0.0");
+    expect(watch.networkUrls).toEqual([]);
+    expect((await fetch(watch.url)).status).toBe(200);
   });
 
   it("refuses a page beyond its limit", async () => {
