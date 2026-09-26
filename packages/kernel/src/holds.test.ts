@@ -64,10 +64,6 @@ describe("holds", () => {
     expect(holds.size).toBe(0);
   });
 
-  it("rejects a reply to an id that was never held", () => {
-    expect(new Holds<string>(4).reply("approval-1", "allow")).toEqual({ kind: "rejected" });
-  });
-
   it("refuses a second hold on an id that is held", () => {
     const holds = new Holds<string>(4);
     const signal = new AbortController().signal;

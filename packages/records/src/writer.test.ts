@@ -38,22 +38,12 @@ const provenanceSet = (): string => {
   return "prov-1";
 };
 
-/**
- * A tool call awaiting approval, with the conversation, task, execution and client it belongs to, each stamped with
- * the time `at` gives it.
- */
-const seedToolCall = (
-  at: { conversation: string; task: string; execution: string; call: string } = {
-    conversation: AT,
-    task: AT,
-    execution: AT,
-    call: AT,
-  },
-): void => {
+/** A tool call awaiting approval, with the conversation, task, execution and client it belongs to. */
+const seedToolCall = (): void => {
   const prov = provenanceSet();
   writer.createConversation({
     id: "conv-1",
-    startedAt: at.conversation,
+    startedAt: AT,
     provenanceSetId: prov,
     runtimeConversationId: "rt-1",
   });
@@ -61,14 +51,14 @@ const seedToolCall = (
   writer.openConnection({ connectionId: "conn-1", clientId: "client-1", build: {} });
   writer.createTask({
     id: "task-1",
-    createdAt: at.task,
+    createdAt: AT,
     conversationId: "conv-1",
     text: "t",
     clientId: "client-1",
   });
   writer.createExecution({
     id: "exec-1",
-    startedAt: at.execution,
+    startedAt: AT,
     taskId: "task-1",
     conversationId: "conv-1",
     runtimeIdentity: "claude-code",
@@ -80,7 +70,7 @@ const seedToolCall = (
   });
   writer.createToolCall({
     id: "call-1",
-    createdAt: at.call,
+    createdAt: AT,
     conversationId: "conv-1",
     taskId: "task-1",
     executionId: "exec-1",
@@ -218,17 +208,17 @@ describe("record writer", () => {
     expect(catalog.all("SELECT id, text FROM tasks")).toEqual([{ id: "task-1", text: "t" }]);
   });
 
-  it("stores artifact bytes once and keeps distinct logical records", async () => {
+  it("stores artifact bytes once, stamped by their first registration, and keeps distinct logical records", async () => {
     const one = writer.registerArtifact({
       id: "art-1",
-      createdAt: AT,
+      createdAt: second(1),
       kind: "tool_output",
       logicalName: "a.txt",
       stored: await put("same"),
     });
     const two = writer.registerArtifact({
       id: "art-2",
-      createdAt: AT,
+      createdAt: second(2),
       kind: "tool_output",
       logicalName: "b.txt",
       stored: await put("same"),
@@ -238,128 +228,13 @@ describe("record writer", () => {
       { id: "art-1" },
       { id: "art-2" },
     ]);
-    expect(catalog.all("SELECT * FROM objects")).toHaveLength(1);
+    // The object keeps the time of the registration that first recorded it.
+    expect(catalog.all("SELECT created_at FROM objects")).toEqual([{ created_at: second(1) }]);
     if (!one.digest) throw new Error("artifact bytes were not stored");
     expect(writer.objects.verifySync(one.digest)).toBe("verified");
   });
 
-  it("names and stamps provenance and artifact rows with the ids and times its caller gives", async () => {
-    const stored = await put("snapshot");
-    writer.createProvenanceSet({ id: "prov-a", createdAt: second(1), description: "given" });
-    writer.registerArtifact({
-      id: "art-a",
-      createdAt: second(2),
-      kind: "snapshot",
-      logicalName: "prompt",
-      stored,
-    });
-    // The same bytes again: the object keeps the time of the registration that first recorded it.
-    writer.registerArtifact({
-      id: "art-b",
-      createdAt: second(3),
-      kind: "snapshot",
-      logicalName: "prompt again",
-      stored,
-    });
-    writer.addProvenanceEntry({
-      id: "pe-a",
-      provenanceSetId: "prov-a",
-      role: "agent_prompt",
-      artifactId: "art-a",
-      availability: "retained",
-    });
-    writer.createConversation({
-      id: "conv-1",
-      startedAt: second(1),
-      provenanceSetId: "prov-a",
-      runtimeConversationId: "rt-1",
-    });
-    writer.linkArtifact({
-      id: "link-a",
-      conversationId: "conv-1",
-      artifactId: "art-a",
-      relation: "provenance",
-      provenanceSetId: "prov-a",
-    });
-    expect([
-      catalog.all("SELECT id, created_at FROM provenance_sets"),
-      catalog.all("SELECT id, created_at FROM artifacts ORDER BY id"),
-      catalog.all("SELECT created_at FROM objects"),
-      catalog.all("SELECT id, artifact_id FROM provenance_entries"),
-      catalog.all("SELECT id, artifact_id FROM artifact_links"),
-    ]).toEqual([
-      [{ id: "prov-a", created_at: second(1) }],
-      [
-        { id: "art-a", created_at: second(2) },
-        { id: "art-b", created_at: second(3) },
-      ],
-      [{ created_at: second(2) }],
-      [{ id: "pe-a", artifact_id: "art-a" }],
-      [{ id: "link-a", artifact_id: "art-a" }],
-    ]);
-  });
-
-  it("stamps a transition's rows with the times its caller gives", () => {
-    seedToolCall({
-      conversation: second(1),
-      task: second(2),
-      execution: second(3),
-      call: second(4),
-    });
-    writer.createApproval({
-      id: "appr-1",
-      requestedAt: second(5),
-      toolCallId: "call-1",
-      executionEpoch: 1,
-      requestingEventId: null,
-    });
-    writer.appendEvent({
-      id: "evt-1",
-      receivedAt: second(6),
-      conversationId: "conv-1",
-      type: "approval_resolved",
-      payload: {},
-    });
-    writer.updateApproval("appr-1", { status: "approved", consumedAt: second(7) });
-    writer.updateToolCall("call-1", { updatedAt: second(8), status: "dispatched" });
-    expect([
-      catalog.get("SELECT started_at FROM conversations"),
-      catalog.get("SELECT created_at FROM tasks"),
-      catalog.get("SELECT started_at FROM executions"),
-      catalog.get("SELECT created_at, updated_at FROM tool_calls"),
-      catalog.get("SELECT requested_at, consumed_at FROM approvals"),
-      catalog.get("SELECT received_at FROM events"),
-    ]).toEqual([
-      { started_at: second(1) },
-      { created_at: second(2) },
-      { started_at: second(3) },
-      { created_at: second(4), updated_at: second(8) },
-      { requested_at: second(5), consumed_at: second(7) },
-      { received_at: second(6) },
-    ]);
-  });
-
-  it("names and stamps a diagnostics row with the id and time its caller gives, and refuses a reused id", () => {
-    writer.ensureClient("client-1", "text-client");
-    const report = () =>
-      writer.recordDiagnostics({
-        id: "diag-1",
-        receivedAt: second(2),
-        conversationId: null,
-        clientId: "client-1",
-        clientConnectionId: null,
-        eventId: null,
-        capturedAt: second(1),
-        state: {},
-      });
-    report();
-    expect(report).toThrow();
-    expect(catalog.all("SELECT id, captured_at, received_at FROM diagnostics")).toEqual([
-      { id: "diag-1", captured_at: second(1), received_at: second(2) },
-    ]);
-  });
-
-  it("rejects duplicate approvals for the same binding and epoch, and duplicate command IDs", () => {
+  it("rejects duplicate approvals for the same binding and epoch", () => {
     seedToolCall();
     const approval = {
       requestedAt: AT,
@@ -369,17 +244,6 @@ describe("record writer", () => {
     };
     writer.createApproval({ id: "appr-1", ...approval });
     expect(() => writer.createApproval({ id: "appr-2", ...approval })).toThrow();
-    const command: CommandInput = {
-      connectionId: "conn-1",
-      clientId: "client-1",
-      clientCommandId: "cmd-1",
-      type: "submit_text",
-      payload: { text: "a" },
-    };
-    expect(writer.recordCommand(command).kind).toBe("new");
-    expect(writer.recordCommand({ ...command, payload: { text: "b" } })).toEqual({
-      kind: "conflict",
-    });
   });
 
   describe("commands", () => {

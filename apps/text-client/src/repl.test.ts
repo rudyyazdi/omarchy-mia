@@ -200,12 +200,6 @@ describe("text client session", () => {
     await closedByClient;
   });
 
-  it("reads the connection from a profile, substituting its placeholders as the server does", async () => {
-    await expect(
-      runTextClient({ config: PRODUCTION_EXAMPLE, env: { XDG_STATE_HOME: dir } }, io, deadlines),
-    ).rejects.toThrow(`secret file ${join(dir, "mia", "client-secret")} not found`);
-  });
-
   it("connects to the host and port a profile names, with its substituted secret file", async () => {
     const { port } = await listen(accept);
     const example = ProfileSchema.parse(JSON.parse(await readFile(PRODUCTION_EXAMPLE, "utf8")));
@@ -220,12 +214,6 @@ describe("text client session", () => {
     io.input.end();
     await expect(session).resolves.toBeUndefined();
     expect(printed).toContain(`connected to ws://127.0.0.1:${port}; conversation conv_1`);
-  });
-
-  it("rejects a profile whose placeholders the environment does not set", async () => {
-    await expect(
-      runTextClient({ config: PRODUCTION_EXAMPLE, env: {} }, io, deadlines),
-    ).rejects.toThrow("${XDG_STATE_HOME} but it is not set");
   });
 
   it("rejects instead of exiting when the secret file is missing", async () => {

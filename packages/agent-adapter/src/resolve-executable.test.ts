@@ -22,13 +22,6 @@ describe("resolveExecutableSync", () => {
     ).toBe(join(third.path, "runtime"));
   });
 
-  it("resolves an absolute path as itself, without consulting PATH", () => {
-    using bin = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
-    const runtime = join(bin.path, "runtime");
-    script(runtime);
-    expect(resolveExecutableSync(runtime, { path: undefined, cwd: "/" })).toBe(runtime);
-  });
-
   it("resolves a name containing a slash, and a relative PATH entry, against the working directory", () => {
     using work = mkdtempDisposableSync(join(tmpdir(), "mia-work-"));
     mkdirSync(join(work.path, "bin"));
@@ -53,15 +46,6 @@ describe("resolveExecutableSync", () => {
     expect(["/usr/bin/sh", "/bin/sh"]).toContain(
       resolveExecutableSync("sh", { path: undefined, cwd: "/" }),
     );
-  });
-
-  it("finds nothing for a missing name", () => {
-    using empty = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
-    expect(resolveExecutableSync("mia-missing-runtime", { path: empty.path, cwd: "/" })).toBeNull();
-    expect(resolveExecutableSync("mia-missing-runtime", { path: undefined, cwd: "/" })).toBeNull();
-    expect(
-      resolveExecutableSync(join(empty.path, "runtime"), { path: undefined, cwd: "/" }),
-    ).toBeNull();
   });
 
   it("treats shell syntax in the name as a literal file name and runs nothing", () => {

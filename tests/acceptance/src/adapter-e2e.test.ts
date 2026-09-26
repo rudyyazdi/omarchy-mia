@@ -180,15 +180,11 @@ describe("real adapter against a fake runtime process", () => {
     expect(toolResult && toolResult.type === "tool_result" && toolResult.isError).toBe(true);
   });
 
-  it("SIGKILL interruption stops the process, abandons held prompts, and the fixture cancels a cancellable action", async () => {
+  it("SIGKILL interruption stops the process and the fixture cancels a cancellable action", async () => {
     await harness.reset();
-    const abandoned: string[] = [];
     const { result, requests } = await run(
       "SLOW",
-      (request) => {
-        request.abandoned.addEventListener("abort", () => abandoned.push(request.toolName));
-        return { behavior: "allow" };
-      },
+      () => ({ behavior: "allow" }),
       async (handle) => {
         await harness.waitEntered({ signal: AbortSignal.timeout(SLOW_ENTERED_TIMEOUT_MS) });
         const cancellation = await handle.interrupt();

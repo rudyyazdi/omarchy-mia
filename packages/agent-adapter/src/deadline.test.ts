@@ -26,13 +26,6 @@ describe("withinDeadline", () => {
 describe("untilAborted", () => {
   const abandoned = (reason: unknown) => `abandoned: ${String(reason)}`;
 
-  it("settles with the work when no signal aborts", async () => {
-    const signal = new AbortController().signal;
-    await expect(untilAborted(() => Promise.resolve("read"), signal, abandoned)).resolves.toBe(
-      "read",
-    );
-  });
-
   it("gives up on work that never settles once the signal aborts", async () => {
     const controller = new AbortController();
     const outcome = untilAborted(

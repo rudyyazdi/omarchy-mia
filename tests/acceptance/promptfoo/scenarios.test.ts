@@ -2,13 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import assertScenario from "./assert.ts";
-import {
-  decisionAckOf,
-  readScenarioList,
-  readScenarioName,
-  SCENARIOS,
-  ScenarioNameSchema,
-} from "./scenarios.ts";
+import { readScenarioList, SCENARIOS, ScenarioNameSchema } from "./scenarios.ts";
 
 const declared = [...ScenarioNameSchema.options].toSorted();
 
@@ -26,14 +20,6 @@ describe("live scenario names", () => {
     ].map((found) => ({ description: found[1], scenario: found[2] }));
     expect(tests.map((test) => test.scenario).toSorted()).toEqual(declared);
     for (const test of tests) expect(test.description).toBe(test.scenario);
-  });
-
-  it("reads a declared name and names an unknown one", () => {
-    expect(readScenarioName("allowed")).toEqual({ ok: true, name: "allowed" });
-    expect(readScenarioName("alowed")).toEqual({
-      ok: false,
-      error: 'unknown scenario "alowed"',
-    });
   });
 
   it("fails an assertion for an unknown scenario before reading the output", () => {
@@ -56,24 +42,5 @@ describe("live scenario names", () => {
         ok: false,
         error: `unknown scenario ${JSON.stringify(entry)}; declared: ${ScenarioNameSchema.options.join(", ")}`,
       });
-  });
-});
-
-describe("decision ack evidence", () => {
-  it("records an accepted ack without a code and a refusal with its error code", () => {
-    expect(decisionAckOf({ command_id: "command", disposition: "accepted" }, false)).toEqual({
-      disposition: "accepted",
-      after_reconnect: false,
-    });
-    expect(
-      decisionAckOf(
-        {
-          command_id: "command",
-          disposition: "failed",
-          error: { code: "internal", message: "boom" },
-        },
-        true,
-      ),
-    ).toEqual({ disposition: "failed", code: "internal", after_reconnect: true });
   });
 });

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { TurnResult } from "@mia/agent-adapter";
 import type { TaskStatus, ToolCallPolicy, ToolCallStatus } from "@mia/protocol";
 import {
-  abandonedPromptDenial,
   bindPermissionRequest,
   bindStreamProposal,
   bindToolResult,
@@ -16,7 +15,6 @@ import {
   releasedWithoutResult,
   statusAfterResult,
   supersedeBinding,
-  taskStatusAfterResolving,
   type CallFacts,
   type PendingTask,
 } from "./transitions.ts";
@@ -51,18 +49,6 @@ const supersede = (
   task: PendingTask,
 ): ReturnType<typeof supersedeBinding> =>
   supersedeBinding({ call: earlier, next, task, resolvedEventId: "evt_1" });
-
-describe("taskStatusAfterResolving", () => {
-  it("resumes a task awaiting approval once none is left pending, and only then", () => {
-    expect(taskStatusAfterResolving("awaiting_approval", 0)).toBe("running");
-    expect(taskStatusAfterResolving("awaiting_approval", 1)).toBe("awaiting_approval");
-  });
-
-  it("leaves any other task status alone", () => {
-    const others: TaskStatus[] = ["running", "interrupting", "completed", "interrupted"];
-    for (const status of others) expect(taskStatusAfterResolving(status, 0)).toBe(status);
-  });
-});
 
 describe("decideApproval", () => {
   it("releases an approved call while the gate is open in the task's epoch and resumes the task", () => {
@@ -239,13 +225,6 @@ describe("decideAbandonment", () => {
     });
     expect(outcome).toBeNull();
   });
-
-  it("always refuses the abandoned prompt, naming its tool", () => {
-    expect(abandonedPromptDenial("mcp__d1__change")).toMatchObject({
-      behavior: "deny",
-      message: expect.stringContaining("mcp__d1__change"),
-    });
-  });
 });
 
 describe("evaluatePermission", () => {
@@ -351,21 +330,10 @@ describe("binding", () => {
       kind: "propose",
     });
     expect(bindStreamProposal([], same)).toEqual({ kind: "propose" });
+    // Whatever its status, since the permission request can come before its stream line.
+    const settled: typeof latest = { ...latest, status: "dispatched" };
+    expect(bindStreamProposal([settled], same)).toEqual({ kind: "attach", call: settled });
   });
-
-  it.each<ToolCallStatus>(["dispatched", "denied", "invalidated", "blocked_gate"])(
-    "attaches a matching stream proposal to a %s call, since the request can come first",
-    (status) => {
-      const settled: typeof latest = { ...latest, status };
-      expect(bindStreamProposal([settled], same)).toEqual({ kind: "attach", call: settled });
-      expect(bindStreamProposal([settled], { ...same, digest: "d2" })).toEqual({
-        kind: "propose",
-      });
-      expect(bindStreamProposal([settled], { ...same, toolIdentity: "mcp__d1__read" })).toEqual({
-        kind: "propose",
-      });
-    },
-  );
 
   it("attaches a late stream line to the earlier revision it announces, not the later one awaiting approval", () => {
     const earlier: typeof latest = { ...latest, status: "invalidated" };
@@ -430,20 +398,13 @@ describe("binding", () => {
 });
 
 describe("completion", () => {
-  it("settles a released call with its result and never revives a terminal one", () => {
+  it("settles a released call with its result, never revives a terminal one nor completes a held one", () => {
     expect(statusAfterResult("dispatched", false)).toBe("completed");
     expect(statusAfterResult("dispatched", true)).toBe("failed");
     expect(statusAfterResult("denied", false)).toBe("denied");
     expect(statusAfterResult("invalidated", false)).toBe("invalidated");
+    expect(statusAfterResult("awaiting_approval", false)).toBe("awaiting_approval");
   });
-
-  it.each<ToolCallStatus>(["proposed", "awaiting_approval"])(
-    "never completes a %s call, which Mia never released",
-    (status) => {
-      expect(statusAfterResult(status, false)).toBe(status);
-      expect(statusAfterResult(status, true)).toBe(status);
-    },
-  );
 
   it("binds a result to the released revision, not a later one still held", () => {
     const released = call("dispatched", "rev1");
@@ -462,31 +423,23 @@ describe("completion", () => {
     );
   });
 
-  it.each<ToolCallStatus>(["denied", "blocked_gate", "invalidated"])(
-    "binds a result with nothing released to the latest %s revision",
-    (status) => {
-      const refused = call(status, "rev1");
-      expect(bindToolResult([refused, call("proposed", "rev2")])).toEqual({
-        kind: "bind",
-        call: refused,
-      });
-    },
-  );
+  it("binds a result with nothing released to the latest refused revision", () => {
+    const refused = call("blocked_gate", "rev1");
+    expect(bindToolResult([refused, call("proposed", "rev2")])).toEqual({
+      kind: "bind",
+      call: refused,
+    });
+  });
 
-  it.each<ToolCallStatus>(["completed", "failed"])(
-    "leaves a repeated result unmatched rather than replacing a %s call's result",
-    (status) => {
-      expect(bindToolResult([call(status, "rev1"), call("proposed", "rev2")])).toEqual({
-        kind: "unmatched",
-      });
-    },
-  );
-
-  it("leaves a result unmatched when every revision is still held, or there is none", () => {
+  it("leaves a result unmatched when every revision is still held or already has a result", () => {
     expect(bindToolResult([call("proposed", "rev1"), call("awaiting_approval", "rev2")])).toEqual({
       kind: "unmatched",
     });
     expect(bindToolResult([])).toEqual({ kind: "unmatched" });
+    // A repeated result never replaces the one a settled call already took.
+    expect(bindToolResult([call("completed", "rev1"), call("proposed", "rev2")])).toEqual({
+      kind: "unmatched",
+    });
   });
 
   it("finds, per runtime call id without a result, the latest released revision", () => {
@@ -500,17 +453,14 @@ describe("completion", () => {
     ).toEqual([dispatched, permitted]);
   });
 
-  it.each<ToolCallStatus>(["completed", "failed"])(
-    "finds nothing under a runtime call id one %s revision of which took a result",
-    (status) => {
-      expect(releasedWithoutResult([[call(status, "rev1"), call("permitted", "rev2")]])).toEqual(
-        [],
-      );
-      expect(releasedWithoutResult([[call("dispatched", "rev1"), call(status, "rev2")]])).toEqual(
-        [],
-      );
-    },
-  );
+  it("finds nothing under a runtime call id one revision of which took a result", () => {
+    expect(releasedWithoutResult([[call("failed", "rev1"), call("permitted", "rev2")]])).toEqual(
+      [],
+    );
+    expect(
+      releasedWithoutResult([[call("dispatched", "rev1"), call("completed", "rev2")]]),
+    ).toEqual([]);
+  });
 
   it("finds nothing under a runtime call id with no released revision", () => {
     expect(

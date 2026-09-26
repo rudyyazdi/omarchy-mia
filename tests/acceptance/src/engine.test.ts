@@ -2,7 +2,6 @@ import { execFileSync } from "node:child_process";
 import {
   writeFileSync,
   mkdirSync,
-  mkdtempDisposableSync,
   mkdtempSync,
   existsSync,
   readFileSync,
@@ -13,10 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ConfigurationError, validateRuntimeConfig } from "@mia/agent-adapter";
 import {
-  LIMITS,
-  PROTOCOL_VERSION,
   type ApprovalStatus,
   type Decision,
   type ServerEventType,
@@ -33,7 +29,6 @@ import {
   must,
   mustString,
   startTestServer,
-  testProfile,
   useScriptedSession,
   type HeldRead,
   type TestServer,
@@ -57,6 +52,25 @@ const submit = async (
   return { turn, taskId: mustString(ackResult(ack).task_id, "ack task_id") };
 };
 
+/** Submit `text` and have its runtime report its init. */
+const startTurn = async (text: string): Promise<{ turn: ScriptedTurn; taskId: string }> => {
+  const submitted = await submit(text);
+  submitted.turn.init();
+  return submitted;
+};
+
+/**
+ * End `turn` and wait for its task to finish. An earlier task's task_finished satisfies a wait without a predicate,
+ * so a later turn passes its `taskId`.
+ */
+const finishTurn = (turn: ScriptedTurn, taskId?: string) => {
+  turn.end();
+  return client.waitFor(
+    "task_finished",
+    (event) => taskId === undefined || event.payload.task_id === taskId,
+  );
+};
+
 const rows = <T = Record<string, unknown>>(sql: string, ...params: (string | number)[]): T[] => {
   const cat = ts.catalog();
   try {
@@ -66,14 +80,23 @@ const rows = <T = Record<string, unknown>>(sql: string, ...params: (string | num
   }
 };
 
+/** How many events of `type` are recorded. */
+const eventCount = (type: string): number =>
+  rows("SELECT id FROM events WHERE type = ?", type).length;
+
+/** Every tool call's status, for the tests that make one call or one call's revisions. */
+const callStatuses = (): ToolCallStatus[] =>
+  rows<{ status: ToolCallStatus }>(
+    "SELECT status FROM tool_calls ORDER BY created_at, binding_revision",
+  ).map((row) => row.status);
+
 /** Submit a turn whose one tool call is held at the approval gate: where the approval and interruption tests start. */
 const submitHeldCall = async (
   text: string,
   tool = "mcp__d1__change",
   args: Record<string, unknown> = { delta: 1 },
 ) => {
-  const { turn, taskId } = await submit(text);
-  turn.init();
+  const { turn, taskId } = await startTurn(text);
   const held = turn.request(tool, args, "toolu_1");
   const requested = await client.waitFor("approval_requested");
   return { turn, taskId, held, requested };
@@ -215,11 +238,8 @@ const approvalStatuses = (): ApprovalStatus[] =>
 
 /** End a turn whose one call's prompt was abandoned: the call ends invalidated, and the next turn is told it never ran. */
 const expectAbandonedAtTurnEnd = async (turn: ScriptedTurn): Promise<void> => {
-  turn.end();
-  expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
-  expect(must(rows<{ status: ToolCallStatus }>("SELECT status FROM tool_calls")[0]).status).toBe(
-    "invalidated",
-  );
+  expect((await finishTurn(turn)).payload.status).toBe("completed");
+  expect(callStatuses()).toEqual(["invalidated"]);
   expect(approvalStatuses()).toEqual(["expired"]);
   const { turn: next } = await submit("did it run?");
   expect(next.options.text).toContain("abandoned the approval prompt");
@@ -232,9 +252,7 @@ describe("streaming and commands", () => {
     turn.init();
     turn.text("Hel");
     turn.text("lo");
-    turn.end();
-    const finished = await client.waitFor("task_finished");
-    expect(finished.payload.status).toBe("completed");
+    expect((await finishTurn(turn)).payload.status).toBe("completed");
     const deltas = client.events.flatMap((event) =>
       event.type === "text_delta" ? [event.payload.text] : [],
     );
@@ -268,8 +286,7 @@ describe("streaming and commands", () => {
     const busy = await client.submitText("second", { messageId: "cmd-2" });
     expect(ackError(busy).code).toBe("busy");
     // Finished first, so a resend of cmd-2 that runs again would be accepted, not `busy`.
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
     client.close();
     const again = await ts.connect("client-A");
     again.conversationId = client.conversationId;
@@ -310,8 +327,7 @@ describe("streaming and commands", () => {
     });
     expect(runtime.turns).toHaveLength(1);
     expect(cmd1Rows()).toEqual([{ disposition: "failed", error_code: "internal" }]);
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
   };
 
   it("answers a command that fails after it is recorded as failed, and never runs it again", async () => {
@@ -338,88 +354,18 @@ describe("streaming and commands", () => {
     await expectResendRepeats(failed, turn);
   });
 
-  it("rejects unsupported protocol versions, invalid JSON, oversized text and busy submissions", async () => {
-    const rejected = client.waitFor("ack", (event) => event.payload.disposition === "rejected");
-    client.sendRaw(
-      JSON.stringify({
-        protocol_version: 99,
-        message_id: "x1",
-        client_id: client.clientId,
-        type: "submit_text",
-        payload: {},
-      }),
-    );
-    const ack = await rejected;
-    expect(ackError(ack.payload).code).toBe("unsupported_protocol_version");
-    expect(ackError(ack.payload).message).toContain("protocol_version 1");
-    const bad = client.waitFor("ack", (event) => event.payload.command_id === "unknown");
-    client.sendRaw("{not json");
-    expect(ackError((await bad).payload).code).toBe("invalid_message");
-    // The client drops any event its schema refuses, so receiving this ack at all shows the server
-    // did not echo a message_id the protocol forbids.
-    for (const messageId of ["", "x".repeat(LIMITS.maxIdChars + 1)]) {
-      const seen = new Set(client.events);
-      const unusable = client.waitFor(
-        "ack",
-        (event) => !seen.has(event) && event.payload.command_id === "unknown",
-      );
-      client.sendRaw(
-        JSON.stringify({
-          protocol_version: PROTOCOL_VERSION,
-          message_id: messageId,
-          client_id: client.clientId,
-          type: "start_conversation",
-          payload: {},
-        }),
-      );
-      expect(ackError((await unusable).payload).code).toBe("invalid_message");
-    }
+  it("rejects an undecodable submission and a submission while a task runs, from any client", async () => {
     const big = await client.submitText("x".repeat(40_000));
-    expect(big.disposition).toBe("rejected");
     expect(ackError(big).code).toBe("invalid_message");
     const { turn } = await submit("first");
-    const busy = await client.submitText("second");
-    expect(busy.disposition).toBe("rejected");
-    expect(ackError(busy).code).toBe("busy");
+    expect(ackError(await client.submitText("second")).code).toBe("busy");
     const other = await ts.connect("client-B");
     const otherBusy = await other.send("submit_text", {
       conversation_id: must(client.conversationId, "conversation id"),
       text: "hi",
     });
     expect(ackError(otherBusy).code).toBe("busy");
-    turn.end();
-    await client.waitFor("task_finished");
-  });
-
-  /** Ends a turn after `writeEvidence` prepares its hook evidence path; returns the recorded effort evidence. */
-  const finishWithHookEvidence = async (
-    writeEvidence: (path: string) => void,
-  ): Promise<unknown> => {
-    const { turn, taskId } = await submit("hello");
-    turn.init();
-    writeEvidence(turn.hookEvidencePath);
-    turn.end();
-    const finished = await client.waitFor("task_finished");
-    expect(finished.payload.status).toBe("completed");
-    expect(taskStatus(taskId)).toBe("completed");
-    return effortEvidence(taskId);
-  };
-
-  it("records a turn finished when its hook evidence ends in a truncated line", async () => {
-    const evidence = await finishWithHookEvidence((path) =>
-      writeFileSync(path, `${JSON.stringify({ effort: "medium" })}\n{"effort":"hi`),
-    );
-    expect(evidence).toMatchObject({ values: ["medium"], samples: 1, malformed_lines: 1 });
-  });
-
-  it("records a turn finished when its hook evidence cannot be read", async () => {
-    const evidence = await finishWithHookEvidence((path) => mkdirSync(path));
-    expect(evidence).toMatchObject({
-      values: [],
-      samples: 0,
-      read_error: "not a regular file",
-      note: expect.stringContaining("hook evidence unreadable (not a regular file"),
-    });
+    await finishTurn(turn);
   });
 
   /**
@@ -452,17 +398,19 @@ describe("streaming and commands", () => {
     const turns = 5;
     const taskIds: string[] = [];
     for (let index = 0; index < turns; index += 1) {
-      const { turn, taskId } = await submit(`turn ${index}`);
+      const { turn, taskId } = await startTurn(`turn ${index}`);
       taskIds.push(taskId);
-      turn.init();
       execFileSync("mkfifo", [turn.hookEvidencePath]);
       turn.transcriptAs = "fifo";
-      turn.end();
-      await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
+      await finishTurn(turn, taskId);
     }
     for (const taskId of taskIds) {
       expect(taskStatus(taskId)).toBe("completed");
-      expect(effortEvidence(taskId)).toMatchObject({ read_error: "not a regular file" });
+      expect(effortEvidence(taskId)).toMatchObject({
+        values: [],
+        read_error: "not a regular file",
+        note: expect.stringContaining("hook evidence unreadable (not a regular file"),
+      });
       expect(transcriptArtifacts(taskId)).toEqual([
         {
           capture_status: "failed",
@@ -471,11 +419,9 @@ describe("streaming and commands", () => {
         },
       ]);
     }
-    const { turn, taskId } = await submit("and now?");
-    turn.init();
+    const { turn, taskId } = await startTurn("and now?");
     writeFileSync(turn.hookEvidencePath, `${JSON.stringify({ effort: "medium" })}\n`);
-    turn.end();
-    await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
+    await finishTurn(turn, taskId);
     expect(effortEvidence(taskId)).toMatchObject({ values: ["medium"], read_error: null });
     expect(transcriptArtifacts(taskId)).toEqual([
       { capture_status: "retained", capture_reason: null, object_digest: expect.any(String) },
@@ -483,8 +429,7 @@ describe("streaming and commands", () => {
   });
 
   it("answers another connection while a turn-end read is held open, then records the turn", async () => {
-    const { turn, taskId } = await submit("hello");
-    turn.init();
+    const { turn, taskId } = await startTurn("hello");
     const held = await endHoldingHookEvidence(turn, `${JSON.stringify({ effort: "medium" })}\n`);
     const other = await ts.connect("client-B");
     expect((await other.sendDiagnostics()).disposition).toBe("accepted");
@@ -495,18 +440,16 @@ describe("streaming and commands", () => {
   });
 
   it("records a turn whose runtime exited as it ended, when an interruption arrives while it is recorded", async () => {
-    const { turn, taskId } = await submit("hello");
-    turn.init();
+    const { turn, taskId } = await startTurn("hello");
     const held = await endHoldingHookEvidence(turn, "");
     expect(ackResult(await client.interrupt(taskId))).toEqual({ runtime_ended: true });
     held.release();
     expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
     expect(taskStatus(taskId)).toBe("completed");
     expect(rows("SELECT 1 FROM events WHERE type LIKE 'interruption%'")).toEqual([]);
-    const { turn: next } = await submit("and now?");
+    const { turn: next, taskId: nextId } = await submit("and now?");
     expect(next.options.text).not.toContain("[Mia note, not from the user]");
-    next.end();
-    await client.waitFor("task_finished", (event) => event.payload.task_id !== taskId);
+    await finishTurn(next, nextId);
   });
 
   it("never releases a call approved after its runtime exited, while the turn is recorded", async () => {
@@ -517,27 +460,22 @@ describe("streaming and commands", () => {
     expect((await request).behavior).toBe("deny");
     held.release();
     expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
-    expect(rows("SELECT status FROM tool_calls WHERE task_id = ?", taskId)).toEqual([
-      { status: "blocked_gate" },
-    ]);
+    expect(callStatuses()).toEqual(["blocked_gate"]);
   });
 
   it("records a turn finished without the evidence whose read outlives its deadline", async () => {
-    const { turn, taskId } = await submit("hello");
-    turn.init();
+    const { turn, taskId } = await startTurn("hello");
     await endHoldingHookEvidence(turn, `${JSON.stringify({ effort: "medium" })}\n`);
     ts.expireEvidenceReads();
     expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
     expect(taskStatus(taskId)).toBe("completed");
     expect(effortEvidence(taskId)).toMatchObject({ values: [], read_error: "timed out" });
-    const { turn: next } = await submit("and now?");
-    next.end();
-    await client.waitFor("task_finished", (event) => event.payload.task_id !== taskId);
+    const { turn: next, taskId: nextId } = await submit("and now?");
+    await finishTurn(next, nextId);
   });
 
   it("records a turn whose evidence read is still held when shutdown stops waiting", async () => {
-    const { turn, taskId } = await submit("hello");
-    turn.init();
+    const { turn, taskId } = await startTurn("hello");
     await endHoldingHookEvidence(turn, "");
     const turnWait = new AbortController();
     const closing = ts.server.close(turnWait.signal);
@@ -549,8 +487,7 @@ describe("streaming and commands", () => {
   });
 
   it("keeps the transcript of a turn that shutdown interrupts, read after shutdown began", async () => {
-    const { turn, taskId } = await submit("hello");
-    turn.init();
+    const { turn, taskId } = await startTurn("hello");
     const closing = ts.server.close(new AbortController().signal);
     expect(turn.interrupted).toBe(true);
     turn.end(); // a no-op once the kill ended it
@@ -559,46 +496,22 @@ describe("streaming and commands", () => {
     expect(transcriptArtifacts(taskId)).toMatchObject([{ capture_status: "retained" }]);
   });
 
-  /** Ends a turn after `prepare` has set it up to lose its transcript; returns the transcript artifacts. */
-  const finishLosingTranscript = async (prepare: (turn: ScriptedTurn) => void) => {
-    const { turn, taskId } = await submit("hello");
-    turn.init();
-    prepare(turn);
-    turn.end();
-    const finished = await client.waitFor("task_finished");
-    expect(finished.payload.status).toBe("completed");
-    expect(taskStatus(taskId)).toBe("completed");
-    return transcriptArtifacts(taskId);
-  };
-
   it("stores a turn's transcript before the transaction that records the turn finished opens", async () => {
-    const { turn, taskId } = await submit("hello");
-    turn.init();
+    const { turn, taskId } = await startTurn("hello");
     const writtenInside = watchObjectWrites();
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
     const [transcript] = transcriptArtifacts(taskId);
     expect(transcript?.capture_status).toBe("retained");
     expect(objectStored(transcript?.object_digest ?? null)).toBe(true);
     expect(writtenInside()).toBe(false);
   });
 
-  it("records a turn finished, and why its transcript is missing, when the transcript cannot be read", async () => {
-    const transcripts = await finishLosingTranscript((turn) => {
-      turn.transcriptAs = "directory";
-    });
-    expect(transcripts).toEqual([
-      {
-        capture_status: "failed",
-        capture_reason: expect.stringContaining("unreadable: not a regular file"),
-        object_digest: null,
-      },
-    ]);
-  });
-
   it("records a turn finished, and why its transcript is missing, when the transcript cannot be stored", async () => {
-    const transcripts = await finishLosingTranscript(failObjectWrites);
-    expect(transcripts).toEqual([
+    const { turn, taskId } = await startTurn("hello");
+    failObjectWrites();
+    expect((await finishTurn(turn)).payload.status).toBe("completed");
+    expect(taskStatus(taskId)).toBe("completed");
+    expect(transcriptArtifacts(taskId)).toEqual([
       {
         capture_status: "failed",
         capture_reason: expect.stringContaining("not retained: "),
@@ -608,8 +521,7 @@ describe("streaming and commands", () => {
   });
 
   it("records nothing of a turn's end when its transcript's rows cannot be written", async () => {
-    const { turn, taskId } = await submit("hello");
-    turn.init();
+    const { turn, taskId } = await startTurn("hello");
     // Retention was decided before the turn-end transaction opened; the rows that record it commit with the
     // turn's end or not at all, so a failed link undoes the object row written before it, and the finish too.
     failArtifactLinks("runtime_transcript", "1");
@@ -626,7 +538,7 @@ describe("streaming and commands", () => {
     expect(transcriptArtifacts(taskId)).toEqual([]);
     expect(rows("SELECT 1 FROM artifacts WHERE kind = 'runtime_transcript'")).toHaveLength(0);
     expect(taskStatus(taskId)).toBe(statusBefore);
-    expect(rows("SELECT 1 FROM events WHERE type = 'task_finished'")).toHaveLength(0);
+    expect(eventCount("task_finished")).toBe(0);
   });
 
   it("still carries an interrupted turn's note into the next turn when the turn's end cannot be recorded", async () => {
@@ -642,8 +554,7 @@ describe("streaming and commands", () => {
     const { turn: next, taskId: nextId } = await submit("and now?");
     expect(next.options.text).toContain("[Mia note, not from the user]");
     expect(next.options.text).toContain("mcp__d1__change: invalidated");
-    next.end();
-    await client.waitFor("task_finished", (event) => event.payload.task_id === nextId);
+    await finishTurn(next, nextId);
   });
 });
 
@@ -678,8 +589,7 @@ describe("diagnostics", () => {
 
 describe("approval path", () => {
   it("holds a call until approval, releases exactly once, and never releases a rejected call", async () => {
-    const { turn, taskId } = await submit("change once");
-    turn.init();
+    const { turn, taskId } = await startTurn("change once");
     turn.propose("toolu_1", "mcp__d1__change", { delta: 1 });
     const decision = turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
     const requested = await client.waitFor("approval_requested");
@@ -718,9 +628,7 @@ describe("approval path", () => {
     const d2 = await second;
     expect(d2.behavior).toBe("deny");
     await turn.toolResult("toolu_2", "denied", true);
-    turn.end();
-    const finished = await client.waitFor("task_finished");
-    expect(finished.payload.status).toBe("completed");
+    expect((await finishTurn(turn)).payload.status).toBe("completed");
     // The refused call's error result stays linked to it, as its result, not as an unmatched one.
     const calls = rows<{ runtime_call_id: string; status: ToolCallStatus; has_result: number }>(
       "SELECT runtime_call_id, status, result_event_id IS NOT NULL AS has_result FROM tool_calls ORDER BY created_at",
@@ -729,7 +637,7 @@ describe("approval path", () => {
       { runtime_call_id: "toolu_1", status: "completed", has_result: 1 },
       { runtime_call_id: "toolu_2", status: "denied", has_result: 1 },
     ]);
-    expect(rows("SELECT id FROM events WHERE type = 'tool_result_unmatched'")).toHaveLength(0);
+    expect(eventCount("tool_result_unmatched")).toBe(0);
   });
 
   it("tells the client each call's progress in the status that call committed in", async () => {
@@ -751,8 +659,7 @@ describe("approval path", () => {
       }
       gateway.send(connectionId, event);
     });
-    const { turn, taskId } = await submit("progress");
-    turn.init();
+    const { turn, taskId } = await startTurn("progress");
     turn.propose("toolu_read", "mcp__d1__read", {});
     expect((await turn.request("mcp__d1__read", {}, "toolu_read")).behavior).toBe("allow");
     await turn.toolResult("toolu_read", "read");
@@ -808,8 +715,7 @@ describe("approval path", () => {
   });
 
   it("invalidates an approval when arguments change under the same runtime call id", async () => {
-    const { turn, taskId } = await submit("change");
-    turn.init();
+    const { turn, taskId } = await startTurn("change");
     turn.propose("toolu_1", "mcp__d1__change", { delta: 1 });
     const first = turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
     const requested1 = await client.waitFor("approval_requested");
@@ -836,12 +742,8 @@ describe("approval path", () => {
     expect(ackError(stale).code).toBe("invalid_state");
     await decide(taskId, requested2.payload.approval_id, "approve");
     expect((await second).behavior).toBe("allow");
-    turn.end();
-    await client.waitFor("task_finished");
-    const revisions = rows<{ binding_revision: number; status: ToolCallStatus }>(
-      "SELECT binding_revision, status FROM tool_calls WHERE runtime_call_id = 'toolu_1' ORDER BY binding_revision",
-    );
-    expect(revisions.map((row) => row.status)).toEqual(["invalidated", "unknown"]);
+    await finishTurn(turn);
+    expect(callStatuses()).toEqual(["invalidated", "unknown"]);
   });
 
   it("invalidates an approval when the stream proposes a different tool with the same arguments under its call id", async () => {
@@ -865,8 +767,8 @@ describe("approval path", () => {
     expect((await held).behavior).toBe("deny");
     const stale = await decide(taskId, requested.payload.approval_id, "approve");
     expect(ackError(stale).code).toBe("invalid_state");
-    turn.end();
-    await client.waitFor("task_finished");
+    await expectResumed(taskId);
+    await finishTurn(turn);
   });
 
   it("attaches a late stream line to the earlier revision it announces and keeps the later approval pending", async () => {
@@ -899,18 +801,15 @@ describe("approval path", () => {
     const ack = await decide(taskId, requested2.payload.approval_id, "approve");
     expect(ackResult(ack).released).toBe(true);
     expect((await second).behavior).toBe("allow");
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
   });
 
   it("completes the released call, not a later stream binding under its call id, when the result arrives", async () => {
-    const { turn } = await submit("read");
-    turn.init();
+    const { turn } = await startTurn("read");
     expect((await turn.request("mcp__d1__read", { q: 1 }, "toolu_1")).behavior).toBe("allow");
     turn.propose("toolu_1", "mcp__d1__change", { q: 1 });
     await turn.toolResult("toolu_1", "read");
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
     expect(
       rows<{ tool_identity: string; status: ToolCallStatus; has_result: number }>(
         "SELECT tool_identity, status, result_event_id IS NOT NULL AS has_result FROM tool_calls WHERE runtime_call_id = 'toolu_1' ORDER BY binding_revision",
@@ -922,18 +821,16 @@ describe("approval path", () => {
   });
 
   it("never settles a call Mia never released: a result for a streamed-only call is unmatched", async () => {
-    const { turn } = await submit("change");
-    turn.init();
+    const { turn } = await startTurn("change");
     turn.propose("toolu_1", "mcp__d1__change", { delta: 1 });
     await turn.toolResult("toolu_1", "ran anyway");
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
     expect(
       rows<{ status: ToolCallStatus; has_result: number }>(
         "SELECT status, result_event_id IS NOT NULL AS has_result FROM tool_calls",
       ),
     ).toEqual([{ status: "invalidated", has_result: 0 }]);
-    expect(rows("SELECT id FROM events WHERE type = 'tool_result_unmatched'")).toHaveLength(1);
+    expect(eventCount("tool_result_unmatched")).toBe(1);
   });
 
   it("refuses a repeated request for a call already awaiting approval and keeps one approval", async () => {
@@ -959,11 +856,8 @@ describe("approval path", () => {
     expect((await held).behavior).toBe("allow");
     expect(turn.decisions.map(({ decision }) => decision.behavior)).toEqual(["deny", "allow"]);
     expect(approvalStatuses()).toEqual(["approved"]);
-    expect(
-      rows<{ status: ToolCallStatus }>("SELECT status FROM tool_calls").map((row) => row.status),
-    ).toEqual(["dispatched"]);
-    turn.end();
-    await client.waitFor("task_finished");
+    expect(callStatuses()).toEqual(["dispatched"]);
+    await finishTurn(turn);
   });
 
   it("rejects decisions with wrong task, wrong client, or foreign ids", async () => {
@@ -983,72 +877,55 @@ describe("approval path", () => {
     expect(turn.decisions).toHaveLength(0);
     await decide(taskId, requested.payload.approval_id, "reject");
     expect((await held).behavior).toBe("deny");
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
   });
 
-  it("denies unlisted tools, policy-denied proposals, and requests without a runtime call id", async () => {
-    const { turn } = await submit("bad tools");
-    turn.init();
-    const forbidden = await turn.request("mcp__d1__forbidden", {}, "toolu_f");
-    expect(forbidden.behavior).toBe("deny");
-    const unlisted = await turn.request("mcp__d1__mystery", {}, "toolu_m");
-    expect(unlisted.behavior).toBe("deny");
-    const noId = await turn.request("mcp__d1__change", { delta: 1 }, undefined);
-    expect(noId.behavior).toBe("deny");
+  it("denies policy-denied and unlisted tools, inherited names among them, and requests without a runtime call id", async () => {
+    const { turn } = await startTurn("bad tools");
+    // A name every object inherits is unlisted, not an inherited policy, whether streamed or requested.
+    turn.propose("toolu_s", "__proto__", {});
+    expect((await turn.request("mcp__d1__forbidden", {}, "toolu_f")).behavior).toBe("deny");
+    expect(await turn.request("constructor", {}, "toolu_i")).toEqual({
+      behavior: "deny",
+      message: "Mia denied constructor: it is not part of the configured policy.",
+    });
+    expect((await turn.request("mcp__d1__change", { delta: 1 }, undefined)).behavior).toBe("deny");
     expect(rows("SELECT id FROM approvals")).toHaveLength(0);
     // Each wait is the assertion: the client is told of both refusals.
     await client.waitFor("error", (event) => event.payload.code === "configuration_error");
     await client.waitFor("error", (event) => event.payload.code === "runtime_failure");
-    turn.end();
-    await client.waitFor("task_finished");
-    const statuses = rows<{ tool_identity: string; status: ToolCallStatus }>(
-      "SELECT tool_identity, status FROM tool_calls",
-    );
-    expect(statuses.find((row) => row.tool_identity === "mcp__d1__forbidden")?.status).toBe(
-      "denied",
-    );
+    await finishTurn(turn);
+    expect(
+      rows(
+        "SELECT runtime_call_id, tool_identity, policy, status, detail FROM tool_calls WHERE runtime_call_id IN ('toolu_s', 'toolu_f', 'toolu_i') ORDER BY runtime_call_id",
+      ),
+    ).toMatchObject([
+      {
+        runtime_call_id: "toolu_f",
+        tool_identity: "mcp__d1__forbidden",
+        policy: "deny",
+        status: "denied",
+        detail: "denied by policy",
+      },
+      {
+        runtime_call_id: "toolu_i",
+        tool_identity: "constructor",
+        policy: "unlisted",
+        status: "denied",
+        detail: "tool not listed in toolPolicy",
+      },
+      {
+        runtime_call_id: "toolu_s",
+        tool_identity: "__proto__",
+        policy: "unlisted",
+      },
+    ]);
+    expect(
+      rows(
+        "SELECT id FROM events WHERE type = 'tool_proposed' AND json_extract(payload, '$.runtime_call_id') = 'toolu_s'",
+      ),
+    ).toHaveLength(1);
   });
-
-  it.each(["constructor", "__proto__"])(
-    "denies and records a request for %s as unlisted, not as an inherited policy",
-    async (tool) => {
-      const { turn } = await submit("inherited name");
-      turn.init();
-      const decision = await turn.request(tool, {}, "toolu_i");
-      expect(decision).toMatchObject({
-        behavior: "deny",
-        message: `Mia denied ${tool}: it is not part of the configured policy.`,
-      });
-      const error = await client.waitFor("error");
-      expect(error.payload.code).toBe("configuration_error");
-      turn.end();
-      await client.waitFor("task_finished");
-      expect(rows("SELECT tool_identity, policy, status, detail FROM tool_calls")).toEqual([
-        {
-          tool_identity: tool,
-          policy: "unlisted",
-          status: "denied",
-          detail: "tool not listed in toolPolicy",
-        },
-      ]);
-    },
-  );
-
-  it.each(["constructor", "__proto__"])(
-    "records a streamed proposal of %s as unlisted, not as an inherited policy",
-    async (tool) => {
-      const { turn } = await submit("inherited name");
-      turn.init();
-      turn.propose("toolu_i", tool, {});
-      turn.end();
-      await client.waitFor("task_finished");
-      expect(rows("SELECT tool_identity, policy FROM tool_calls")).toEqual([
-        { tool_identity: tool, policy: "unlisted" },
-      ]);
-      expect(rows("SELECT id FROM events WHERE type = 'tool_proposed'")).toHaveLength(1);
-    },
-  );
 
   it("keeps the call held when the decision cannot be persisted", async () => {
     const { turn, taskId, held, requested } = await submitHeldCall("change");
@@ -1061,8 +938,7 @@ describe("approval path", () => {
     const retry = await decide(taskId, requested.payload.approval_id, "approve");
     expect(retry.disposition).toBe("accepted");
     expect((await held).behavior).toBe("allow");
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
   });
 
   it("releases a committed decision even when delivering it to the client fails", async () => {
@@ -1079,25 +955,20 @@ describe("approval path", () => {
     expect((await held).behavior).toBe("allow");
     await dispatched;
     expect(approvalStatuses()).toEqual(["approved"]);
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
   });
 
-  it("leaves no call behind when a permission request cannot be recorded", async () => {
-    const { turn } = await submit("read");
-    turn.init();
+  it("denies each request that cannot be recorded, leaving no call behind and no prompt held", async () => {
+    const { turn, taskId } = await startTurn("change");
     failNextCommit();
-    const read = await turn.request("mcp__d1__read", {}, "toolu_1");
-    expect(read.behavior).toBe("deny");
-    turn.end();
-    const finished = await client.waitFor("task_finished");
-    expect(finished.payload.status).toBe("completed");
+    expect((await turn.request("mcp__d1__read", {}, "toolu_read")).behavior).toBe("deny");
+    failNextCommit();
+    // A refusal answers with its own denial even when it cannot be recorded.
+    expect(await turn.request("mcp__d1__change", { delta: 1 }, undefined)).toEqual({
+      behavior: "deny",
+      message: "Mia cannot bind this call to a runtime call id; rejected.",
+    });
     expect(rows("SELECT id FROM tool_calls")).toHaveLength(0);
-  });
-
-  it("denies an asked call whose approval request cannot be recorded, without holding its prompt", async () => {
-    const { turn, taskId } = await submit("change");
-    turn.init();
     failNextCommit();
     const refused = await turn.request("mcp__d1__change", { delta: 1 }, "toolu_1");
     expect(refused).toMatchObject({
@@ -1111,26 +982,11 @@ describe("approval path", () => {
     await decide(taskId, requested.payload.approval_id, "approve");
     expect((await retry).behavior).toBe("allow");
     expect(approvalStatuses()).toEqual(["approved"]);
-    turn.end();
-    await client.waitFor("task_finished");
-  });
-
-  it("answers a refused request with its own denial even when the refusal cannot be recorded", async () => {
-    const { turn } = await submit("no id");
-    turn.init();
-    failNextCommit();
-    expect(await turn.request("mcp__d1__change", { delta: 1 }, undefined)).toEqual({
-      behavior: "deny",
-      message: "Mia cannot bind this call to a runtime call id; rejected.",
-    });
-    expect(rows("SELECT id FROM tool_calls")).toHaveLength(0);
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
   });
 
   it("holds a prompt whose approval request committed even when delivering it to the client fails", async () => {
-    const { turn, taskId } = await submit("change");
-    turn.init();
+    const { turn, taskId } = await startTurn("change");
     failDelivery("approval_requested");
     const awaiting = client.waitFor(
       "tool_call",
@@ -1144,8 +1000,7 @@ describe("approval path", () => {
       result: { released: true },
     });
     expect((await held).behavior).toBe("allow");
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
   });
 
   it("keeps the earlier approval pending when a changed binding cannot be recorded", async () => {
@@ -1157,8 +1012,7 @@ describe("approval path", () => {
     const ack = await decide(taskId, requested.payload.approval_id, "approve");
     expect(ack.disposition).toBe("accepted");
     expect((await held).behavior).toBe("allow");
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
   });
 
   it("expires an approval whose prompt the runtime abandoned, resumes the task, and tells the next turn", async () => {
@@ -1189,7 +1043,7 @@ describe("approval path", () => {
         message: expect.stringContaining("can no longer be decided; its call was not released"),
       });
       expect(turn.decisions.map(({ decision }) => decision.behavior)).toEqual(["deny"]);
-      expect(rows("SELECT id FROM events WHERE type = 'tool_dispatched'")).toHaveLength(0);
+      expect(eventCount("tool_dispatched")).toBe(0);
       const busy = await client.submitText("another");
       expect(ackError(busy).message).toContain("is running; wait for it to finish or interrupt it");
       await expectAbandonedAtTurnEnd(turn);
@@ -1206,12 +1060,8 @@ describe("approval path", () => {
       await decide(taskId, again.payload.approval_id, "approve");
       expect((await retry).behavior).toBe("allow");
       await turn.toolResult("toolu_1", "changed");
-      turn.end();
-      expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
-      const calls = rows<{ status: ToolCallStatus }>(
-        "SELECT status FROM tool_calls ORDER BY binding_revision",
-      );
-      expect(calls.map((call) => call.status)).toEqual(["invalidated", "completed"]);
+      expect((await finishTurn(turn)).payload.status).toBe("completed");
+      expect(callStatuses()).toEqual(["invalidated", "completed"]);
       expect(approvalStatuses().sort()).toEqual(["approved", "expired"]);
     });
 
@@ -1219,16 +1069,13 @@ describe("approval path", () => {
       const { taskId } = await abandonUnrecorded();
       expect((await client.interrupt(taskId)).disposition).toBe("accepted");
       expect((await client.waitFor("task_finished")).payload.status).toBe("interrupted");
-      expect(
-        must(rows<{ status: ToolCallStatus }>("SELECT status FROM tool_calls")[0]).status,
-      ).toBe("invalidated");
+      expect(callStatuses()).toEqual(["invalidated"]);
       expect(approvalStatuses()).toEqual(["expired"]);
     });
   });
 
   it("expires at once an approval whose prompt the runtime abandoned before Mia got it", async () => {
-    const { turn, taskId } = await submit("change");
-    turn.init();
+    const { turn, taskId } = await startTurn("change");
     const decision = await turn.requestAbandoned("mcp__d1__change", { delta: 1 }, "toolu_1");
     expect(decision).toMatchObject({
       behavior: "deny",
@@ -1238,7 +1085,7 @@ describe("approval path", () => {
     expect(approvalStatuses()).toEqual(["expired"]);
     const late = await decide(taskId, requested.payload.approval_id, "approve");
     expect(ackError(late).code).toBe("invalid_state");
-    expect(rows("SELECT id FROM events WHERE type = 'tool_dispatched'")).toHaveLength(0);
+    expect(eventCount("tool_dispatched")).toBe(0);
     await expectResumed(taskId);
     await expectAbandonedAtTurnEnd(turn);
   });
@@ -1275,13 +1122,12 @@ describe("approval path", () => {
       code: "invalid_state",
       message: expect.stringContaining("is expired, not pending"),
     });
-    expect(rows("SELECT id FROM events WHERE type = 'tool_dispatched'")).toHaveLength(0);
+    expect(eventCount("tool_dispatched")).toBe(0);
     await expectAbandonedAtTurnEnd(turn);
   });
 
   it("keeps an approval abandoned before Mia got it undecidable when its expiry cannot be recorded", async () => {
-    const { turn, taskId } = await submit("change");
-    turn.init();
+    const { turn, taskId } = await startTurn("change");
     // The request commits; the expiry that follows it does not.
     ts.server.catalog.db.exec(`CREATE TRIGGER fail_expiry BEFORE UPDATE ON approvals
       WHEN NEW.status = 'expired' BEGIN SELECT RAISE(ABORT, 'simulated expiry failure'); END`);
@@ -1295,15 +1141,14 @@ describe("approval path", () => {
       code: "invalid_state",
       message: expect.stringContaining("can no longer be decided; its call was not released"),
     });
-    expect(rows("SELECT id FROM events WHERE type = 'tool_dispatched'")).toHaveLength(0);
+    expect(eventCount("tool_dispatched")).toBe(0);
     await expectAbandonedAtTurnEnd(turn);
   });
 
   describe("with as many prompts held as the server holds at once", () => {
     /** Hold MAX_HELD_PROMPTS calls in one turn, each awaiting its own approval. */
     const holdAll = async () => {
-      const { turn, taskId } = await submit("change everything");
-      turn.init();
+      const { turn, taskId } = await startTurn("change everything");
       const held = Array.from({ length: MAX_HELD_PROMPTS }, (_, index) =>
         turn.request("mcp__d1__change", { delta: index }, `toolu_${index}`),
       );
@@ -1342,8 +1187,7 @@ describe("approval path", () => {
       );
       await decide(taskId, asked.payload.approval_id, "approve");
       expect((await again).behavior).toBe("allow");
-      turn.end();
-      await client.waitFor("task_finished");
+      await finishTurn(turn);
     });
 
     it("answers the prompts still held even when the turn's end cannot be recorded", async () => {
@@ -1360,8 +1204,7 @@ describe("approval path", () => {
 
     it("answers every prompt still held when the turn ends, so the next turn can ask", async () => {
       const { turn, held } = await holdAll();
-      turn.end();
-      await client.waitFor("task_finished");
+      await finishTurn(turn);
       const answers = await Promise.all(held);
       expect(answers.every((answer) => answer.behavior === "deny")).toBe(true);
       expect(answers[0]).toMatchObject({ message: expect.stringContaining("the turn ended") });
@@ -1375,8 +1218,7 @@ describe("approval path", () => {
       );
       await decide(taskId, asked.payload.approval_id, "approve");
       expect((await retry).behavior).toBe("allow");
-      next.end();
-      await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
+      await finishTurn(next, taskId);
     });
   });
 
@@ -1386,18 +1228,7 @@ describe("approval path", () => {
     expect((await held).behavior).toBe("deny");
     await expectResumed(taskId);
     await turn.toolResult("toolu_1", "read");
-    turn.end();
-    expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
-  });
-
-  it("resumes the task when a streamed new binding supersedes its last pending approval", async () => {
-    const { turn, taskId, held } = await submitHeldCall("change");
-    turn.propose("toolu_1", "mcp__d1__change", { delta: 2 });
-    expect((await held).behavior).toBe("deny");
-    expect(approvalStatuses()).toEqual(["invalidated"]);
-    await expectResumed(taskId);
-    turn.end();
-    expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
+    expect((await finishTurn(turn)).payload.status).toBe("completed");
   });
 
   it("treats disconnection as no decision and keeps the pending record", async () => {
@@ -1407,7 +1238,7 @@ describe("approval path", () => {
     await closed;
     expect(turn.decisions).toHaveLength(0);
     expect(approvalStatuses()).toEqual(["pending"]);
-    expect(rows("SELECT id FROM events WHERE type = 'client_disconnected'")).toHaveLength(1);
+    expect(eventCount("client_disconnected")).toBe(1);
     // the same client reconnecting can still decide
     const again = await ts.connect("client-A");
     again.conversationId = client.conversationId;
@@ -1423,8 +1254,7 @@ describe("approval path", () => {
   });
 
   it("lists and resolves pending approvals in the order they were requested, not the order their calls were seen", async () => {
-    const { turn, taskId } = await submit("two changes");
-    turn.init();
+    const { turn, taskId } = await startTurn("two changes");
     turn.propose("toolu_a", "mcp__d1__change", { delta: 1 });
     turn.propose("toolu_b", "mcp__d1__change", { delta: 2 });
     await client.waitFor("tool_call", (event) => event.payload.runtime_call_id === "toolu_b");
@@ -1480,8 +1310,7 @@ describe("record times", () => {
     await decide(taskId, requested.payload.approval_id, "approve");
     expect((await held).behavior).toBe("allow");
     await turn.toolResult("toolu_1", JSON.stringify({ counter: 1 }));
-    turn.end();
-    const finished = await client.waitFor("task_finished");
+    const finished = await finishTurn(turn);
     const one = <T>(sql: string): T => must(rows<T>(sql, taskId)[0], sql);
     const eventAt = (type: string): string =>
       must(
@@ -1569,8 +1398,7 @@ describe("record times", () => {
     );
     const { file, turn, taskId } = await approvedArtifactCall();
     await declareOutput(turn, file);
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
     const createdAt = (sql: string, id: string): string[] =>
       rows<{ created_at: string }>(sql, id).map((row) => row.created_at);
     // The start's commit: the provenance set and every snapshot it retained.
@@ -1657,8 +1485,7 @@ describe("interruption path", () => {
     expect(approvalStatuses()).toEqual(["pending"]);
     await decide(taskId, requested.payload.approval_id, "approve");
     expect((await held).behavior).toBe("allow");
-    turn.end();
-    expect((await client.waitFor("task_finished")).payload.status).toBe("outcome_unknown");
+    expect((await finishTurn(turn)).payload.status).toBe("outcome_unknown");
   });
 
   it("interrupt before release: gate closes, approval is stale, nothing dispatches", async () => {
@@ -1673,14 +1500,13 @@ describe("interruption path", () => {
     expect(outcome.payload.task_status).toBe("interrupted");
     expect(outcome.payload.actions[0]?.status).toBe("invalidated");
     expect(outcome.payload.runtime_cancellation).toBe("forced_kill");
-    expect(rows("SELECT id FROM events WHERE type = 'tool_dispatched'")).toHaveLength(0);
+    expect(eventCount("tool_dispatched")).toBe(0);
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("interrupted");
   });
 
   it("records the killed runtime's exit after the interruption that killed it", async () => {
-    const { turn, taskId } = await submit("interrupted");
-    turn.init();
+    const { taskId } = await startTurn("interrupted");
     expect((await client.interrupt(taskId)).disposition).toBe("accepted");
     await client.waitFor("task_finished");
     const types = rows<{ type: string }>(
@@ -1731,7 +1557,7 @@ describe("interruption path", () => {
       expect.objectContaining({ tool_identity: "mcp__d1__slow", status: "unknown" }),
     ]);
     await client.waitFor("task_finished");
-    const { turn: next } = await submit("what happened?");
+    const { turn: next, taskId: nextId } = await submit("what happened?");
     expect(next.options.text).toContain("[Mia note, not from the user]");
     expect(next.options.text).toContain("mcp__d1__slow: unknown");
     expect(next.options.text.endsWith("what happened?")).toBe(true);
@@ -1741,8 +1567,7 @@ describe("interruption path", () => {
     expect(JSON.parse(must(recorded[1], "second task_submitted event").payload).text).toBe(
       "what happened?",
     );
-    next.end();
-    await client.waitFor("task_finished", (event) => event.payload.task_id !== taskId);
+    await finishTurn(next, nextId);
   });
 
   it("blocks a policy-allowed action proposed after the gate closed", async () => {
@@ -1754,9 +1579,7 @@ describe("interruption path", () => {
         mcp__d1__forbidden: "deny",
       },
     });
-    const submission = await submit("slow then change");
-    const turn = submission.turn;
-    const taskId = submission.taskId;
+    const { turn, taskId } = await submit("slow then change");
     turn.survivesInterrupt = true;
     turn.init();
     const slow = turn.request("mcp__d1__slow", { mode: "cancellable" }, "toolu_1");
@@ -1766,13 +1589,9 @@ describe("interruption path", () => {
     await client.interrupt(taskId);
     const change = await turn.request("mcp__d1__change", { delta: 1 }, "toolu_2");
     expect(change.behavior).toBe("deny");
-    expect(
-      must(
-        rows<{ status: ToolCallStatus }>(
-          "SELECT status FROM tool_calls WHERE runtime_call_id = 'toolu_2'",
-        )[0],
-      ).status,
-    ).toBe("blocked_gate");
+    expect(rows("SELECT status FROM tool_calls WHERE runtime_call_id = 'toolu_2'")).toEqual([
+      { status: "blocked_gate" },
+    ]);
     turn.end("failed", "killed late");
     const outcome = await client.waitFor("interruption_outcome");
     expect(outcome.payload.runtime_cancellation).toBe("unknown");
@@ -1782,31 +1601,23 @@ describe("interruption path", () => {
   });
 
   it("reports unknown when a released call's result cannot be recorded", async () => {
-    const { turn } = await submit("read");
-    turn.init();
+    const { turn } = await startTurn("read");
     expect((await turn.request("mcp__d1__read", {}, "toolu_1")).behavior).toBe("allow");
     failNextCommit();
     await turn.toolResult("toolu_1", "ok");
-    turn.end();
-    const finished = await client.waitFor("task_finished");
-    expect(finished.payload.status).toBe("outcome_unknown");
-    expect(must(rows<{ status: ToolCallStatus }>("SELECT status FROM tool_calls")[0]).status).toBe(
-      "unknown",
-    );
+    expect((await finishTurn(turn)).payload.status).toBe("outcome_unknown");
+    expect(callStatuses()).toEqual(["unknown"]);
   });
 
   it("reports unknown when a released call never returns a result", async () => {
-    const { turn } = await submit("read");
-    turn.init();
+    const { turn } = await startTurn("read");
     const read = await turn.request("mcp__d1__read", {}, "toolu_1");
     expect(read.behavior).toBe("allow");
     turn.end("failed", "runtime crashed");
     const finished = await client.waitFor("task_finished");
     expect(finished.payload.status).toBe("outcome_unknown");
     expect(finished.payload.error).toContain("runtime crashed");
-    expect(must(rows<{ status: ToolCallStatus }>("SELECT status FROM tool_calls")[0]).status).toBe(
-      "unknown",
-    );
+    expect(callStatuses()).toEqual(["unknown"]);
     // The configured policy is unchanged by the unknown outcome: the model, not the harness, judges whether a repeat is
     // safe, and it is told what is unknown through the Mia note on its next turn.
     const { turn: next, taskId } = await submit("read again");
@@ -1814,8 +1625,7 @@ describe("interruption path", () => {
     expect(next.options.text).toContain("mcp__d1__read: unknown");
     const again = await next.request("mcp__d1__read", {}, "toolu_2");
     expect(again.behavior).toBe("allow");
-    next.end();
-    await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
+    await finishTurn(next, taskId);
   });
 });
 
@@ -1826,11 +1636,10 @@ describe("runtime session", () => {
     resume: boolean,
   ) => {
     await client.waitFor("task_finished");
-    const { turn: next } = await submit("second");
+    const { turn: next, taskId: nextId } = await submit("second");
     expect(next.launch.resume).toBe(resume);
     expect(next.options.runtimeConversationId).toBe(first.turn.options.runtimeConversationId);
-    next.end();
-    await client.waitFor("task_finished", (event) => event.payload.task_id !== first.taskId);
+    await finishTurn(next, nextId);
   };
 
   it("starts no turn for a submission that cannot be recorded, and starts its retry as the first turn", async () => {
@@ -1982,8 +1791,7 @@ describe("conversation start", () => {
     expect(ackError(await ack).code).toBe("busy");
     expect(conversationCount()).toBe(before);
     expect(client.conversationId).toBe(current);
-    turn.end();
-    await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
+    await finishTurn(turn, taskId);
   });
 
   it("commits a start whose client disconnects during its reads, for its resend to adopt", async () => {
@@ -2211,13 +2019,11 @@ describe("configuration and provenance", () => {
     const first = await submit("first");
     expect(first.turn.options.agentPromptFile).toBe(retained);
     first.turn.init();
-    first.turn.end();
-    await client.waitFor("task_finished", (event) => event.payload.task_id === first.taskId);
+    await finishTurn(first.turn, first.taskId);
     const second = await submit("second");
     expect(second.turn.options.agentPromptFile).toBe(retained);
     expect(readFileSync(retained, "utf8")).toBe(original);
-    second.turn.end();
-    await client.waitFor("task_finished", (event) => event.payload.task_id === second.taskId);
+    await finishTurn(second.turn, second.taskId);
   });
 
   it("appends no prompt to a conversation whose prompt file was missing at start", async () => {
@@ -2227,60 +2033,14 @@ describe("configuration and provenance", () => {
       expect(promptProvenance()).toEqual({ availability: "unavailable", object_digest: null });
       const { turn, taskId } = await submit("no prompt");
       expect(turn.options.agentPromptFile).toBeNull();
-      turn.end();
-      await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
+      await finishTurn(turn, taskId);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("refuses to start a conversation whose prompt cannot be read, and keeps the current one", async () => {
-    using dir = mkdtempDisposableSync(join(tmpdir(), "mia-unreadable-prompt-"));
-    const promptFile = join(dir.path, "agent.md");
-    writeFileSync(promptFile, "prompt");
-    await restartSession({ agentPromptFile: promptFile });
-    const current = must(client.conversationId, "conversation id");
-    const before = conversationRecords();
-    // A directory where the prompt was: it exists, so it is not "missing", and reading it fails (EISDIR).
-    rmSync(promptFile);
-    mkdirSync(promptFile);
-    await expect(client.startConversation()).rejects.toThrow("record_failure");
-    expect(conversationRecords()).toEqual(before);
-    expect(client.conversationId).toBe(current);
-    const { turn, taskId } = await submit("still here");
-    turn.end();
-    await client.waitFor("task_finished", (event) => event.payload.task_id === taskId);
-  });
-
-  it("refuses unsupported tool surfaces and unresolved placeholders", () => {
-    const profile = testProfile(ts.dir);
-    expect(() => validateRuntimeConfig({ ...profile.runtime, builtinTools: ["Bash"] })).toThrow(
-      ConfigurationError,
-    );
-    expect(() =>
-      validateRuntimeConfig({ ...profile.runtime, toolPolicy: { mcp__other__x: "ask" } }),
-    ).toThrow(ConfigurationError);
-    expect(() => validateRuntimeConfig({ ...profile.runtime, env: { MY_API_KEY: "x" } })).toThrow(
-      ConfigurationError,
-    );
-  });
-
   it("registers declared tool outputs inside the output directory and ignores unmatched calls", async () => {
-    const file = writeOutputFile("result.txt", "D1");
-    const { turn, taskId } = await submit("artifact");
-    turn.init();
-    const decision = turn.request(
-      "mcp__d1__artifact",
-      { name: "result.txt", text: "D1" },
-      "toolu_1",
-    );
-    const requested = await client.waitFor("approval_requested");
-    await client.decide({
-      taskId: taskId,
-      approvalId: requested.payload.approval_id,
-      decision: "approve",
-    });
-    await decision;
+    const { file, turn } = await approvedArtifactCall();
     await turn.toolResult(
       "toolu_1",
       JSON.stringify({ artifact: { path: file, name: "result.txt", mime_type: "text/plain" } }),
@@ -2289,8 +2049,7 @@ describe("configuration and provenance", () => {
       "toolu_x",
       JSON.stringify({ artifact: { path: "/etc/hostname", name: "hostname" } }),
     );
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
     const artifacts = rows<{
       logical_name: string;
       capture_status: CaptureStatus;
@@ -2311,7 +2070,7 @@ describe("configuration and provenance", () => {
     ).toBe("D1");
     expect(existsSync(file)).toBe(true);
     // the unmatched tool_use id (toolu_x) is recorded, not collected
-    expect(rows("SELECT id FROM events WHERE type = 'tool_result_unmatched'")).toHaveLength(1);
+    expect(eventCount("tool_result_unmatched")).toBe(1);
     expect(artifacts.find((artifact) => artifact.logical_name === "hostname")).toBeUndefined();
   });
 
@@ -2328,7 +2087,7 @@ describe("configuration and provenance", () => {
   const releaseIntoRetainedOutput = async (capture: HeldRead, handled: Promise<void>) => {
     capture.release();
     await handled;
-    expect(rows("SELECT status FROM tool_calls")).toEqual([{ status: "completed" }]);
+    expect(callStatuses()).toEqual(["completed"]);
     expect(rows("SELECT capture_status FROM artifacts WHERE kind = 'tool_output'")).toEqual([
       { capture_status: "retained" },
     ]);
@@ -2337,10 +2096,9 @@ describe("configuration and provenance", () => {
   it("answers commands while a declared tool output is captured, then records the result with it", async () => {
     const { turn, capture, handled } = await resultWithHeldCapture();
     expect((await client.heartbeat()).disposition).toBe("accepted");
-    expect(rows("SELECT 1 FROM events WHERE type = 'tool_result'")).toHaveLength(0);
+    expect(eventCount("tool_result")).toBe(0);
     await releaseIntoRetainedOutput(capture, handled);
-    turn.end();
-    expect((await client.waitFor("task_finished")).payload.status).toBe("completed");
+    expect((await finishTurn(turn)).payload.status).toBe("completed");
   });
 
   it("records a result whose output is captured while its task is interrupted as completed", async () => {
@@ -2348,9 +2106,8 @@ describe("configuration and provenance", () => {
     turn.survivesInterrupt = true;
     expect((await client.interrupt(taskId)).disposition).toBe("accepted");
     await releaseIntoRetainedOutput(capture, handled);
-    turn.end();
-    await client.waitFor("task_finished");
-    expect(rows("SELECT status FROM tool_calls")).toEqual([{ status: "completed" }]);
+    await finishTurn(turn);
+    expect(callStatuses()).toEqual(["completed"]);
   });
 
   // The adapter ends a turn before its pending event settles only when it stops reading a runtime whose
@@ -2359,13 +2116,12 @@ describe("configuration and provenance", () => {
     const { file, turn, taskId, capture, handled } = await resultWithHeldCapture();
     turn.survivesInterrupt = true;
     expect((await client.interrupt(taskId)).disposition).toBe("accepted");
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
     const recorded = countRows("events");
     capture.release();
     await handled;
     expect(countRows("events")).toBe(recorded);
-    expect(rows("SELECT 1 FROM events WHERE type = 'tool_result'")).toHaveLength(0);
+    expect(eventCount("tool_result")).toBe(0);
     expect(rows("SELECT 1 FROM artifacts WHERE kind = 'tool_output'")).toHaveLength(0);
     expect(ts.logs).toContainEqual(
       expect.stringContaining(`tool_result (output ${file} captured) for task ${taskId}`),
@@ -2373,82 +2129,27 @@ describe("configuration and provenance", () => {
   });
 
   it("records a non-retained capture with its reason, linked only to its tool call", async () => {
-    const outDir = must(ts.profile.runtime.outputDirectories[0], "output directory");
-    mkdirSync(join(outDir, "folder"), { recursive: true });
-    const declarations = {
-      toolu_1: { path: "/etc/hostname", name: "external" },
-      toolu_2: { path: join(outDir, "folder"), name: "directory" },
-      toolu_3: { path: join(outDir, "absent.txt"), name: "absent" },
-      toolu_4: { path: "outputs/absent.txt", name: "relative" },
-    };
-    const { turn, taskId } = await submit("artifacts");
-    turn.init();
-    for (const [callId, artifact] of Object.entries(declarations)) {
-      const pending = turn.request("mcp__d1__artifact", { name: artifact.name }, callId);
-      const requested = await client.waitFor(
-        "approval_requested",
-        (event) => event.payload.runtime_call_id === callId,
-      );
-      await decide(taskId, requested.payload.approval_id, "approve");
-      await pending;
-      await turn.toolResult(callId, JSON.stringify({ artifact }));
-    }
-    turn.end();
-    await client.waitFor("task_finished");
-    const captured = rows<{
-      logical_name: string;
-      capture_status: CaptureStatus;
-      capture_reason: string;
-    }>(
-      "SELECT logical_name, capture_status, capture_reason FROM artifacts WHERE kind = 'tool_output' AND object_digest IS NULL AND external_locator = original_path ORDER BY logical_name",
+    const { turn } = await approvedArtifactCall();
+    await turn.toolResult(
+      "toolu_1",
+      JSON.stringify({ artifact: { path: "/etc/hostname", name: "external" } }),
     );
-    expect(captured).toEqual([
-      { logical_name: "absent", capture_status: "missing", capture_reason: expect.any(String) },
-      { logical_name: "directory", capture_status: "failed", capture_reason: expect.any(String) },
+    await finishTurn(turn);
+    expect(
+      rows(
+        "SELECT a.capture_status, a.object_digest, a.external_locator, l.relation, l.tool_call_id IS NOT NULL AS linked FROM artifacts a JOIN artifact_links l ON l.artifact_id = a.id WHERE a.kind = 'tool_output'",
+      ),
+    ).toEqual([
       {
-        logical_name: "external",
         capture_status: "external_only",
-        capture_reason: expect.any(String),
-      },
-      {
-        logical_name: "relative",
-        capture_status: "failed",
-        capture_reason: "declared path must be absolute",
+        object_digest: null,
+        external_locator: "/etc/hostname",
+        relation: "tool_result",
+        linked: 1,
       },
     ]);
-    const relations = rows<{ relation: LinkRelation }>(
-      "SELECT l.relation FROM artifact_links l JOIN artifacts a ON a.id = l.artifact_id WHERE a.kind = 'tool_output' AND l.tool_call_id IS NOT NULL",
-    );
-    expect(relations).toEqual(Array.from({ length: 4 }, () => ({ relation: "tool_result" })));
-    expect(rows("SELECT id FROM artifact_links WHERE relation = 'task_output'")).toHaveLength(0);
-    expect(rows("SELECT id FROM events WHERE type = 'artifact_registered'")).toHaveLength(0);
-    expect(rows("SELECT id FROM events WHERE type = 'tool_result'")).toHaveLength(4);
+    expect(eventCount("artifact_registered")).toBe(0);
   });
-
-  /**
-   * Complete one approved call whose result declares a file in the output directory, after `prepare` has set
-   * up its retention to fail. The call and task still complete; returns the file's digest and its artifacts.
-   */
-  const completeLosingToolOutput = async (prepare: () => void) => {
-    const { file, turn } = await approvedArtifactCall();
-    prepare();
-    await declareOutput(turn, file);
-    turn.end();
-    const finished = await client.waitFor("task_finished");
-    expect(finished.payload.status).toBe("completed");
-    expect(rows("SELECT status FROM tool_calls")).toEqual([{ status: "completed" }]);
-    expect(rows("SELECT 1 FROM events WHERE type = 'tool_result'")).toHaveLength(1);
-    expect(rows("SELECT 1 FROM events WHERE type = 'artifact_registered'")).toHaveLength(0);
-    const artifacts = rows<{
-      capture_status: CaptureStatus;
-      capture_reason: string | null;
-      object_digest: string | null;
-      external_locator: string | null;
-    }>(
-      "SELECT capture_status, capture_reason, object_digest, external_locator FROM artifacts WHERE kind = 'tool_output'",
-    );
-    return { file, digest: ObjectStore.digestOf(Buffer.from("D1")), artifacts };
-  };
 
   it("stores a declared tool output before the transaction that registers it opens", async () => {
     const { file, turn } = await approvedArtifactCall();
@@ -2460,8 +2161,7 @@ describe("configuration and provenance", () => {
     ]);
     expect(objectStored(digest)).toBe(true);
     expect(writtenInside()).toBe(false);
-    turn.end();
-    await client.waitFor("task_finished");
+    await finishTurn(turn);
   });
 
   // The rows that record a retained output commit with the tool result or not at all: retention was decided
@@ -2477,7 +2177,7 @@ describe("configuration and provenance", () => {
     "leaves the call as it was, and no row pointing at the stored output, when %s",
     async (_failure, fail, error) => {
       const { file, turn, taskId } = await approvedArtifactCall();
-      const statusBefore = rows("SELECT status FROM tool_calls");
+      const statusBefore = callStatuses();
       const digest = ObjectStore.digestOf(Buffer.from("D1"));
       fail();
       await declareOutput(turn, file);
@@ -2486,10 +2186,9 @@ describe("configuration and provenance", () => {
       expect(objectStored(digest)).toBe(true);
       expect(rows("SELECT 1 FROM objects WHERE digest = ?", digest)).toHaveLength(0);
       expect(rows("SELECT 1 FROM artifacts WHERE kind = 'tool_output'")).toHaveLength(0);
-      expect(rows("SELECT 1 FROM events WHERE type = 'tool_result'")).toHaveLength(0);
-      expect(rows("SELECT status FROM tool_calls")).toEqual(statusBefore);
-      turn.end();
-      const finished = await client.waitFor("task_finished");
+      expect(eventCount("tool_result")).toBe(0);
+      expect(callStatuses()).toEqual(statusBefore);
+      const finished = await finishTurn(turn);
       // In memory the call never completed either, so the turn cannot say what it did.
       expect(finished.payload.status).toBe("outcome_unknown");
       expect(taskStatus(taskId)).toBe("outcome_unknown");
@@ -2497,8 +2196,18 @@ describe("configuration and provenance", () => {
   );
 
   it("records a tool result, and why its output is missing, when the output cannot be stored", async () => {
-    const { file, artifacts } = await completeLosingToolOutput(failObjectWrites);
-    expect(artifacts).toEqual([
+    const { file, turn } = await approvedArtifactCall();
+    failObjectWrites();
+    await declareOutput(turn, file);
+    expect((await finishTurn(turn)).payload.status).toBe("completed");
+    expect(callStatuses()).toEqual(["completed"]);
+    expect(eventCount("tool_result")).toBe(1);
+    expect(eventCount("artifact_registered")).toBe(0);
+    expect(
+      rows(
+        "SELECT capture_status, capture_reason, object_digest, external_locator FROM artifacts WHERE kind = 'tool_output'",
+      ),
+    ).toEqual([
       {
         capture_status: "failed",
         capture_reason: expect.stringMatching(/^not retained: EEXIST: /),

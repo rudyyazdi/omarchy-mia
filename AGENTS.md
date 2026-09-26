@@ -37,6 +37,7 @@ This file contains the guidelines for contributing to this codebase. It holds no
 
 ## Testing
 
+- Test only what a careful reader could get wrong: branching decisions, invariants, ordering, concurrency and boundaries. Code whose correctness is evident from reading it or enforced by the type checker gets no test.
 - Test observable contracts and invariants, not implementation details. Test decisions with fast unit tests beside the module, and verify wiring and critical end-to-end invariants through acceptance tests.
 - A bug fix lands with a test that fails without the fix.
 - A test waits on an event or a promise and moves time only with fake timers, never by waiting.

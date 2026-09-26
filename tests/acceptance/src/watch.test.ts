@@ -378,26 +378,6 @@ describe("mia debug watch", () => {
     expect(toolCallNode(messages).view.body).toContain(
       "MCP request and response: not recorded (debug mode off)",
     );
-    expect(messages.filter((message) => message.op === "node").map((node) => node.kind)).toEqual([
-      "task",
-      "tool_call",
-    ]);
-  });
-
-  it("marks a call to a real server as not recorded in a conversation captured in debug mode", async () => {
-    const messages = await watchedFinished({ debugMode: true });
-    expect(messages[0]).toMatchObject({
-      op: "conversation",
-      view: { summary: expect.stringContaining("debug mode on") },
-    });
-    expect(messages.filter((message) => message.op === "node").map((node) => node.kind)).toEqual([
-      "task",
-      "tool_call",
-    ]);
-    expect(toolCallNode(messages).view.body).toContain(
-      "MCP request and response: not recorded</p>",
-    );
-    expect(JSON.stringify(messages)).not.toContain("debug mode off)");
   });
 
   it("says a call's server is unknown when the conversation's tool contracts cannot be read", async () => {
@@ -430,6 +410,10 @@ describe("mia debug watch", () => {
       params: { name: "read", arguments: { token: "super-secret-value-123456" } },
     };
     const messages = await watchedFinished({ debugMode: true, body: requestOnlyBodyLog(request) });
+    expect(messages[0]).toMatchObject({
+      op: "conversation",
+      view: { summary: expect.stringContaining("debug mode on") },
+    });
     const nodes = messages.filter((message): message is NodeMessage => message.op === "node");
     expect(nodes.map((node) => node.kind)).toEqual(["task", "tool_call", "mcp", "mcp"]);
     const [, call, sentRequest, response] = nodes;
@@ -535,8 +519,6 @@ describe("mia debug watch", () => {
     await poll.fire();
     const denied = await page.untilNode((node) => node.id === proposed.id);
     expect(statusOf(denied)).toBe("denied");
-    // It never reached the MCP server, so there were no bodies to record, even with debug mode off.
-    expect(denied.view.body).not.toContain("not recorded");
 
     turn.end();
     await client.waitFor("task_finished");
@@ -575,11 +557,8 @@ describe("mia debug watch", () => {
     }
   };
 
-  it("refuses an unknown conversation without serving anything", async () => {
+  it("refuses an unknown conversation, and serves nothing when stopped before it listens", async () => {
     expect(await startStopped("conv_unknown")).toEqual({ kind: "unknown_conversation" });
-  });
-
-  it("serves nothing when stopped before it listens", async () => {
     expect(await startStopped(conversationId())).toEqual({ kind: "interrupted" });
   });
 

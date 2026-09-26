@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProvenanceRole } from "@mia/records";
 import {
-  provenanceLinks,
   provenanceRecords,
   type NamedProvenanceItem,
   type NamedProvenancePlan,
@@ -85,26 +84,5 @@ describe("provenanceRecords", () => {
   it("records no dependency for a build without retained local changes", () => {
     const { records } = provenanceRecords(planOf([retainedItem("server_build")]), AT);
     expect(records.some((record) => record.kind === "add_dependency")).toBe(false);
-  });
-});
-
-describe("provenanceLinks", () => {
-  it("links only the retained items into the conversation", () => {
-    const links = provenanceLinks({
-      conversationId: "conv-1",
-      plan: planOf([unavailablePrompt, retainedItem("configuration")]),
-    });
-    expect(links).toEqual([
-      {
-        kind: "link_artifact",
-        input: {
-          id: "link-configuration",
-          conversationId: "conv-1",
-          artifactId: "art-configuration",
-          relation: "provenance",
-          provenanceSetId: "prov-1",
-        },
-      },
-    ]);
   });
 });

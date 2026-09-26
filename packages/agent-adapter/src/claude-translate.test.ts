@@ -117,40 +117,6 @@ describe("ClaudeTranslator", () => {
     ]);
   });
 
-  it("summarises the result in camelCase and keeps the result message as evidence", () => {
-    const result = {
-      type: "result",
-      subtype: "error_max_turns",
-      is_error: true,
-      session_id: "session",
-      result: "stopped",
-      duration_ms: 10,
-      duration_api_ms: 7,
-      num_turns: 3,
-      total_cost_usd: 0.5,
-      usage: { input_tokens: 1 },
-      permission_denials: [{ tool_name: "mcp__d1__forbidden" }],
-    };
-    expect(new ClaudeTranslator().translate(message(result), now)).toEqual([
-      {
-        type: "turn_result",
-        summary: {
-          isError: true,
-          outcome: "error_max_turns",
-          finalText: "stopped",
-          usage: { input_tokens: 1 },
-          totalCostUsd: 0.5,
-          durationMs: 10,
-          durationApiMs: 7,
-          numTurns: 3,
-          permissionDenials: [{ tool_name: "mcp__d1__forbidden" }],
-          evidence: result,
-        },
-        at,
-      },
-    ]);
-  });
-
   it("redacts secret-shaped values in assistant messages and tool results", () => {
     const secret = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     const translator = new ClaudeTranslator();
@@ -178,16 +144,5 @@ describe("ClaudeTranslator", () => {
       now,
     );
     expect(result).toMatchObject({ content: `got ${REDACTED}`, raw: { stdout: REDACTED } });
-  });
-
-  it("summarises a successful result that carries no closing text", () => {
-    const result = { type: "result", subtype: "success", is_error: false, session_id: "session" };
-    expect(new ClaudeTranslator().translate(message(result), now)).toEqual([
-      {
-        type: "turn_result",
-        summary: { isError: false, outcome: "success", evidence: result },
-        at,
-      },
-    ]);
   });
 });

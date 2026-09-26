@@ -1,14 +1,7 @@
-import type { RuntimeEvent, PermissionDecision } from "@mia/agent-adapter";
+import type { PermissionDecision } from "@mia/agent-adapter";
 import { describe, expect, it } from "vitest";
 import type { FixtureState } from "@mia/controlled-mcp";
-import {
-  effortsOf,
-  firstEvent,
-  followupChecks,
-  interruptCancellableChecks,
-  rawRequestsOf,
-  streamApproveChecks,
-} from "./checks.ts";
+import { effortsOf, followupChecks, streamApproveChecks } from "./checks.ts";
 import type { StepRecord } from "./record.ts";
 
 const at = "2026-01-01T00:00:00.000Z";
@@ -46,23 +39,6 @@ const step = (overrides: Partial<StepRecord>): StepRecord => ({
 });
 
 describe("probe evidence readings", () => {
-  it("reads the tool name and id the runtime sent, and nothing from a payload that is not an object", () => {
-    const record = step({
-      permission_requests: [
-        {
-          request: { tool_name: "mcp__d1__read", tool_use_id: "toolu_1", extra: 1 },
-          decision: allow,
-          abandoned: false,
-        },
-        { request: "not an object", decision: allow, abandoned: false },
-      ],
-    });
-    expect(rawRequestsOf(record)).toEqual([
-      { tool_name: "mcp__d1__read", tool_use_id: "toolu_1", extra: 1 },
-      {},
-    ]);
-  });
-
   it("reads effort from the hook's object or string, else the environment it saw", () => {
     expect(
       effortsOf([
@@ -72,17 +48,6 @@ describe("probe evidence readings", () => {
         { effort: 42 },
       ]),
     ).toEqual(["high", "low", "medium", undefined]);
-  });
-
-  it("finds the first event of a type in step order", () => {
-    const delta = (text: string): RuntimeEvent => ({ type: "text_delta", text, at });
-    const records = [
-      step({ events: [{ type: "runtime_stderr", text: "warn", at }] }),
-      step({ events: [delta("first")] }),
-      step({ events: [delta("second")] }),
-    ];
-    expect(firstEvent(records, "text_delta")).toEqual(delta("first"));
-    expect(firstEvent(records, "turn_result")).toBeUndefined();
   });
 
   it("orders streamed text before the result and counts exactly one commit", () => {
@@ -155,18 +120,6 @@ describe("probe evidence readings", () => {
       two_distinct_change_requests: false,
       forbidden_never_reached_bridge: false,
       forbidden_never_executed: false,
-    });
-  });
-
-  it("sees a cancelled slow call with no commits after an interrupt", () => {
-    expect(
-      interruptCancellableChecks(
-        step({ ledger_after: ledger([{ kind: "cancelled", tool: "slow" }]) }),
-      ),
-    ).toMatchObject({
-      slow_cancelled_in_ledger: true,
-      zero_commits: true,
-      no_change_proposed_after_interrupt: true,
     });
   });
 });

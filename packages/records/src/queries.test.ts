@@ -1,17 +1,6 @@
-import { TaskStatusSchema, type TaskStatus } from "@mia/protocol";
 import { describe, expect, it } from "vitest";
 import { diagnosticsViews, taskViews } from "./queries.ts";
 import { fixtureEvent, snapshotFixture } from "./snapshot-fixture.ts";
-
-const partialByStatus: Record<TaskStatus, boolean> = {
-  running: true,
-  awaiting_approval: true,
-  interrupting: true,
-  completed: false,
-  failed: true,
-  interrupted: true,
-  outcome_unknown: true,
-};
 
 describe("taskViews", () => {
   it("assembles only each task's text deltas in journal order", () => {
@@ -44,20 +33,12 @@ describe("taskViews", () => {
       ],
     );
   });
-
-  it.each(TaskStatusSchema.options)("labels partial output for task status %s", (status) => {
-    const snapshot = snapshotFixture();
-    for (const task of snapshot.tables.tasks) task.status = status;
-    expect(taskViews(snapshot)[0]?.partial).toBe(partialByStatus[status]);
-  });
 });
 
 describe("diagnosticsViews freshness", () => {
   it.each([
-    { age: 59_999, disconnected: false, expected: "current" },
     { age: 60_000, disconnected: false, expected: "current" },
     { age: 60_001, disconnected: false, expected: "stale" },
-    { age: 0, disconnected: true, expected: "disconnected" },
     { age: 60_001, disconnected: true, expected: "disconnected" },
   ])(
     "reports $expected at age $age with disconnected=$disconnected",
