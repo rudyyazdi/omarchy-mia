@@ -14,13 +14,13 @@ import {
   type Catalog,
   type ProvenanceContent,
 } from "@mia/records";
-import { watchAddress } from "./watch-address.ts";
 import { messagesAfter, NOTHING_SENT, sseRecord, type Sent } from "./watch-feed.ts";
 
 /**
- * The live web view of one conversation (issue #6): an HTTP server, on the address it is told, that serves a
- * static page under a secret path and streams the conversation to it over Server-Sent Events. Each page polls the
- * catalog on its own, so it only ever shows committed rows, and it works the same on a finished conversation.
+ * The live web view of one conversation (issue #6): an HTTP server on every IPv4 address, so another device on the
+ * network can open it while debugging, that serves a static page and streams the conversation to it over
+ * Server-Sent Events. Each page polls the catalog on its own, so it only ever shows
+ * committed rows, and it works the same on a finished conversation.
  */
 
 /** When to poll again, and how long to wait on a page in two cases; each rejects once `signal` aborts. */
@@ -55,35 +55,22 @@ export type WatchEnd =
 export interface Watch {
   /** The page's address on this machine. */
   url: string;
-  /** Its addresses for another device on the network, if the watch listens on one. */
+  /** Its addresses for another device, one per non-loopback address in `WatchOptions.addresses`. */
   networkUrls: readonly string[];
   /** Settles once the server is closed and no page reads the catalog any more, so the caller may close it. */
   ended: Promise<WatchEnd>;
 }
 
-/**
- * `interrupted`: the signal aborted before the server listened, so nothing was served. `cannot_listen`: `host` is
- * not one of this machine's addresses, or is taken.
- */
+/** `interrupted`: the signal aborted before the server listened, so nothing was served. */
 export type WatchStart =
-  | { kind: "watching"; watch: Watch }
-  | { kind: "unknown_conversation" }
-  | { kind: "interrupted" }
-  | { kind: "cannot_listen"; reason: string };
+  { kind: "watching"; watch: Watch } | { kind: "unknown_conversation" } | { kind: "interrupted" };
 
 export interface WatchOptions {
   /** Opened read-only by the caller, which closes it once `ended` settles. */
   catalog: Catalog;
   conversationId: string;
-  /** The IP address to listen on (see `isListenableHost`); the port is any free one. */
-  host: string;
-  /** This machine's addresses (`machineAddresses`), where a wildcard `host` is reached. */
+  /** This machine's IPv4 addresses, read when the watch starts: the only ones a page may name it by. */
   addresses: readonly string[];
-  /**
-   * The secret every path starts with, since any device that reaches `host` could otherwise read the conversation.
-   * The page's own references are relative, so they carry it without knowing it.
-   */
-  token: string;
   /** Aborting it stops the watch (Ctrl-C): each page is told, and `ended` settles as interrupted. */
   signal: AbortSignal;
   timers: WatchTimers;
@@ -106,7 +93,6 @@ const HEADERS = {
     "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   "x-content-type-options": "nosniff",
   "cache-control": "no-store",
-  "referrer-policy": "no-referrer",
 };
 
 /** What a page shows once the watch stopped; a closed page is never told, since it is gone. */
@@ -148,9 +134,9 @@ const readBodyLogServers = async (
   }
 };
 
-/** Starts watching `conversationId`, or reports why it did not (see `WatchStart`). */
+/** Starts watching `conversationId`, or reports that the catalog has no such conversation or that it was stopped. */
 export const startWatch = async (options: WatchOptions): Promise<WatchStart> => {
-  const { catalog, conversationId, timers, token } = options;
+  const { catalog, conversationId, timers } = options;
   if (!findConversation(catalog, conversationId)) return { kind: "unknown_conversation" };
   const bodyLogServers = await readBodyLogServers(catalog, conversationId, options.signal);
   if (options.signal.aborted) return { kind: "interrupted" };
@@ -235,7 +221,7 @@ export const startWatch = async (options: WatchOptions): Promise<WatchStart> => 
     streams.add(done);
   };
 
-  /** Set once listening (see `watchAddress`). */
+  /** Set once listening: only this machine's own names, so a site that rebinds its domain to it gets nothing. */
   let ownHosts: ReadonlySet<string> = new Set();
   /**
    * A request from this machine's own name, and not from another site open in the same browser: such a site
@@ -253,28 +239,25 @@ export const startWatch = async (options: WatchOptions): Promise<WatchStart> => 
       res.writeHead(403, HEADERS).end("forbidden\n");
       return;
     }
-    const requested = new URL(req.url ?? "/", "http://localhost").pathname;
-    const prefix = `/${token}`;
-    const path = requested.startsWith(`${prefix}/`) ? requested.slice(prefix.length) : null;
+    const path = new URL(req.url ?? "/", "http://localhost").pathname;
     const asset = assets.find((candidate) => candidate.path === path);
     if (req.method !== "GET") res.writeHead(405, HEADERS).end();
     else if (path === "/events") stream(res);
     else if (asset) res.writeHead(200, { ...HEADERS, "content-type": asset.type }).end(asset.body);
     else res.writeHead(404, HEADERS).end();
   });
-  server.listen(0, options.host);
-  try {
-    await once(server, "listening");
-  } catch (error) {
-    return { kind: "cannot_listen", reason: errorMessage(error) };
-  }
+  server.listen(0, "0.0.0.0");
+  await once(server, "listening");
   const address = server.address();
   if (typeof address !== "object" || !address) {
     server.close();
     throw new Error("the watch server is not listening on a TCP port");
   }
-  const reached = watchAddress({ ...options, port: address.port });
-  ownHosts = reached.ownHosts;
+  const origin = (host: string) => `http://${host}:${address.port}`;
+  const network = options.addresses.filter((host) => !host.startsWith("127."));
+  ownHosts = new Set(
+    ["127.0.0.1", "localhost", ...network].map((host) => `${host}:${address.port}`),
+  );
   const interrupted = () => halt({ kind: "interrupted" });
   if (options.signal.aborted) interrupted();
   else options.signal.addEventListener("abort", interrupted, { once: true });
@@ -296,9 +279,12 @@ export const startWatch = async (options: WatchOptions): Promise<WatchStart> => 
     await closing;
     return outcome ?? { kind: "interrupted" };
   })();
-  const url = (origin: string) => `${origin}/${token}/`;
   return {
     kind: "watching",
-    watch: { url: url(reached.local), networkUrls: reached.network.map(url), ended },
+    watch: {
+      url: `${origin("127.0.0.1")}/`,
+      networkUrls: network.map((host) => `${origin(host)}/`),
+      ended,
+    },
   };
 };

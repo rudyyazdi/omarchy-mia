@@ -49,12 +49,12 @@ subcommand("verify <export-directory>").action((directory: string) =>
   process.exit(commands.verifyExportDirectory(directory) ? 0 : 1),
 );
 subcommand("reconcile").action(() => commands.reconcile(options()));
-commands
-  .withWatchOptions(subcommand("watch <conversation-id>"))
-  .action(async (id: string, flags: commands.WatchFlags) => {
+subcommand("watch <conversation-id>")
+  .option("--no-open", "print the page's address without opening a browser")
+  .action(async (id: string, { open }: { open: boolean }) => {
     const interrupt = new AbortController();
     process.once("SIGINT", () => interrupt.abort());
-    process.exitCode = await commands.watch(options(), id, { ...flags, signal: interrupt.signal });
+    process.exitCode = await commands.watch(options(), id, { open, signal: interrupt.signal });
   });
 
 await program.parseAsync();
