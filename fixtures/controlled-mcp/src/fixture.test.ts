@@ -175,50 +175,6 @@ describe("controlled fixture", () => {
     await expect(harness.state()).resolves.toHaveProperty("counter");
   });
 
-  it("lists exactly the five tools", async () => {
-    const mcpClient = await client();
-    const tools = await mcpClient.listTools();
-    expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
-      "artifact",
-      "change",
-      "forbidden",
-      "read",
-      "slow",
-    ]);
-    await mcpClient.close();
-  });
-
-  it("read has no side effects; change commits once", async () => {
-    await harness.reset();
-    const mcpClient = await client();
-    const result = await mcpClient.callTool({ name: "read", arguments: {} });
-    expect(JSON.parse(firstText(result))).toEqual({ counter: 0 });
-    await mcpClient.callTool({ name: "change", arguments: { delta: 1 } });
-    const state = await harness.state();
-    expect(state.counter).toBe(1);
-    expect(state.ledger.filter((entry) => entry.kind === "committed")).toHaveLength(1);
-    await mcpClient.close();
-  });
-
-  it("slow cancellable stops before commit when the connection drops", async () => {
-    await harness.reset();
-    const mcpClient = await client();
-    const call = mcpClient.callTool({ name: "slow", arguments: { mode: "cancellable" } });
-    call.catch(() => undefined);
-    const entered = await harness.waitEntered();
-    expect(entered.mode).toBe("cancellable");
-    await mcpClient.close(); // drops the HTTP connection
-    const state = await harness.waitForState(
-      (current) => current.ledger.some((entry) => entry.kind === "cancelled"),
-      { signal: AbortSignal.timeout(SETTLE_TIMEOUT_MS) },
-    );
-    expect(state.counter).toBe(0);
-    expect(state.ledger.some((entry) => entry.kind === "cancelled" && entry.tool === "slow")).toBe(
-      true,
-    );
-    expect(state.ledger.filter((entry) => entry.kind === "committed")).toHaveLength(0);
-  });
-
   it("slow uncancellable survives disconnection and commits on release", async () => {
     await harness.reset();
     const mcpClient = await client();

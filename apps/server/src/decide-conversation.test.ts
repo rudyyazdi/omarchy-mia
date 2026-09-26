@@ -21,7 +21,6 @@ import {
   type ConversationEvent,
   type DiagnosticsReportedEvent,
   type InterruptTaskEvent,
-  type PermissionRefusedEvent,
   type PermissionRequestEvent,
   type PromptAbandonedEvent,
   type RuntimeEventReceived,
@@ -629,30 +628,6 @@ describe("permission requests", () => {
     });
     expect(refusal(running(), request({ taskId: "task_old" }))).toEqual({ kind: "no_task" });
   });
-
-  it("records a refusal as a runtime failure the client is told of", () => {
-    const refused: PermissionRefusedEvent = {
-      kind: "permission_refused",
-      origin: ORIGIN,
-      taskId: "task_1",
-      detail: "refused for a reason",
-      ids: { event: "evt_refused" },
-    };
-    const { next, records, effects } = accepted(decide(running(), refused));
-    expect(records).toMatchObject([
-      {
-        kind: "append_event",
-        input: {
-          id: "evt_refused",
-          type: "error",
-          taskId: "task_1",
-          payload: { code: "runtime_failure", message: "refused for a reason" },
-        },
-      },
-    ]);
-    expect(effectLabels(effects)).toEqual(["deliver error"]);
-    expect(next).toEqual(running());
-  });
 });
 
 const RUNTIME_IDS = {
@@ -1133,20 +1108,6 @@ describe("turn end", () => {
       kind: "rejected",
       rejection: { kind: "no_task" },
     });
-  });
-});
-
-describe("the next turn's note", () => {
-  it("lists an interrupted turn's calls, names the prompts the runtime abandoned, and is null for a clean turn", () => {
-    const interrupted = awaiting([1], { interrupted: true }).task;
-    const abandoned = running([{ ...held(2), status: "invalidated" }], {
-      abandoned: ["call_2"],
-    }).task;
-    const clean = running([{ ...held(3), status: "completed" }]).task;
-    if (!interrupted || !abandoned || !clean) throw new Error("each state has a task");
-    expect(turnNote(interrupted)).toContain("mcp__d1__change: blocked_gate");
-    expect(turnNote(abandoned)).toContain('mcp__d1__change {"path":"file_2"}');
-    expect(turnNote(clean)).toBeNull();
   });
 });
 

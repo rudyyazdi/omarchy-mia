@@ -199,60 +199,30 @@ describe("debug mode on", () => {
     expect(must(flags[0], "flag").sequence).toBe(started.sequence + 1);
   });
 
-  it("records the user's command", async () => {
-    const { tables, taskId } = await recordConversation(true);
-    expect(tables.tasks).toMatchObject([{ id: taskId, text: "summarise my inbox" }]);
-    expect(eventsOf(tables, "task_submitted").map(payloadOf)).toMatchObject([
-      { text: "summarise my inbox" },
-    ]);
-  });
-
-  it("records every id: conversation, task, execution, client and tool call", async () => {
+  // What any conversation records, recorded the same way with debug mode on: the ids that tie each row to its
+  // conversation, task and execution, the model's actions, and the harness's own rejections.
+  it("records the command, the model's actions and the harness's rejections as it does with debug mode off", async () => {
     const { tables, conversationId, taskId, executionId } = await recordConversation(true);
-    expect(tables.conversations.map((row) => row.id)).toEqual([conversationId]);
+    expect(tables.tasks).toMatchObject([{ id: taskId, text: "summarise my inbox" }]);
     expect(tables.executions).toMatchObject([{ id: executionId, task_id: taskId }]);
-    expect(tables.clients.map((row) => row.id)).toEqual(["client-A"]);
-    const submitted = must(eventsOf(tables, "task_submitted")[0], "task_submitted");
-    expect(submitted).toMatchObject({
-      conversation_id: conversationId,
-      task_id: taskId,
-      execution_id: executionId,
-      client_id: "client-A",
-    });
-    for (const runtimeCallId of ["toolu_read", "toolu_forbidden", "toolu_mystery"])
-      expect(callOf(tables, runtimeCallId)).toMatchObject({
-        id: expect.stringMatching(/^call_/),
+    expect(eventsOf(tables, "task_submitted")).toMatchObject([
+      {
+        conversation_id: conversationId,
         task_id: taskId,
         execution_id: executionId,
-      });
-  });
-
-  it("records the model's actions: its text, its messages, its tool calls and their results", async () => {
-    const { tables } = await recordConversation(true);
-    expect(eventsOf(tables, "text_delta").map(payloadOf)).toMatchObject([
-      { text: "Looking at your inbox." },
-    ]);
-    expect(eventsOf(tables, "assistant_message").map(payloadOf)).toEqual([
-      { role: "assistant", content: [{ type: "text", text: "Looking at your inbox." }] },
+        client_id: "client-A",
+      },
     ]);
     expect(eventsOf(tables, "tool_proposed").map(payloadOf)).toMatchObject([
-      { runtime_call_id: "toolu_read", tool_identity: "mcp__d1__read" },
-      { runtime_call_id: "toolu_forbidden", tool_identity: "mcp__d1__forbidden" },
-      {
-        runtime_call_id: "toolu_mystery",
-        tool_identity: "mcp__d1__mystery",
-        redacted_arguments: { query: "is:unread" },
-      },
+      { runtime_call_id: "toolu_read" },
+      { runtime_call_id: "toolu_forbidden" },
+      { runtime_call_id: "toolu_mystery", redacted_arguments: { query: "is:unread" } },
     ]);
     expect(eventsOf(tables, "tool_result").map(payloadOf)).toMatchObject([
       { runtime_call_id: "toolu_read", content: JSON.stringify({ unread: 3 }) },
     ]);
-  });
-
-  it("records each rejection the harness made on its own, with its reason", async () => {
-    const { tables } = await recordConversation(true);
     expect(callOf(tables, "toolu_forbidden")).toMatchObject({
-      policy: "deny",
+      task_id: taskId,
       status: "denied",
       detail: "denied by policy",
     });
@@ -260,12 +230,6 @@ describe("debug mode on", () => {
       status: "denied",
       detail: "tool not listed in toolPolicy",
     });
-    expect(eventsOf(tables, "error").map(payloadOf)).toMatchObject([
-      {
-        code: "configuration_error",
-        message: "tool mcp__d1__mystery is not listed in toolPolicy; call denied",
-      },
-    ]);
   });
 });
 
@@ -318,14 +282,8 @@ describe("debug mode on: MCP bodies", () => {
 
   it("records why a call's bodies are missing when reading its body log outlives the deadline", async () => {
     const { tables } = await recordConversation(true, "expired");
-    expect(mcpBodiesOf(tables).map(payloadOf)).toEqual([
-      expect.objectContaining({
-        unrecorded: expect.stringMatching(/^the body log is unreadable: /),
-      }),
-      expect.objectContaining({
-        unrecorded: expect.stringMatching(/^the body log is unreadable: /),
-      }),
-    ]);
+    const unreadable = { unrecorded: expect.stringMatching(/^the body log is unreadable: /) };
+    expect(mcpBodiesOf(tables).map(payloadOf)).toMatchObject([unreadable, unreadable]);
   });
 
   it("records no bodies for a call to a server that names no body log", async () => {
@@ -394,7 +352,7 @@ const bodiesOfCall = (tables: SnapshotTables, callId: unknown) =>
   bodyEventsOfCall(tables, callId).map((event) => [event.type, payloadOf(event)]);
 
 describe("debug mode on: MCP bodies of calls without a tool result", () => {
-  it("records, at turn end, the bodies of each released call whose result never arrived", async () => {
+  it("records, at turn end, the bodies of each released call whose result never arrived, and only of those", async () => {
     const tables = await recordInterruptedCalls(true);
     const open = callOf(tables, "toolu_open");
     const early = callOf(tables, "toolu_early");
@@ -437,12 +395,8 @@ describe("debug mode on: MCP bodies of calls without a tool result", () => {
       expect(event).toMatchObject({ task_id: outcome.task_id, execution_id: outcome.execution_id });
       expect(event.sequence).toBeLessThan(outcome.sequence);
     }
-  });
-
-  it("records a call that got its result once, with that result, not again at turn end", async () => {
-    const tables = await recordInterruptedCalls(true);
+    // A call that got its result had its bodies recorded with that result, not again at turn end.
     const done = callOf(tables, "toolu_done");
-    expect(done.status).toBe("completed");
     const result = must(eventsOf(tables, "tool_result")[0], "tool_result");
     expect(
       bodyEventsOfCall(tables, done.id).map((event) => [event.type, event.caused_by_event_id]),

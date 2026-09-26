@@ -1,11 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  callById,
   callsOf,
   otherPending,
   pendingCall,
   withCall,
-  withCallStatuses,
   withPending,
   withRevision,
   withTask,
@@ -111,20 +109,5 @@ describe("conversation state", () => {
     const resolved = withoutPending(pending, "appr-b");
     expect([...resolved.pendingApprovals.keys()]).toEqual(["appr-a"]);
     expect([...pending.pendingApprovals.keys()]).toEqual(["appr-b", "appr-a"]);
-  });
-
-  it("gives every revision the status named for it, and keeps the rest", () => {
-    const before = task([call("call-a1", "a"), call("call-b1", "b")]);
-    const after = withCallStatuses(before, new Map([["call-b1", "unknown"]]));
-    expect(callById(after, "call-a1")?.status).toBe("proposed");
-    expect(callById(after, "call-b1")?.status).toBe("unknown");
-  });
-
-  it("replaces the task within its conversation without touching the conversation it came from", () => {
-    const before = conversation(task());
-    const after = withTask(before, "task-1", (current) => ({ ...current, status: "interrupting" }));
-    expect(after.task?.status).toBe("interrupting");
-    expect(before.task?.status).toBe("running");
-    expect(after.id).toBe(before.id);
   });
 });

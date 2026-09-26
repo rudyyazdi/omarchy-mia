@@ -45,16 +45,6 @@ const planIn = (
 };
 
 describe("launch plan", () => {
-  it("gives a held approval prompt the 24h budget under both runtime timeouts (capability record F4)", () => {
-    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-launch-"));
-    const plan = planIn(directory.path, {});
-    const day = String(24 * 60 * 60 * 1000);
-    expect(String(MCP_TOOL_TIMEOUT_MS)).toBe(day);
-    expect(plan.env.MCP_TOOL_TIMEOUT).toBe(day);
-    // 2.1.278 aborts a call with no response or progress for 300s regardless of MCP_TOOL_TIMEOUT.
-    expect(plan.env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT).toBe(day);
-  });
-
   it("inherits only the environment it is given, with the profile's env on top", () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-launch-"));
     const plan = planIn(
@@ -68,6 +58,9 @@ describe("launch plan", () => {
       MCP_TOOL_TIMEOUT: String(MCP_TOOL_TIMEOUT_MS),
       CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: String(MCP_TOOL_TIMEOUT_MS),
     });
+    // A held approval prompt gets the 24h budget under both runtime timeouts (capability record F4): 2.1.278
+    // aborts a call with no response or progress for 300s regardless of MCP_TOOL_TIMEOUT.
+    expect(MCP_TOOL_TIMEOUT_MS).toBe(24 * 60 * 60 * 1000);
   });
 
   it("writes nothing itself, and plans the directories and files its arguments refer to", () => {

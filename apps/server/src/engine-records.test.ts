@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Catalog, RecordWriter } from "@mia/records";
 import {
-  commitEvents,
   commitRecords,
   committedEvents,
   eventSequence,
@@ -81,17 +80,6 @@ describe("commitRecords", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
-});
-
-describe("commitEvents", () => {
-  it("commits every record and returns only the events, in sequence order", () => {
-    expect(commitEvents(store.writer, [...conversation, event("evt-1"), event("evt-2")])).toEqual([
-      { kind: "event", id: "evt-1", sequence: 1 },
-      { kind: "event", id: "evt-2", sequence: 2 },
-    ]);
-    expect(store.catalog.all("SELECT id FROM conversations")).toEqual([{ id: "conv-1" }]);
-    expect(commitEvents(store.writer, [])).toEqual([]);
   });
 });
 

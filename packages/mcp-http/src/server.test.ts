@@ -193,16 +193,18 @@ describe("MCP HTTP server", () => {
     ]);
   });
 
-  it("writes the close line of a request that shutdown cuts off", async () => {
+  it("aborts connectionClosed and writes the close line of a request that shutdown cuts off", async () => {
     const logFile = join(dir, "requests.jsonl");
     const { handle: server, entered } = await startHoldingServer({ logFile });
 
     const call = post(server.url, holdRequest).then((response) => response.text());
     const refused = expect(call).rejects.toThrow();
     const ctx = await entered;
+    const aborted = once(ctx.connectionClosed, "abort");
     await server.close();
     handle = undefined;
     await refused;
+    await aborted;
 
     const entries: unknown[] = await readLogEntries(logFile);
     expect(entries).toContainEqual(
@@ -260,8 +262,9 @@ describe("MCP HTTP server", () => {
     expect(contexts).toEqual([]);
   });
 
-  it("refuses a POST body over 4 MiB and keeps serving", async () => {
-    const { handle: server, contexts } = await startHoldingServer();
+  it("refuses a POST body over 4 MiB, logging it as a refused request, and keeps serving", async () => {
+    const logFile = join(dir, "requests.jsonl");
+    const { handle: server, contexts } = await startHoldingServer({ logFile });
 
     const atLimit = await post(server.url, initializeRequestOfSize(bodyLimitBytes));
     expect(atLimit.status).toBe(200);
@@ -289,20 +292,8 @@ describe("MCP HTTP server", () => {
     const recovered = await initialize(server.url);
     expect(recovered.status).toBe(200);
     await recovered.body?.cancel();
-  });
-
-  it("logs an oversized body as a refused request, not a handler error", async () => {
-    const logFile = join(dir, "requests.jsonl");
-    handle = await startMcpHttpServer({
-      logFile,
-      createServer: () => new McpServer({ name: "mcp-http-test", version: "0" }),
-    });
-
-    const oversized = await post(handle.url, initializeRequestOfSize(bodyLimitBytes + 1));
-    expect(oversized.status).toBe(413);
-    await oversized.body?.cancel();
     // The log is an append stream: it is complete only once close has flushed it.
-    await handle.close();
+    await server.close();
     handle = undefined;
 
     const entries: unknown[] = await readLogEntries(logFile);
@@ -344,21 +335,6 @@ describe("MCP HTTP server", () => {
 
     expect(contexts).toHaveLength(1);
     expect(contexts[0]?.connectionClosed.aborted).toBe(false);
-  });
-
-  it("closes with a request still open", async () => {
-    const { handle: server, entered } = await startHoldingServer();
-
-    const call = post(server.url, holdRequest).then((response) => response.text());
-    const refused = expect(call).rejects.toThrow();
-    const ctx = await entered;
-    const aborted = once(ctx.connectionClosed, "abort");
-
-    await server.close();
-    handle = undefined;
-
-    await refused;
-    await aborted;
   });
 });
 

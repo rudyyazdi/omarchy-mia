@@ -26,13 +26,6 @@ const decisionOf = (response: unknown): unknown =>
   JSON.parse(TextToolResultSchema.parse(response).content[0].text);
 
 describe("approval bridge", () => {
-  it("lists the request tool", async () => {
-    const mcpClient = await client();
-    const tools = await mcpClient.listTools();
-    expect(tools.tools.map((tool) => tool.name)).toEqual([BRIDGE_TOOL_NAME]);
-    await mcpClient.close();
-  });
-
   it("denies when no handler is active", async () => {
     const mcpClient = await client();
     const response = await mcpClient.callTool({

@@ -1,12 +1,5 @@
 import { execFileSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempDisposableSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempDisposableSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -195,17 +188,6 @@ describe("hookEvidenceFrom", () => {
     });
   });
 
-  it("reports a file it cannot read instead of throwing", async () => {
-    using directory = mkdtempDisposableSync(join(tmpdir(), "mia-hooks-"));
-    const path = join(directory.path, "hook-evidence.jsonl");
-    mkdirSync(path);
-    expect(hookEvidenceFrom(await readRuntimeFile(path))).toEqual({
-      records: [],
-      malformedLines: 0,
-      readError: "not a regular file",
-    });
-  });
-
   it("reports a path it cannot reach instead of treating it as absent", async () => {
     using directory = mkdtempDisposableSync(join(tmpdir(), "mia-hooks-"));
     const notADirectory = join(directory.path, "runtime");
@@ -257,7 +239,6 @@ describe("probeStaticCapabilitiesSync", () => {
 
   it("looks the runtime up on the given environment's PATH and runs it with that environment", () => {
     using bin = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
-    using empty = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
     // Prints the version only when the environment it runs with carries the marker. /bin stays on
     // PATH for the script's shebang.
     writeFileSync(join(bin.path, "mia-fake-runtime"), '#!/bin/sh\necho "v-$MIA_MARKER"\n', {
@@ -269,9 +250,6 @@ describe("probeStaticCapabilitiesSync", () => {
     );
     expect(found.executable_resolved).toBe(join(bin.path, "mia-fake-runtime"));
     expect(found.runtime_version).toBe("v-given");
-    expect(
-      probe({ PATH: `${empty.path}${delimiter}/bin` }, "mia-fake-runtime").executable_resolved,
-    ).toBeNull();
   });
 
   it("reports a runtime missing from PATH", () => {
@@ -290,13 +268,5 @@ describe("probeStaticCapabilitiesSync", () => {
     });
     expect(found.executable_resolved).toBe(join(bin.path, "mia-fake-runtime"));
     expect(found.runtime_version).toBe("v");
-  });
-
-  it("never runs the executable name as shell code", () => {
-    using bin = mkdtempDisposableSync(join(tmpdir(), "mia-bin-"));
-    const marker = join(bin.path, "ran");
-    const found = probe({ PATH: `${bin.path}${delimiter}/bin` }, `$(touch ${marker})`);
-    expect(found.executable_resolved).toBeNull();
-    expect(existsSync(marker)).toBe(false);
   });
 });

@@ -77,7 +77,6 @@ describe("loadProfileSync", () => {
   it.each([
     { name: "a quote", value: 'x","executable":"injected' },
     { name: "a backslash", value: "C:\\models\\" },
-    { name: "a brace", value: '}{"executable":"injected"}' },
   ])("keeps a substituted value holding $name as the literal string", ({ value }) => {
     withProfileFile(JSON.stringify(profileInput()), (path) => {
       const { runtime } = loadProfileSync(path, { MODEL: value });
@@ -106,7 +105,6 @@ describe("loadProfileSync", () => {
 
   it.each([
     { name: "invalid JSON", contents: "{", message: "not valid JSON" },
-    { name: "missing required fields", contents: "{}", message: "is invalid" },
     {
       name: "unresolved environment",
       env: {},

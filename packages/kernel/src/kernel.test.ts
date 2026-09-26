@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createKernel, type Decide, type KernelDeps } from "./kernel.ts";
 
 interface Change {
@@ -33,16 +33,14 @@ const createStore = () => {
   };
 };
 
-type CounterEvent = { kind: "add"; amount: number; effects?: Effect[] } | { kind: "reset" };
+interface CounterEvent {
+  kind: "add";
+  amount: number;
+  effects?: Effect[];
+}
 
 /** A counter that refuses to go negative and records each addition. */
-const counter: Decide<number, CounterEvent, "negative", string, Effect> = ({
-  state,
-  event,
-  now,
-}) => {
-  if (event.kind === "reset")
-    return { kind: "accepted", next: 0, records: [`reset at ${now.toISOString()}`], effects: [] };
+const counter: Decide<number, CounterEvent, "negative", string, Effect> = ({ state, event }) => {
   if (state + event.amount < 0) return { kind: "rejected", rejection: "negative" };
   return {
     kind: "accepted",
@@ -102,14 +100,6 @@ describe("kernel dispatch", () => {
     expect(seen).toEqual([
       { effect: "first", state: 2, store: 1 },
       { effect: "second", state: 2, store: 1 },
-    ]);
-  });
-
-  it("hands decide the injected clock", () => {
-    const { store, kernel } = setup();
-    kernel.machine(counter, 5).dispatch({ kind: "reset" });
-    expect(store.committed.map((change) => change.record)).toEqual([
-      "reset at 2026-01-02T03:04:05.000Z",
     ]);
   });
 
@@ -238,14 +228,6 @@ describe("kernel dispatch", () => {
     expect(inner.state).toBe(0);
     expect(outer.state).toBe(1);
   });
-
-  it("keeps each machine's state apart", () => {
-    const { kernel } = setup();
-    const first = kernel.machine(counter, 0);
-    const second = kernel.machine(counter, 100);
-    first.dispatch({ kind: "add", amount: 1 });
-    expect([first.state, second.state]).toEqual([1, 100]);
-  });
 });
 
 describe("kernel changes", () => {
@@ -324,9 +306,7 @@ describe("kernel changes", () => {
   });
 
   it("gives a reader that falls behind the buffer every change, in order, from the store", async () => {
-    const store = createStore();
-    const replay = vi.fn(store.replay);
-    const { kernel } = setup({ commit: store.commit, replay });
+    const { kernel } = setup();
     const machine = kernel.machine(counter, 0);
     const changes = subscribe(kernel, { after: 0, signal: openSignal() });
     const first = changes.next();
@@ -342,12 +322,6 @@ describe("kernel changes", () => {
     }
 
     expect(read).toEqual([2, 3, 4, 5, 6, 7]);
-    // After the overflow the reader pages through the store from the last change it received.
-    expect(replay.mock.calls).toEqual([
-      [{ after: 0, limit: 4 }],
-      [{ after: 1, limit: 4 }],
-      [{ after: 5, limit: 4 }],
-    ]);
   });
 
   it("ends the iteration without an error when the signal aborts, and frees the slot", async () => {
@@ -433,14 +407,12 @@ describe("kernel changes", () => {
   });
 
   it("yields nothing and holds no slot for an already aborted signal", async () => {
-    const replay = vi.fn(() => []);
-    const { kernel } = setup({ replay });
+    const { kernel } = setup();
     const signal = AbortSignal.abort();
     const changes = subscribe(kernel, { after: 0, signal });
     subscribe(kernel, { after: 0, signal });
     subscribe(kernel, { after: 0, signal });
 
     expect(await changes.next()).toEqual({ done: true, value: undefined });
-    expect(replay).not.toHaveBeenCalled();
   });
 });

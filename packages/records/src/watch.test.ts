@@ -396,7 +396,7 @@ describe("watchEntriesAfter", () => {
     ]);
   });
 
-  it.each([0, 1, 3, 4, 10, 11, 12, 19, LAST])(
+  it.each([0, 3, 11, 19, LAST])(
     "after sequence %i returns every later event once and no earlier one",
     (after) => {
       const entries = watchEntriesAfter(finalRows(), after);

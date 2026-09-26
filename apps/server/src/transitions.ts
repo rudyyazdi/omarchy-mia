@@ -69,10 +69,8 @@ const isHeld = (status: ToolCallStatus): boolean =>
  * the user decided, a new binding superseded it, or the runtime abandoned its prompt. Any status other than
  * awaiting_approval (an interruption in progress, a finished task) is left as it is.
  */
-export const taskStatusAfterResolving = (
-  status: TaskStatus,
-  remainingPending: number,
-): TaskStatus => (remainingPending === 0 && status === "awaiting_approval" ? "running" : status);
+const taskStatusAfterResolving = (status: TaskStatus, remainingPending: number): TaskStatus =>
+  remainingPending === 0 && status === "awaiting_approval" ? "running" : status;
 
 const detailFor = (status: ToolCallStatus): string | undefined =>
   match(status)

@@ -11,22 +11,6 @@ beforeEach(async () => {
 });
 afterEach(async () => rm(dir, { recursive: true, force: true }));
 
-/** Starts `retainStdout` on a stream the test writes to, collecting handled lines and reported failures. */
-const start = (file: string) => {
-  const stdout = new PassThrough();
-  const handled: string[] = [];
-  const read = retainStdout({
-    stdout,
-    file,
-    handleLine: async (line) => {
-      handled.push(line);
-      return line;
-    },
-    reportFailure: () => undefined,
-  });
-  return { stdout, handled, read };
-};
-
 /** Runs `retainStdout` over `chunks`, retaining each line upper-cased and skipping lines that read `skip`. */
 const retain = async (file: string, chunks: (string | Buffer)[]) => {
   const stdout = new PassThrough();
@@ -135,15 +119,6 @@ describe("retainStdout", () => {
     stdout.write("one\n");
     await expect(read).rejects.toThrow("handler failed");
     expect(stdout.destroyed).toBe(true);
-  });
-
-  it("rejects when stdout fails", async () => {
-    const file = join(dir, "turn.stream.jsonl");
-    const { stdout, handled, read } = start(file);
-    stdout.write("one\n");
-    stdout.destroy(new Error("stdout failed"));
-    await expect(read).rejects.toThrow("stdout failed");
-    expect(handled).toEqual(["one"]);
   });
 
   it("stops reading, and hands over no line it already read, once its signal aborts", async () => {

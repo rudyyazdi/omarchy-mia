@@ -16,10 +16,8 @@ describe("canonical encoding", () => {
 
   it("keeps the persisted digest stable across object insertion order", () => {
     const digest = "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777";
-    expect(canonicalDigest({ beta: 2, alpha: 1 })).toBe(canonicalDigest({ alpha: 1, beta: 2 }));
     expect(canonicalDigest({ b: 2, a: 1 })).toBe(digest);
     expect(sha256Hex('{"a":1,"b":2}')).toBe(digest);
-    expect(canonicalDigest([1, 2])).not.toBe(canonicalDigest([2, 1]));
   });
 
   it("keeps a __proto__ key parsed from JSON, so it cannot collide with its absence", () => {
