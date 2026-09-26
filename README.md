@@ -49,6 +49,7 @@ npm run client -- --config path/to/profile.json      # terminal client: text in,
 npm run mia -- debug conversations --state <stateDirectory>
 npm run mia -- debug conversation <id> --state <stateDirectory>
 npm run mia -- debug watch <id> --state <stateDirectory>        # live web view on 127.0.0.1; --no-open prints the address only
+npm run mia -- debug watch <id> --host <LAN IP> --no-open --state <stateDirectory>   # open the printed address (it holds a secret) on another device
 npm run mia -- debug export <id> --output ./exports/<id> --state <stateDirectory>
 npm run mia -- debug verify ./exports/<id>
 ```

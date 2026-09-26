@@ -26,6 +26,8 @@ import { ScriptedRuntime } from "./scripted-runtime.ts";
 
 /** When the rows these tests write say they were recorded. */
 const AT = "2026-01-01T00:00:00.000Z";
+/** The secret path the watches these tests start serve under. */
+const TOKEN = "test-token";
 
 let runtime: ScriptedRuntime;
 let ts: TestServer;
@@ -188,6 +190,8 @@ const watchConversation = async (
     const started = await startWatch({
       catalog,
       conversationId,
+      host: "127.0.0.1",
+      token: TOKEN,
       signal: interrupt.signal,
       timers,
     });
@@ -232,9 +236,9 @@ const statusOf = (message: NodeMessage): string | undefined =>
 /** A request with headers the test chooses (Host, Origin, Sec-Fetch-Site), which fetch does not allow. */
 const get = (url: string, headers: Record<string, string>) => {
   const { promise, resolve, reject } = Promise.withResolvers<number>();
-  const target = new URL(url);
+  const target = new URL("events", url);
   const sent = request(
-    { hostname: target.hostname, port: target.port, path: "/events", headers },
+    { hostname: target.hostname, port: target.port, path: target.pathname, headers },
     (res) => {
       res.resume();
       resolve(res.statusCode ?? 0);
@@ -538,14 +542,18 @@ describe("mia debug watch", () => {
     expect(message).toMatchObject({ op: "node", kind: "task" });
   });
 
-  /** Starts a watch of `id` whose signal has already aborted, as a Ctrl-C before it listens. */
-  const startStopped = async (id: string) => {
+  /** Starts a watch of `id` on `host`, whose signal has already aborted when `stopped`, as a Ctrl-C before it listens. */
+  const startOnce = async (id: string, options: { host: string; stopped: boolean }) => {
     const catalog = ts.catalog();
+    const interrupt = new AbortController();
+    if (options.stopped) interrupt.abort();
     try {
       return await startWatch({
         catalog,
         conversationId: id,
-        signal: AbortSignal.abort(),
+        host: options.host,
+        token: TOKEN,
+        signal: interrupt.signal,
         timers: {
           nextPoll: manualTimer().wait,
           reconnectGrace: manualTimer().wait,
@@ -558,8 +566,15 @@ describe("mia debug watch", () => {
   };
 
   it("refuses an unknown conversation, and serves nothing when stopped before it listens", async () => {
-    expect(await startStopped("conv_unknown")).toEqual({ kind: "unknown_conversation" });
-    expect(await startStopped(conversationId())).toEqual({ kind: "interrupted" });
+    const stopped = { host: "127.0.0.1", stopped: true };
+    expect(await startOnce("conv_unknown", stopped)).toEqual({ kind: "unknown_conversation" });
+    expect(await startOnce(conversationId(), stopped)).toEqual({ kind: "interrupted" });
+  });
+
+  it("reports an address this machine does not have instead of failing", async () => {
+    // 192.0.2.0/24 is reserved for documentation, so no machine running the tests holds it.
+    const started = await startOnce(conversationId(), { host: "192.0.2.1", stopped: false });
+    expect(started).toMatchObject({ kind: "cannot_listen", reason: expect.any(String) });
   });
 
   it("tells the page and closes the server on Ctrl-C", async () => {
@@ -592,13 +607,16 @@ describe("mia debug watch", () => {
     expect(await watch.ended).toEqual({ kind: "interrupted" });
   });
 
-  it("serves the page only under its own loopback address", async () => {
+  it("serves the page only under its own loopback address and secret path", async () => {
     const { watch } = await watchConversation(conversationId());
+    expect(watch.url).toMatch(new RegExp(`^http://127\\.0\\.0\\.1:\\d+/${TOKEN}/$`));
     const page = await fetch(watch.url);
     expect(page.status).toBe(200);
     expect(page.headers.get("content-security-policy")).toContain("default-src 'self'");
     expect(await page.text()).toContain('<script type="module" src="watch.js">');
     expect((await fetch(new URL("missing", watch.url))).status).toBe(404);
+    expect((await fetch(new URL("/events", watch.url))).status).toBe(404);
+    expect((await fetch(new URL("/wrong-token/events", watch.url))).status).toBe(404);
     const host = new URL(watch.url).host;
     expect(await get(watch.url, { host: "rebound.example" })).toBe(403);
     expect(await get(watch.url, { host, "sec-fetch-site": "cross-site" })).toBe(403);

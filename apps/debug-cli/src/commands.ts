@@ -1,4 +1,6 @@
+import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
+import type { Command } from "commander";
 import { match } from "ts-pattern";
 import { errorMessage } from "@mia/protocol";
 import {
@@ -23,6 +25,7 @@ import {
   formatUnresolved,
 } from "./format.ts";
 import { openInBrowser } from "./browser.ts";
+import { isListenableHost, LOOPBACK_HOST } from "./watch-address.ts";
 import { startWatch, WATCH_TIMERS } from "./watch-server.ts";
 
 /**
@@ -116,20 +119,42 @@ export const verifyExportDirectory = (exportDirectory: string): boolean => {
 export const reconcile = (options: GlobalOptions): void =>
   withCatalog(options, (catalog) => out(reconcileObjectsSync(catalog)));
 
+/** What `mia debug watch`'s own options parse to. */
+export interface WatchFlags {
+  open: boolean;
+  host: string;
+}
+
+/** Adds `mia debug watch`'s own options (`WatchFlags`) to its command. */
+export const withWatchOptions = (command: Command): Command =>
+  command
+    .option("--no-open", "print the page's address without opening a browser")
+    .option(
+      "--host <address>",
+      "IP address to listen on; this machine's LAN address lets another device open the page",
+      LOOPBACK_HOST,
+    );
+
 /**
- * `mia debug watch`: serves the live view of one conversation until `signal` aborts (Ctrl-C) or the page closes,
- * and returns the exit code. It opens the page in a browser unless `open` is false (`--no-open`).
+ * `mia debug watch`: serves the live view of one conversation on `host` until `signal` aborts (Ctrl-C) or the page
+ * closes, and returns the exit code. It opens the page in a browser unless `open` is false (`--no-open`).
  */
 export const watch = async (
   options: GlobalOptions,
   conversationId: string,
-  run: { open: boolean; signal: AbortSignal },
+  run: WatchFlags & { signal: AbortSignal },
 ): Promise<number> => {
+  if (!isListenableHost(run.host)) {
+    console.error(`mia debug watch: --host takes one IP address, not ${run.host}`);
+    return 2;
+  }
   const catalog = Catalog.openSync(resolve(options.state), { readonly: true });
   try {
     const started = await startWatch({
       catalog,
       conversationId,
+      host: run.host,
+      token: randomBytes(18).toString("base64url"),
       signal: run.signal,
       timers: WATCH_TIMERS,
     });
@@ -142,6 +167,10 @@ export const watch = async (
         .with({ kind: "interrupted" }, () => {
           out(`stopped watching ${conversationId}`);
           return 0;
+        })
+        .with({ kind: "cannot_listen" }, ({ reason }) => {
+          console.error(`mia debug watch: cannot listen on ${run.host}: ${reason}`);
+          return 1;
         })
         .exhaustive();
     out(`watching ${conversationId} at ${started.watch.url} (Ctrl-C to stop)`);
