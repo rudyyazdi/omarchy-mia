@@ -17,8 +17,9 @@ import {
 import { messagesAfter, NOTHING_SENT, sseRecord, type Sent } from "./watch-feed.ts";
 
 /**
- * The live web view of one conversation (issue #6): a loopback HTTP server that serves a static page and streams
- * the conversation to it over Server-Sent Events. Each page polls the catalog on its own, so it only ever shows
+ * The live web view of one conversation (issue #6): an HTTP server on every IPv4 address, so another device on the
+ * network can open it while debugging, that serves a static page and streams the conversation to it over
+ * Server-Sent Events. Each page polls the catalog on its own, so it only ever shows
  * committed rows, and it works the same on a finished conversation.
  */
 
@@ -52,7 +53,10 @@ export type WatchEnd =
   { kind: "interrupted" } | { kind: "page_closed" } | { kind: "failed"; error: unknown };
 
 export interface Watch {
+  /** The page's address on this machine. */
   url: string;
+  /** Its addresses for another device, one per non-loopback address in `WatchOptions.addresses`. */
+  networkUrls: readonly string[];
   /** Settles once the server is closed and no page reads the catalog any more, so the caller may close it. */
   ended: Promise<WatchEnd>;
 }
@@ -65,6 +69,8 @@ export interface WatchOptions {
   /** Opened read-only by the caller, which closes it once `ended` settles. */
   catalog: Catalog;
   conversationId: string;
+  /** This machine's IPv4 addresses, read when the watch starts: the only ones a page may name it by. */
+  addresses: readonly string[];
   /** Aborting it stops the watch (Ctrl-C): each page is told, and `ended` settles as interrupted. */
   signal: AbortSignal;
   timers: WatchTimers;
@@ -215,7 +221,7 @@ export const startWatch = async (options: WatchOptions): Promise<WatchStart> => 
     streams.add(done);
   };
 
-  /** Set once listening: only this machine's own names, so a site that rebinds its domain to 127.0.0.1 gets nothing. */
+  /** Set once listening: only this machine's own names, so a site that rebinds its domain to it gets nothing. */
   let ownHosts: ReadonlySet<string> = new Set();
   /**
    * A request from this machine's own name, and not from another site open in the same browser: such a site
@@ -240,14 +246,18 @@ export const startWatch = async (options: WatchOptions): Promise<WatchStart> => 
     else if (asset) res.writeHead(200, { ...HEADERS, "content-type": asset.type }).end(asset.body);
     else res.writeHead(404, HEADERS).end();
   });
-  server.listen(0, "127.0.0.1");
+  server.listen(0, "0.0.0.0");
   await once(server, "listening");
   const address = server.address();
   if (typeof address !== "object" || !address) {
     server.close();
     throw new Error("the watch server is not listening on a TCP port");
   }
-  ownHosts = new Set([`127.0.0.1:${address.port}`, `localhost:${address.port}`]);
+  const origin = (host: string) => `http://${host}:${address.port}`;
+  const network = options.addresses.filter((host) => !host.startsWith("127."));
+  ownHosts = new Set(
+    ["127.0.0.1", "localhost", ...network].map((host) => `${host}:${address.port}`),
+  );
   const interrupted = () => halt({ kind: "interrupted" });
   if (options.signal.aborted) interrupted();
   else options.signal.addEventListener("abort", interrupted, { once: true });
@@ -269,5 +279,12 @@ export const startWatch = async (options: WatchOptions): Promise<WatchStart> => 
     await closing;
     return outcome ?? { kind: "interrupted" };
   })();
-  return { kind: "watching", watch: { url: `http://127.0.0.1:${address.port}/`, ended } };
+  return {
+    kind: "watching",
+    watch: {
+      url: `${origin("127.0.0.1")}/`,
+      networkUrls: network.map((host) => `${origin(host)}/`),
+      ended,
+    },
+  };
 };

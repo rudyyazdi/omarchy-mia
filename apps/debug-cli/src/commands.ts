@@ -1,3 +1,4 @@
+import { networkInterfaces } from "node:os";
 import { resolve } from "node:path";
 import { match } from "ts-pattern";
 import { errorMessage } from "@mia/protocol";
@@ -130,6 +131,10 @@ export const watch = async (
     const started = await startWatch({
       catalog,
       conversationId,
+      addresses: Object.values(networkInterfaces())
+        .flatMap((infos) => infos ?? [])
+        .filter((info) => info.family === "IPv4")
+        .map((info) => info.address),
       signal: run.signal,
       timers: WATCH_TIMERS,
     });
@@ -145,6 +150,7 @@ export const watch = async (
         })
         .exhaustive();
     out(`watching ${conversationId} at ${started.watch.url} (Ctrl-C to stop)`);
+    for (const url of started.watch.networkUrls) out(`  from another device: ${url}`);
     if (run.open) openInBrowser(started.watch.url);
     return match(await started.watch.ended)
       .with({ kind: "interrupted" }, () => {

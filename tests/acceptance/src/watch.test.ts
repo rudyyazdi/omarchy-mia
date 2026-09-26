@@ -188,6 +188,8 @@ const watchConversation = async (
     const started = await startWatch({
       catalog,
       conversationId,
+      // 192.0.2.0/24 is reserved for documentation: a network address no test machine holds.
+      addresses: ["127.0.0.1", "192.0.2.7"],
       signal: interrupt.signal,
       timers,
     });
@@ -545,6 +547,7 @@ describe("mia debug watch", () => {
       return await startWatch({
         catalog,
         conversationId: id,
+        addresses: [],
         signal: AbortSignal.abort(),
         timers: {
           nextPoll: manualTimer().wait,
@@ -592,7 +595,7 @@ describe("mia debug watch", () => {
     expect(await watch.ended).toEqual({ kind: "interrupted" });
   });
 
-  it("serves the page only under its own loopback address", async () => {
+  it("serves the page only under this machine's own addresses", async () => {
     const { watch } = await watchConversation(conversationId());
     const page = await fetch(watch.url);
     expect(page.status).toBe(200);
@@ -600,6 +603,10 @@ describe("mia debug watch", () => {
     expect(await page.text()).toContain('<script type="module" src="watch.js">');
     expect((await fetch(new URL("missing", watch.url))).status).toBe(404);
     const host = new URL(watch.url).host;
+    const port = new URL(watch.url).port;
+    expect(watch.networkUrls).toEqual([`http://192.0.2.7:${port}/`]);
+    expect(await get(watch.url, { host: `192.0.2.7:${port}` })).toBe(200);
+    expect(await get(watch.url, { host: `192.0.2.8:${port}` })).toBe(403);
     expect(await get(watch.url, { host: "rebound.example" })).toBe(403);
     expect(await get(watch.url, { host, "sec-fetch-site": "cross-site" })).toBe(403);
     expect(await get(watch.url, { host, origin: "http://elsewhere.example" })).toBe(403);
